@@ -42,10 +42,20 @@
   let lastMouseWorld = { x: 0, y: 0 };
 
   let isNodeEditMode = false;
-  let selectedVertexIndex = -1;
+  let selectedVertex = null;
   let isDraggingVertex = false;
-  let dragVertexOriginalPts = [];
-  let hoveredEdgeIndex = -1;
+  let dragVertexOriginalData = null;
+  let hoveredEdge = null;
+
+  function isSameVertex(a, b) {
+    if (!a || !b) return false;
+    return a.isHole === b.isHole && a.holeIndex === b.holeIndex && a.pointIndex === b.pointIndex;
+  }
+
+  function isSameEdge(a, b) {
+    if (!a || !b) return false;
+    return a.isHole === b.isHole && a.holeIndex === b.holeIndex && a.edgeIndex === b.edgeIndex;
+  }
 
   function resize() {
     const dpr = window.devicePixelRatio || 1;
@@ -104,7 +114,7 @@
     redoStack.push(deepCloneShapes(shapes));
     shapes = undoStack.pop();
     selectedIds.clear();
-    selectedVertexIndex = -1;
+    selectedVertex = null;
     updateToolbar();
     renderLayers();
     render();
@@ -115,7 +125,7 @@
     undoStack.push(deepCloneShapes(shapes));
     shapes = redoStack.pop();
     selectedIds.clear();
-    selectedVertexIndex = -1;
+    selectedVertex = null;
     updateToolbar();
     renderLayers();
     render();
@@ -145,7 +155,16 @@
       const s = shapes[i];
       if (!s.visible || s.locked) continue;
       const wp = worldPointsOf(s);
-      if (pointInPolygonOrOnEdge(pt, wp)) return s;
+      if (!pointInPolygonOrOnEdge(pt, wp)) continue;
+      const holes = worldHolesOf(s);
+      let inHole = false;
+      for (const hole of holes) {
+        if (pointInPolygonOrOnEdge(pt, hole)) {
+          inHole = true;
+          break;
+        }
+      }
+      if (!inHole) return s;
     }
     return null;
   }
@@ -198,11 +217,20 @@
     if (selectedIds.size !== 1) return null;
     const s = getShapeById([...selectedIds][0]);
     if (!s) return null;
-    const pts = worldPointsOf(s);
     const hitRadius = 7 / viewport.scale;
+    const pts = worldPointsOf(s);
     for (let i = 0; i < pts.length; i++) {
       if (dist({x: wx, y: wy}, pts[i]) < hitRadius) {
-        return { shape: s, index: i };
+        return { shape: s, isHole: false, holeIndex: -1, pointIndex: i };
+      }
+    }
+    const holes = worldHolesOf(s);
+    for (let h = 0; h < holes.length; h++) {
+      const hole = holes[h];
+      for (let i = 0; i < hole.length; i++) {
+        if (dist({x: wx, y: wy}, hole[i]) < hitRadius) {
+          return { shape: s, isHole: true, holeIndex: h, pointIndex: i };
+        }
       }
     }
     return null;
@@ -212,13 +240,24 @@
     if (selectedIds.size !== 1) return null;
     const s = getShapeById([...selectedIds][0]);
     if (!s) return null;
-    const pts = worldPointsOf(s);
     const hitRadius = 6 / viewport.scale;
+    const pts = worldPointsOf(s);
     for (let i = 0; i < pts.length; i++) {
       const a = pts[i];
       const b = pts[(i + 1) % pts.length];
       if (pointToSegmentDist({x: wx, y: wy}, a, b) < hitRadius) {
-        return { shape: s, index: i };
+        return { shape: s, isHole: false, holeIndex: -1, edgeIndex: i };
+      }
+    }
+    const holes = worldHolesOf(s);
+    for (let h = 0; h < holes.length; h++) {
+      const hole = holes[h];
+      for (let i = 0; i < hole.length; i++) {
+        const a = hole[i];
+        const b = hole[(i + 1) % hole.length];
+        if (pointToSegmentDist({x: wx, y: wy}, a, b) < hitRadius) {
+          return { shape: s, isHole: true, holeIndex: h, edgeIndex: i };
+        }
       }
     }
     return null;
@@ -270,11 +309,11 @@
 
     if (isNodeEditMode && selectedIds.size === 1) {
       const s = getSelectedShapes()[0];
-      if (s) renderNodeEdit(s);
+      if (s && s.visible && !s.locked) renderNodeEdit(s);
     } else {
       for (const id of selectedIds) {
         const s = getShapeById(id);
-        if (s) renderSelection(s);
+        if (s && s.visible && !s.locked) renderSelection(s);
       }
     }
 
@@ -353,54 +392,90 @@
     zoomEl.textContent = Math.round(viewport.scale * 100) + '%';
   }
 
-  function renderNodeEdit(s) {
-    const pts = worldPointsOf(s);
+  function renderPolyline(points, color) {
     ctx.save();
-    ctx.strokeStyle = '#1a73e8';
+    ctx.strokeStyle = color;
     ctx.lineWidth = 2 / viewport.scale;
     ctx.beginPath();
-    if (pts.length > 0) {
-      ctx.moveTo(pts[0].x, pts[0].y);
-      for (let i = 1; i < pts.length; i++) {
-        ctx.lineTo(pts[i].x, pts[i].y);
+    if (points.length > 0) {
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) {
+        ctx.lineTo(points[i].x, points[i].y);
       }
       ctx.closePath();
     }
     ctx.stroke();
     ctx.restore();
+  }
 
+  function renderVertexSquare(p, isSelected, vertexSize) {
+    ctx.save();
+    if (isSelected) {
+      ctx.fillStyle = '#ff6b35';
+      ctx.strokeStyle = '#fff';
+    } else {
+      ctx.fillStyle = '#fff';
+      ctx.strokeStyle = '#1a73e8';
+    }
+    ctx.lineWidth = 2 / viewport.scale;
+    ctx.fillRect(p.x - vertexSize / 2, p.y - vertexSize / 2, vertexSize, vertexSize);
+    ctx.strokeRect(p.x - vertexSize / 2, p.y - vertexSize / 2, vertexSize, vertexSize);
+    ctx.restore();
+  }
+
+  function renderEdgeMidpoint(a, b) {
+    const midX = (a.x + b.x) / 2;
+    const midY = (a.y + b.y) / 2;
+    ctx.save();
+    ctx.fillStyle = '#4d9fff';
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.5 / viewport.scale;
+    const size = 6 / viewport.scale;
+    ctx.beginPath();
+    ctx.arc(midX, midY, size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function renderNodeEdit(s) {
+    const pts = worldPointsOf(s);
+    const holes = worldHolesOf(s);
     const vertexSize = 8 / viewport.scale;
-    for (let i = 0; i < pts.length; i++) {
-      const p = pts[i];
-      ctx.save();
-      if (i === selectedVertexIndex) {
-        ctx.fillStyle = '#ff6b35';
-        ctx.strokeStyle = '#fff';
-      } else {
-        ctx.fillStyle = '#fff';
-        ctx.strokeStyle = '#1a73e8';
-      }
-      ctx.lineWidth = 2 / viewport.scale;
-      ctx.fillRect(p.x - vertexSize / 2, p.y - vertexSize / 2, vertexSize, vertexSize);
-      ctx.strokeRect(p.x - vertexSize / 2, p.y - vertexSize / 2, vertexSize, vertexSize);
-      ctx.restore();
+
+    renderPolyline(pts, '#1a73e8');
+    for (const hole of holes) {
+      renderPolyline(hole, '#1a73e8');
     }
 
-    if (hoveredEdgeIndex >= 0 && hoveredEdgeIndex < pts.length && !isDraggingVertex) {
-      const a = pts[hoveredEdgeIndex];
-      const b = pts[(hoveredEdgeIndex + 1) % pts.length];
-      const midX = (a.x + b.x) / 2;
-      const midY = (a.y + b.y) / 2;
-      ctx.save();
-      ctx.fillStyle = '#4d9fff';
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 1.5 / viewport.scale;
-      const size = 6 / viewport.scale;
-      ctx.beginPath();
-      ctx.arc(midX, midY, size, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-      ctx.restore();
+    for (let i = 0; i < pts.length; i++) {
+      const isSel = selectedVertex && !selectedVertex.isHole && selectedVertex.pointIndex === i;
+      renderVertexSquare(pts[i], isSel, vertexSize);
+    }
+
+    for (let h = 0; h < holes.length; h++) {
+      const hole = holes[h];
+      for (let i = 0; i < hole.length; i++) {
+        const isSel = selectedVertex && selectedVertex.isHole && selectedVertex.holeIndex === h && selectedVertex.pointIndex === i;
+        renderVertexSquare(hole[i], isSel, vertexSize);
+      }
+    }
+
+    if (hoveredEdge && !isDraggingVertex) {
+      if (!hoveredEdge.isHole) {
+        if (hoveredEdge.edgeIndex >= 0 && hoveredEdge.edgeIndex < pts.length) {
+          const a = pts[hoveredEdge.edgeIndex];
+          const b = pts[(hoveredEdge.edgeIndex + 1) % pts.length];
+          renderEdgeMidpoint(a, b);
+        }
+      } else {
+        const hole = holes[hoveredEdge.holeIndex];
+        if (hole && hoveredEdge.edgeIndex >= 0 && hoveredEdge.edgeIndex < hole.length) {
+          const a = hole[hoveredEdge.edgeIndex];
+          const b = hole[(hoveredEdge.edgeIndex + 1) % hole.length];
+          renderEdgeMidpoint(a, b);
+        }
+      }
     }
   }
 
@@ -510,6 +585,14 @@
         e.stopPropagation();
         pushHistory();
         s.visible = !s.visible;
+        if (!s.visible && selectedIds.has(s.id)) {
+          selectedIds.delete(s.id);
+          if (selectedIds.size === 0) {
+            isNodeEditMode = false;
+            selectedVertex = null;
+          }
+        }
+        updateToolbar();
         renderLayers();
         render();
       });
@@ -539,7 +622,7 @@
         s.locked = !s.locked;
         if (s.locked && selectedIds.has(s.id)) {
           selectedIds.delete(s.id);
-          selectedVertexIndex = -1;
+          selectedVertex = null;
           isNodeEditMode = false;
         }
         updateToolbar();
@@ -561,7 +644,7 @@
           selectedIds.clear();
           selectedIds.add(s.id);
         }
-        selectedVertexIndex = -1;
+        selectedVertex = null;
         updateToolbar();
         renderLayers();
         render();
@@ -665,15 +748,15 @@
   function toggleNodeEditMode() {
     if (isNodeEditMode) {
       isNodeEditMode = false;
-      selectedVertexIndex = -1;
-      hoveredEdgeIndex = -1;
+      selectedVertex = null;
+      hoveredEdge = null;
     } else {
       if (selectedIds.size === 1) {
         const s = getSelectedShapes()[0];
-        if (s && !s.locked) {
+        if (s && !s.locked && s.visible) {
           isNodeEditMode = true;
-          selectedVertexIndex = -1;
-          hoveredEdgeIndex = -1;
+          selectedVertex = null;
+          hoveredEdge = null;
         }
       }
     }
@@ -722,7 +805,7 @@
 
     selectedIds.clear();
     for (const ns of newShapes) selectedIds.add(ns.id);
-    selectedVertexIndex = -1;
+    selectedVertex = null;
     isNodeEditMode = false;
     updateToolbar();
     renderLayers();
@@ -795,7 +878,7 @@
     polygonPoints = [];
     drawStart = drawEnd = null;
     isNodeEditMode = false;
-    selectedVertexIndex = -1;
+    selectedVertex = null;
     canvas.style.cursor = (tool === 'select') ? 'default' : 'crosshair';
     updateToolbar();
     render();
@@ -854,9 +937,17 @@
       const vHit = hitTestVertex(world.x, world.y);
       if (vHit) {
         pushHistory();
-        selectedVertexIndex = vHit.index;
+        selectedVertex = {
+          isHole: vHit.isHole,
+          holeIndex: vHit.holeIndex,
+          pointIndex: vHit.pointIndex
+        };
         isDraggingVertex = true;
-        dragVertexOriginalPts = worldPointsOf(vHit.shape);
+        dragVertexOriginalData = {
+          shape: vHit.shape,
+          points: worldPointsOf(vHit.shape),
+          holes: worldHolesOf(vHit.shape)
+        };
         return;
       }
     }
@@ -944,10 +1035,10 @@
           marqueeStart = { ...world };
           marqueeEnd = { ...world };
           selectedIds.clear();
-          selectedVertexIndex = -1;
+          selectedVertex = null;
         } else {
           selectedIds.clear();
-          selectedVertexIndex = -1;
+          selectedVertex = null;
         }
         isNodeEditMode = false;
         updateToolbar();
@@ -957,7 +1048,7 @@
     } else if (currentTool === 'select' && isNodeEditMode) {
       const hit = hitTest(world.x, world.y);
       if (!hit) {
-        selectedVertexIndex = -1;
+        selectedVertex = null;
         render();
       }
     }
@@ -977,17 +1068,34 @@
       return;
     }
 
-    if (isDraggingVertex && isNodeEditMode && selectedVertexIndex >= 0 && selectedIds.size === 1) {
-      const s = getSelectedShapes()[0];
+    if (isDraggingVertex && isNodeEditMode && selectedVertex && selectedIds.size === 1 && dragVertexOriginalData) {
+      const s = dragVertexOriginalData.shape;
       if (s) {
-        const orig = dragVertexOriginalPts;
-        const newPts = orig.map((p, i) => {
-          if (i === selectedVertexIndex) {
-            return { x: world.x, y: world.y };
-          }
-          return { ...p };
-        });
-        setShapeWorldPointsAndHoles(s, newPts, worldHolesOf(s));
+        let newPts;
+        let newHoles;
+        if (!selectedVertex.isHole) {
+          newPts = dragVertexOriginalData.points.map((p, i) => {
+            if (i === selectedVertex.pointIndex) {
+              return { x: world.x, y: world.y };
+            }
+            return { ...p };
+          });
+          newHoles = dragVertexOriginalData.holes;
+        } else {
+          newPts = dragVertexOriginalData.points;
+          newHoles = dragVertexOriginalData.holes.map((hole, hi) => {
+            if (hi === selectedVertex.holeIndex) {
+              return hole.map((p, i) => {
+                if (i === selectedVertex.pointIndex) {
+                  return { x: world.x, y: world.y };
+                }
+                return { ...p };
+              });
+            }
+            return hole;
+          });
+        }
+        setShapeWorldPointsAndHoles(s, newPts, newHoles);
         render();
         return;
       }
@@ -1084,14 +1192,18 @@
       const vHit = hitTestVertex(world.x, world.y);
       if (vHit) {
         canvas.style.cursor = 'move';
-        hoveredEdgeIndex = -1;
+        hoveredEdge = null;
       } else {
         const eHit = hitTestEdge(world.x, world.y);
         if (eHit) {
-          hoveredEdgeIndex = eHit.index;
+          hoveredEdge = {
+            isHole: eHit.isHole,
+            holeIndex: eHit.holeIndex,
+            edgeIndex: eHit.edgeIndex
+          };
           canvas.style.cursor = 'copy';
         } else {
-          hoveredEdgeIndex = -1;
+          hoveredEdge = null;
           canvas.style.cursor = 'default';
         }
       }
@@ -1123,7 +1235,7 @@
 
     if (isDraggingVertex) {
       isDraggingVertex = false;
-      dragVertexOriginalPts = [];
+      dragVertexOriginalData = null;
       return;
     }
 
@@ -1219,17 +1331,28 @@
 
     if (isNodeEditMode && selectedIds.size === 1) {
       const s = getSelectedShapes()[0];
-      if (!s || s.locked) return;
+      if (!s || s.locked || !s.visible) return;
       const eHit = hitTestEdge(world.x, world.y);
       if (eHit) {
         pushHistory();
-        const pts = worldPointsOf(s).map(p => ({ ...p }));
-        const a = pts[eHit.index];
-        const b = pts[(eHit.index + 1) % pts.length];
-        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-        pts.splice(eHit.index + 1, 0, mid);
-        setShapeWorldPointsAndHoles(s, pts, worldHolesOf(s));
-        selectedVertexIndex = eHit.index + 1;
+        if (!eHit.isHole) {
+          const pts = worldPointsOf(s).map(p => ({ ...p }));
+          const a = pts[eHit.edgeIndex];
+          const b = pts[(eHit.edgeIndex + 1) % pts.length];
+          const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+          pts.splice(eHit.edgeIndex + 1, 0, mid);
+          setShapeWorldPointsAndHoles(s, pts, worldHolesOf(s));
+          selectedVertex = { isHole: false, holeIndex: -1, pointIndex: eHit.edgeIndex + 1 };
+        } else {
+          const holes = worldHolesOf(s).map(h => h.map(p => ({ ...p })));
+          const hole = holes[eHit.holeIndex];
+          const a = hole[eHit.edgeIndex];
+          const b = hole[(eHit.edgeIndex + 1) % hole.length];
+          const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+          hole.splice(eHit.edgeIndex + 1, 0, mid);
+          setShapeWorldPointsAndHoles(s, worldPointsOf(s), holes);
+          selectedVertex = { isHole: true, holeIndex: eHit.holeIndex, pointIndex: eHit.edgeIndex + 1 };
+        }
         render();
       }
     }
@@ -1272,25 +1395,45 @@
         if (!s.locked && s.visible) selectedIds.add(s.id);
       }
       isNodeEditMode = false;
-      selectedVertexIndex = -1;
+      selectedVertex = null;
       updateToolbar();
       renderLayers();
       render();
       return;
     }
     if (e.key === 'Delete' || e.key === 'Backspace') {
-      if (isNodeEditMode && selectedIds.size === 1 && selectedVertexIndex >= 0) {
+      if (isNodeEditMode && selectedIds.size === 1 && selectedVertex) {
         const s = getSelectedShapes()[0];
-        if (s && !s.locked) {
-          const pts = worldPointsOf(s);
-          if (pts.length > 3) {
-            pushHistory();
-            const newPts = pts.filter((_, i) => i !== selectedVertexIndex);
-            setShapeWorldPointsAndHoles(s, newPts, worldHolesOf(s));
-            if (selectedVertexIndex >= newPts.length) {
-              selectedVertexIndex = newPts.length - 1;
+        if (s && !s.locked && s.visible) {
+          if (!selectedVertex.isHole) {
+            const pts = worldPointsOf(s);
+            if (pts.length > 3) {
+              pushHistory();
+              let newIdx = selectedVertex.pointIndex;
+              const newPts = pts.filter((_, i) => i !== selectedVertex.pointIndex);
+              if (newIdx >= newPts.length) newIdx = newPts.length - 1;
+              setShapeWorldPointsAndHoles(s, newPts, worldHolesOf(s));
+              selectedVertex = { isHole: false, holeIndex: -1, pointIndex: newIdx };
+              render();
             }
-            render();
+          } else {
+            const holes = worldHolesOf(s);
+            const hole = holes[selectedVertex.holeIndex];
+            if (hole && hole.length > 3) {
+              pushHistory();
+              let newIdx = selectedVertex.pointIndex;
+              const newHoles = holes.map((h, hi) => {
+                if (hi === selectedVertex.holeIndex) {
+                  const nh = h.filter((_, i) => i !== selectedVertex.pointIndex);
+                  if (newIdx >= nh.length) newIdx = nh.length - 1;
+                  return nh;
+                }
+                return h;
+              });
+              setShapeWorldPointsAndHoles(s, worldPointsOf(s), newHoles);
+              selectedVertex = { isHole: true, holeIndex: selectedVertex.holeIndex, pointIndex: newIdx };
+              render();
+            }
           }
         }
         e.preventDefault();
@@ -1300,7 +1443,7 @@
         pushHistory();
         shapes = shapes.filter(s => !selectedIds.has(s.id));
         selectedIds.clear();
-        selectedVertexIndex = -1;
+        selectedVertex = null;
         isNodeEditMode = false;
         updateToolbar();
         renderLayers();
@@ -1312,7 +1455,7 @@
       polygonPoints = [];
       isDrawing = false;
       selectedIds.clear();
-      selectedVertexIndex = -1;
+      selectedVertex = null;
       isNodeEditMode = false;
       setTool('select');
       renderLayers();
@@ -1362,7 +1505,12 @@
     const pentagon = createShape(ensureCCW(pentagonPts), 'hsla(120, 60%, 70%, 0.4)');
     pentagon.name = 'Pentagon';
 
-    shapes.push(rect, circle, pentagon);
+    const outerRect = ensureCCW(rectToPolygon(-50, 130, 200, 150));
+    const innerHole = ensureCW(rectToPolygon(10, 170, 80, 70));
+    const rectWithHole = createShape(outerRect, 'hsla(280, 60%, 60%, 0.5)', [innerHole]);
+    rectWithHole.name = 'Donut Rect';
+
+    shapes.push(rect, circle, pentagon, rectWithHole);
     renderLayers();
     render();
   }
