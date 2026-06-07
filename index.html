@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Vector Boolean Editor</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div id="toolbar">
+  <button id="tool-select" class="tool-btn active" title="Select (V)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M4 2l15 7-6 2-2 6z"/></svg>
+  </button>
+  <button id="tool-rect" class="tool-btn" title="Rectangle (R)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="currentColor" stroke-width="2" d="M4 5h16v14H4z"/></svg>
+  </button>
+  <button id="tool-circle" class="tool-btn" title="Circle (C)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+  </button>
+  <button id="tool-polygon" class="tool-btn" title="Polygon (P)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="currentColor" stroke-width="2" d="M12 3l8 6-3 9H7l-3-9z"/></svg>
+  </button>
+  <div class="sep"></div>
+  <button id="op-union" class="op-btn" disabled title="Union">
+    <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="9" cy="12" r="6" fill="currentColor" opacity="0.5"/><circle cx="15" cy="12" r="6" fill="currentColor" opacity="0.5"/></svg>
+    <span>Union</span>
+  </button>
+  <button id="op-subtract" class="op-btn" disabled title="Subtract">
+    <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="9" cy="12" r="7" fill="currentColor"/><circle cx="15" cy="12" r="5" fill="#fff"/></svg>
+    <span>Subtract</span>
+  </button>
+  <button id="op-intersect" class="op-btn" disabled title="Intersect">
+    <svg viewBox="0 0 24 24" width="22" height="22"><defs><clipPath id="c"><circle cx="15" cy="12" r="7"/></clipPath></defs><circle cx="9" cy="12" r="7" fill="currentColor" clip-path="url(#c)"/></svg>
+    <span>Intersect</span>
+  </button>
+  <div class="sep"></div>
+  <button id="export-svg" class="tool-btn" title="Export SVG">
+    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M12 3v12l-4-4-1.4 1.4L12 17.8l5.4-5.4L16 10l-4 4V3zM5 19h14v2H5z"/></svg>
+    <span>Export SVG</span>
+  </button>
+</div>
+<canvas id="canvas"></canvas>
+<div id="hud">
+  <span id="zoom-level">100%</span>
+  <span id="cursor-pos">x: 0, y: 0</span>
+</div>
+<script src="geometry.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
