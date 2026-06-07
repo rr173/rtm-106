@@ -317,8 +317,15 @@ function weilerAtherton(subjectRaw, clipRaw, operation) {
     }
   }
 
+  let traversalClipPts;
+  if (operation === 'subtract') {
+    traversalClipPts = ensureCW(clipPts.slice());
+  } else {
+    traversalClipPts = clipPts.slice();
+  }
+
   const sHead = buildPolyList(subjectPts, 'subject')[0];
-  const cHead = buildPolyList(clipPts, 'clip')[0];
+  const cHead = buildPolyList(traversalClipPts, 'clip')[0];
 
   const sArr = listToArray(sHead);
   const allIntersections = [];
@@ -353,14 +360,11 @@ function weilerAtherton(subjectRaw, clipRaw, operation) {
     }
   }
 
+  const clipForInsideTest = clipPts;
   const fullSArr = listToArray(sHead);
   for (const node of fullSArr) {
     if (!node.isIntersection) continue;
-    const midPoint = {
-      x: (node.point.x + node.next.point.x) / 2,
-      y: (node.point.y + node.next.point.y) / 2
-    };
-    const wasInside = pointInPolygonOrOnEdge(node.prev.point, clipPts);
+    const wasInside = pointInPolygonOrOnEdge(node.prev.point, clipForInsideTest);
     node.isEntering = !wasInside;
     node.mate.isEntering = wasInside;
   }
@@ -373,18 +377,17 @@ function weilerAtherton(subjectRaw, clipRaw, operation) {
 
     let useStart = null;
     if (operation === 'union') {
-      if (!start.isEntering) useStart = start;
-    } else if (operation === 'intersect') {
       if (start.isEntering) useStart = start;
-    } else if (operation === 'subtract') {
+    } else if (operation === 'intersect') {
       if (!start.isEntering) useStart = start;
+    } else if (operation === 'subtract') {
+      if (start.isEntering) useStart = start;
     }
 
     if (!useStart) continue;
 
     const polyPoints = [];
     let cur = useStart;
-    let currentList = useStart.poly;
     let safety = 0;
 
     while (safety++ < 5000) {
@@ -394,7 +397,6 @@ function weilerAtherton(subjectRaw, clipRaw, operation) {
 
       if (cur.isIntersection) {
         cur = cur.mate;
-        currentList = cur.poly;
       }
 
       let found = false;
@@ -412,9 +414,9 @@ function weilerAtherton(subjectRaw, clipRaw, operation) {
 
         if (cur.isIntersection && !cur.processed) {
           let correct = false;
-          if (operation === 'union' && !cur.isEntering) correct = true;
-          if (operation === 'intersect' && cur.isEntering) correct = true;
-          if (operation === 'subtract' && !cur.isEntering) correct = true;
+          if (operation === 'union' && cur.isEntering) correct = true;
+          if (operation === 'intersect' && !cur.isEntering) correct = true;
+          if (operation === 'subtract' && cur.isEntering) correct = true;
           if (correct) {
             found = true;
             break;
