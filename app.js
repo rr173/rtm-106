@@ -3,6 +3,8 @@
   const ctx = canvas.getContext('2d');
   const zoomEl = document.getElementById('zoom-level');
   const cursorEl = document.getElementById('cursor-pos');
+  const layersListEl = document.getElementById('layers-list');
+  const nodeEditIndicatorEl = document.getElementById('node-edit-indicator');
 
   const GRID_SIZE = 20;
 
@@ -38,6 +40,12 @@
   let marqueeEnd = null;
 
   let lastMouseWorld = { x: 0, y: 0 };
+
+  let isNodeEditMode = false;
+  let selectedVertexIndex = -1;
+  let isDraggingVertex = false;
+  let dragVertexOriginalPts = [];
+  let hoveredEdgeIndex = -1;
 
   function resize() {
     const dpr = window.devicePixelRatio || 1;
@@ -96,7 +104,9 @@
     redoStack.push(deepCloneShapes(shapes));
     shapes = undoStack.pop();
     selectedIds.clear();
+    selectedVertexIndex = -1;
     updateToolbar();
+    renderLayers();
     render();
   }
 
@@ -105,14 +115,21 @@
     undoStack.push(deepCloneShapes(shapes));
     shapes = redoStack.pop();
     selectedIds.clear();
+    selectedVertexIndex = -1;
     updateToolbar();
+    renderLayers();
     render();
   }
 
+  let shapeCounter = 0;
   function createShape(points, fill, holes) {
+    shapeCounter++;
     return {
       id: nextId++,
+      name: 'Shape ' + shapeCounter,
       type: 'polygon',
+      visible: true,
+      locked: false,
       points: points,
       holes: holes || [],
       fill: fill || randomFillColor(),
@@ -126,6 +143,7 @@
     const pt = { x: wx, y: wy };
     for (let i = shapes.length - 1; i >= 0; i--) {
       const s = shapes[i];
+      if (!s.visible || s.locked) continue;
       const wp = worldPointsOf(s);
       if (pointInPolygonOrOnEdge(pt, wp)) return s;
     }
@@ -176,6 +194,36 @@
     return null;
   }
 
+  function hitTestVertex(wx, wy) {
+    if (selectedIds.size !== 1) return null;
+    const s = getShapeById([...selectedIds][0]);
+    if (!s) return null;
+    const pts = worldPointsOf(s);
+    const hitRadius = 7 / viewport.scale;
+    for (let i = 0; i < pts.length; i++) {
+      if (dist({x: wx, y: wy}, pts[i]) < hitRadius) {
+        return { shape: s, index: i };
+      }
+    }
+    return null;
+  }
+
+  function hitTestEdge(wx, wy) {
+    if (selectedIds.size !== 1) return null;
+    const s = getShapeById([...selectedIds][0]);
+    if (!s) return null;
+    const pts = worldPointsOf(s);
+    const hitRadius = 6 / viewport.scale;
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i];
+      const b = pts[(i + 1) % pts.length];
+      if (pointToSegmentDist({x: wx, y: wy}, a, b) < hitRadius) {
+        return { shape: s, index: i };
+      }
+    }
+    return null;
+  }
+
   function getSelectedShapes() {
     return [...selectedIds].map(id => getShapeById(id)).filter(Boolean);
   }
@@ -215,12 +263,19 @@
     drawGrid();
 
     for (const s of shapes) {
-      renderShape(s);
+      if (s.visible) {
+        renderShape(s);
+      }
     }
 
-    for (const id of selectedIds) {
-      const s = getShapeById(id);
-      if (s) renderSelection(s);
+    if (isNodeEditMode && selectedIds.size === 1) {
+      const s = getSelectedShapes()[0];
+      if (s) renderNodeEdit(s);
+    } else {
+      for (const id of selectedIds) {
+        const s = getShapeById(id);
+        if (s) renderSelection(s);
+      }
     }
 
     if (isDrawing && currentTool === 'rect' && drawStart && drawEnd) {
@@ -298,6 +353,57 @@
     zoomEl.textContent = Math.round(viewport.scale * 100) + '%';
   }
 
+  function renderNodeEdit(s) {
+    const pts = worldPointsOf(s);
+    ctx.save();
+    ctx.strokeStyle = '#1a73e8';
+    ctx.lineWidth = 2 / viewport.scale;
+    ctx.beginPath();
+    if (pts.length > 0) {
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) {
+        ctx.lineTo(pts[i].x, pts[i].y);
+      }
+      ctx.closePath();
+    }
+    ctx.stroke();
+    ctx.restore();
+
+    const vertexSize = 8 / viewport.scale;
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      ctx.save();
+      if (i === selectedVertexIndex) {
+        ctx.fillStyle = '#ff6b35';
+        ctx.strokeStyle = '#fff';
+      } else {
+        ctx.fillStyle = '#fff';
+        ctx.strokeStyle = '#1a73e8';
+      }
+      ctx.lineWidth = 2 / viewport.scale;
+      ctx.fillRect(p.x - vertexSize / 2, p.y - vertexSize / 2, vertexSize, vertexSize);
+      ctx.strokeRect(p.x - vertexSize / 2, p.y - vertexSize / 2, vertexSize, vertexSize);
+      ctx.restore();
+    }
+
+    if (hoveredEdgeIndex >= 0 && hoveredEdgeIndex < pts.length && !isDraggingVertex) {
+      const a = pts[hoveredEdgeIndex];
+      const b = pts[(hoveredEdgeIndex + 1) % pts.length];
+      const midX = (a.x + b.x) / 2;
+      const midY = (a.y + b.y) / 2;
+      ctx.save();
+      ctx.fillStyle = '#4d9fff';
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1.5 / viewport.scale;
+      const size = 6 / viewport.scale;
+      ctx.beginPath();
+      ctx.arc(midX, midY, size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
   function drawGrid() {
     const spacing = GRID_SIZE;
     const w = window.innerWidth, h = window.innerHeight;
@@ -333,6 +439,7 @@
   }
 
   function renderSelection(s) {
+    if (s.locked) return;
     const pts = worldPointsOf(s);
     const bounds = getBounds(pts);
     const ctr = boundsCenter(bounds);
@@ -372,6 +479,170 @@
     ctx.restore();
   }
 
+  function renderLayers() {
+    layersListEl.innerHTML = '';
+
+    if (shapes.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty-layers';
+      empty.textContent = 'No layers yet';
+      layersListEl.appendChild(empty);
+      return;
+    }
+
+    for (let i = shapes.length - 1; i >= 0; i--) {
+      const s = shapes[i];
+      const item = document.createElement('div');
+      item.className = 'layer-item';
+      item.dataset.id = s.id;
+      item.draggable = true;
+
+      if (selectedIds.has(s.id)) item.classList.add('selected');
+      if (s.locked) item.classList.add('locked');
+
+      const visibilityBtn = document.createElement('button');
+      visibilityBtn.className = 'layer-btn ' + (s.visible ? 'active' : 'inactive');
+      visibilityBtn.innerHTML = s.visible
+        ? '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>'
+        : '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78l3.15 3.15.02-.16c0-1.66-1.34-3-3-3l-.17.01z"/></svg>';
+      visibilityBtn.title = s.visible ? 'Hide' : 'Show';
+      visibilityBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        pushHistory();
+        s.visible = !s.visible;
+        renderLayers();
+        render();
+      });
+
+      const colorSwatch = document.createElement('div');
+      colorSwatch.className = 'layer-color';
+      colorSwatch.style.background = s.fill;
+
+      const nameEl = document.createElement('span');
+      nameEl.className = 'layer-name';
+      nameEl.textContent = s.name;
+      nameEl.title = 'Double-click to rename';
+      nameEl.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        startRenameLayer(item, s, nameEl);
+      });
+
+      const lockBtn = document.createElement('button');
+      lockBtn.className = 'layer-btn ' + (s.locked ? 'active' : 'inactive');
+      lockBtn.innerHTML = s.locked
+        ? '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>'
+        : '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6zm9 14H6V10h12v10zm-6-3c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2z"/></svg>';
+      lockBtn.title = s.locked ? 'Unlock' : 'Lock';
+      lockBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        pushHistory();
+        s.locked = !s.locked;
+        if (s.locked && selectedIds.has(s.id)) {
+          selectedIds.delete(s.id);
+          selectedVertexIndex = -1;
+          isNodeEditMode = false;
+        }
+        updateToolbar();
+        renderLayers();
+        render();
+      });
+
+      item.appendChild(visibilityBtn);
+      item.appendChild(colorSwatch);
+      item.appendChild(nameEl);
+      item.appendChild(lockBtn);
+
+      item.addEventListener('click', (e) => {
+        if (s.locked) return;
+        if (e.shiftKey) {
+          if (selectedIds.has(s.id)) selectedIds.delete(s.id);
+          else selectedIds.add(s.id);
+        } else {
+          selectedIds.clear();
+          selectedIds.add(s.id);
+        }
+        selectedVertexIndex = -1;
+        updateToolbar();
+        renderLayers();
+        render();
+      });
+
+      item.addEventListener('dragstart', (e) => {
+        item.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', s.id.toString());
+      });
+
+      item.addEventListener('dragend', () => {
+        item.classList.remove('dragging');
+        document.querySelectorAll('.layer-item.drag-over').forEach(el => el.classList.remove('drag-over'));
+      });
+
+      item.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        document.querySelectorAll('.layer-item.drag-over').forEach(el => el.classList.remove('drag-over'));
+        item.classList.add('drag-over');
+      });
+
+      item.addEventListener('dragleave', () => {
+        item.classList.remove('drag-over');
+      });
+
+      item.addEventListener('drop', (e) => {
+        e.preventDefault();
+        item.classList.remove('drag-over');
+        const draggedId = parseInt(e.dataTransfer.getData('text/plain'), 10);
+        if (isNaN(draggedId) || draggedId === s.id) return;
+
+        const draggedIdx = shapes.findIndex(sh => sh.id === draggedId);
+        const targetIdx = shapes.findIndex(sh => sh.id === s.id);
+        if (draggedIdx === -1 || targetIdx === -1) return;
+
+        pushHistory();
+        const [dragged] = shapes.splice(draggedIdx, 1);
+        const newTargetIdx = shapes.findIndex(sh => sh.id === s.id);
+        shapes.splice(newTargetIdx, 0, dragged);
+        renderLayers();
+        render();
+      });
+
+      layersListEl.appendChild(item);
+    }
+  }
+
+  function startRenameLayer(item, shape, nameEl) {
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'layer-name-input';
+    input.value = shape.name;
+    input.maxLength = 50;
+    nameEl.replaceWith(input);
+    input.focus();
+    input.select();
+
+    const finish = (commit) => {
+      const newName = input.value.trim() || shape.name;
+      if (commit && newName !== shape.name) {
+        pushHistory();
+        shape.name = newName;
+      }
+      input.replaceWith(nameEl);
+      renderLayers();
+    };
+
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') {
+        finish(true);
+      } else if (e.key === 'Escape') {
+        finish(false);
+      }
+    });
+
+    input.addEventListener('blur', () => finish(true));
+  }
+
   function updateToolbar() {
     document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
     const btnId = 'tool-' + currentTool;
@@ -383,6 +654,31 @@
     for (const id of opBtns) {
       document.getElementById(id).disabled = !enabled;
     }
+
+    if (isNodeEditMode) {
+      nodeEditIndicatorEl.classList.remove('hidden');
+    } else {
+      nodeEditIndicatorEl.classList.add('hidden');
+    }
+  }
+
+  function toggleNodeEditMode() {
+    if (isNodeEditMode) {
+      isNodeEditMode = false;
+      selectedVertexIndex = -1;
+      hoveredEdgeIndex = -1;
+    } else {
+      if (selectedIds.size === 1) {
+        const s = getSelectedShapes()[0];
+        if (s && !s.locked) {
+          isNodeEditMode = true;
+          selectedVertexIndex = -1;
+          hoveredEdgeIndex = -1;
+        }
+      }
+    }
+    updateToolbar();
+    render();
   }
 
   function performBoolean(op) {
@@ -426,7 +722,10 @@
 
     selectedIds.clear();
     for (const ns of newShapes) selectedIds.add(ns.id);
+    selectedVertexIndex = -1;
+    isNodeEditMode = false;
     updateToolbar();
+    renderLayers();
     render();
   }
 
@@ -435,7 +734,12 @@
       alert('Canvas is empty');
       return;
     }
-    const allBounds = shapes.map(s => getBounds(worldPointsOf(s)));
+    const visibleShapes = shapes.filter(s => s.visible);
+    if (visibleShapes.length === 0) {
+      alert('No visible shapes');
+      return;
+    }
+    const allBounds = visibleShapes.map(s => getBounds(worldPointsOf(s)));
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const b of allBounds) {
       minX = Math.min(minX, b.minX);
@@ -449,7 +753,7 @@
 
     let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${vw}" height="${vh}" viewBox="${minX.toFixed(2)} ${minY.toFixed(2)} ${vw} ${vh}">`;
 
-    for (const s of shapes) {
+    for (const s of visibleShapes) {
       const wp = worldPointsOf(s);
       const holes = worldHolesOf(s);
       let d = '';
@@ -490,6 +794,8 @@
     isDrawing = false;
     polygonPoints = [];
     drawStart = drawEnd = null;
+    isNodeEditMode = false;
+    selectedVertexIndex = -1;
     canvas.style.cursor = (tool === 'select') ? 'default' : 'crosshair';
     updateToolbar();
     render();
@@ -544,6 +850,17 @@
 
     if (e.button !== 0) return;
 
+    if (isNodeEditMode && selectedIds.size === 1) {
+      const vHit = hitTestVertex(world.x, world.y);
+      if (vHit) {
+        pushHistory();
+        selectedVertexIndex = vHit.index;
+        isDraggingVertex = true;
+        dragVertexOriginalPts = worldPointsOf(vHit.shape);
+        return;
+      }
+    }
+
     if (currentTool === 'rect' || currentTool === 'circle') {
       isDrawing = true;
       drawStart = { ...world };
@@ -562,6 +879,7 @@
             selectedIds.add(ns.id);
             polygonPoints = [];
             updateToolbar();
+            renderLayers();
           }
         } else {
           polygonPoints.push({ ...world });
@@ -569,7 +887,7 @@
       }
       render();
       return;
-    } else if (currentTool === 'select') {
+    } else if (currentTool === 'select' && !isNodeEditMode) {
       const handle = hitTestHandle(world.x, world.y);
       if (handle && selectedIds.size === 1) {
         pushHistory();
@@ -617,6 +935,7 @@
           holes: worldHolesOf(s)
         }));
         updateToolbar();
+        renderLayers();
         render();
         return;
       } else {
@@ -625,10 +944,20 @@
           marqueeStart = { ...world };
           marqueeEnd = { ...world };
           selectedIds.clear();
+          selectedVertexIndex = -1;
         } else {
           selectedIds.clear();
+          selectedVertexIndex = -1;
         }
+        isNodeEditMode = false;
         updateToolbar();
+        renderLayers();
+        render();
+      }
+    } else if (currentTool === 'select' && isNodeEditMode) {
+      const hit = hitTest(world.x, world.y);
+      if (!hit) {
+        selectedVertexIndex = -1;
         render();
       }
     }
@@ -646,6 +975,22 @@
       viewport.y = panStart.vy - dy;
       render();
       return;
+    }
+
+    if (isDraggingVertex && isNodeEditMode && selectedVertexIndex >= 0 && selectedIds.size === 1) {
+      const s = getSelectedShapes()[0];
+      if (s) {
+        const orig = dragVertexOriginalPts;
+        const newPts = orig.map((p, i) => {
+          if (i === selectedVertexIndex) {
+            return { x: world.x, y: world.y };
+          }
+          return { ...p };
+        });
+        setShapeWorldPointsAndHoles(s, newPts, worldHolesOf(s));
+        render();
+        return;
+      }
     }
 
     if (isDrawing && drawStart) {
@@ -735,7 +1080,26 @@
       return;
     }
 
-    if (currentTool === 'select') {
+    if (isNodeEditMode && selectedIds.size === 1 && !isDraggingVertex) {
+      const vHit = hitTestVertex(world.x, world.y);
+      if (vHit) {
+        canvas.style.cursor = 'move';
+        hoveredEdgeIndex = -1;
+      } else {
+        const eHit = hitTestEdge(world.x, world.y);
+        if (eHit) {
+          hoveredEdgeIndex = eHit.index;
+          canvas.style.cursor = 'copy';
+        } else {
+          hoveredEdgeIndex = -1;
+          canvas.style.cursor = 'default';
+        }
+      }
+      render();
+      return;
+    }
+
+    if (currentTool === 'select' && !isNodeEditMode) {
       const handle = hitTestHandle(world.x, world.y);
       if (handle) {
         if (handle.type === 'rotate') canvas.style.cursor = 'grab';
@@ -754,6 +1118,12 @@
     if (isPanning) {
       isPanning = false;
       canvas.style.cursor = (currentTool === 'select') ? 'default' : 'crosshair';
+      return;
+    }
+
+    if (isDraggingVertex) {
+      isDraggingVertex = false;
+      dragVertexOriginalPts = [];
       return;
     }
 
@@ -785,6 +1155,7 @@
       }
       drawStart = drawEnd = null;
       updateToolbar();
+      renderLayers();
       render();
       return;
     }
@@ -797,6 +1168,7 @@
       const my2 = Math.max(marqueeStart.y, marqueeEnd.y);
       if (Math.abs(mx2 - mx1) > 3 || Math.abs(my2 - my1) > 3) {
         for (const s of shapes) {
+          if (!s.visible || s.locked) continue;
           const pts = worldPointsOf(s);
           const b = getBounds(pts);
           if (b.minX >= mx1 && b.maxX <= mx2 && b.minY >= my1 && b.maxY <= my2) {
@@ -806,6 +1178,7 @@
       }
       marqueeStart = marqueeEnd = null;
       updateToolbar();
+      renderLayers();
       render();
       return;
     }
@@ -829,6 +1202,8 @@
   });
 
   canvas.addEventListener('dblclick', (e) => {
+    const world = screenToWorld(e.clientX, e.clientY);
+
     if (currentTool === 'polygon' && polygonPoints.length >= 3) {
       pushHistory();
       const ns = createShape(ensureCCW(polygonPoints.slice()));
@@ -837,7 +1212,26 @@
       selectedIds.add(ns.id);
       polygonPoints = [];
       updateToolbar();
+      renderLayers();
       render();
+      return;
+    }
+
+    if (isNodeEditMode && selectedIds.size === 1) {
+      const s = getSelectedShapes()[0];
+      if (!s || s.locked) return;
+      const eHit = hitTestEdge(world.x, world.y);
+      if (eHit) {
+        pushHistory();
+        const pts = worldPointsOf(s).map(p => ({ ...p }));
+        const a = pts[eHit.index];
+        const b = pts[(eHit.index + 1) % pts.length];
+        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        pts.splice(eHit.index + 1, 0, mid);
+        setShapeWorldPointsAndHoles(s, pts, worldHolesOf(s));
+        selectedVertexIndex = eHit.index + 1;
+        render();
+      }
     }
   });
 
@@ -856,6 +1250,11 @@
   }, { passive: false });
 
   document.addEventListener('keydown', (e) => {
+    const activeEl = document.activeElement;
+    if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
+      return;
+    }
+
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
       e.preventDefault();
       undo();
@@ -869,17 +1268,42 @@
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
       e.preventDefault();
       selectedIds.clear();
-      for (const s of shapes) selectedIds.add(s.id);
+      for (const s of shapes) {
+        if (!s.locked && s.visible) selectedIds.add(s.id);
+      }
+      isNodeEditMode = false;
+      selectedVertexIndex = -1;
       updateToolbar();
+      renderLayers();
       render();
       return;
     }
     if (e.key === 'Delete' || e.key === 'Backspace') {
+      if (isNodeEditMode && selectedIds.size === 1 && selectedVertexIndex >= 0) {
+        const s = getSelectedShapes()[0];
+        if (s && !s.locked) {
+          const pts = worldPointsOf(s);
+          if (pts.length > 3) {
+            pushHistory();
+            const newPts = pts.filter((_, i) => i !== selectedVertexIndex);
+            setShapeWorldPointsAndHoles(s, newPts, worldHolesOf(s));
+            if (selectedVertexIndex >= newPts.length) {
+              selectedVertexIndex = newPts.length - 1;
+            }
+            render();
+          }
+        }
+        e.preventDefault();
+        return;
+      }
       if (selectedIds.size > 0) {
         pushHistory();
         shapes = shapes.filter(s => !selectedIds.has(s.id));
         selectedIds.clear();
+        selectedVertexIndex = -1;
+        isNodeEditMode = false;
         updateToolbar();
+        renderLayers();
         render();
       }
       return;
@@ -888,7 +1312,10 @@
       polygonPoints = [];
       isDrawing = false;
       selectedIds.clear();
+      selectedVertexIndex = -1;
+      isNodeEditMode = false;
       setTool('select');
+      renderLayers();
       render();
       return;
     }
@@ -898,6 +1325,10 @@
       else if (e.key.toLowerCase() === 'r') setTool('rect');
       else if (e.key.toLowerCase() === 'c') setTool('circle');
       else if (e.key.toLowerCase() === 'p') setTool('polygon');
+      else if (e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        toggleNodeEditMode();
+      }
     }
   });
 
@@ -917,18 +1348,22 @@
       ensureCCW(rectToPolygon(-250, -120, 200, 150)),
       'hsla(220, 60%, 70%, 0.4)'
     );
+    rect.name = 'Rectangle';
     const circle = createShape(
       ensureCCW(circleToPolygon(-80, 0, 80, 64)),
       'hsla(0, 60%, 70%, 0.4)'
     );
+    circle.name = 'Circle';
     const pentagonPts = [];
     for (let i = 0; i < 5; i++) {
       const a = -Math.PI / 2 + (i / 5) * Math.PI * 2;
       pentagonPts.push({ x: 80 + Math.cos(a) * 75, y: -20 + Math.sin(a) * 75 });
     }
     const pentagon = createShape(ensureCCW(pentagonPts), 'hsla(120, 60%, 70%, 0.4)');
+    pentagon.name = 'Pentagon';
 
     shapes.push(rect, circle, pentagon);
+    renderLayers();
     render();
   }
 
