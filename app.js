@@ -5,8 +5,35 @@
   const cursorEl = document.getElementById('cursor-pos');
   const layersListEl = document.getElementById('layers-list');
   const nodeEditIndicatorEl = document.getElementById('node-edit-indicator');
+  const constraintListEl = document.getElementById('constraint-list');
+  const paramsListEl = document.getElementById('params-list');
+  const dofValueEl = document.getElementById('dof-value');
+  const dofHintEl = document.getElementById('dof-hint');
+  const modeIndicatorEl = document.getElementById('mode-indicator');
+  const constraintMenuEl = document.getElementById('constraint-menu');
+  const constraintDialogEl = document.getElementById('constraint-edit-dialog');
+  const toastEl = document.getElementById('toast');
+  const paramSelectEl = document.getElementById('constraint-param-select');
+  const valueInputEl = document.getElementById('constraint-value-input');
 
   const GRID_SIZE = 20;
+  const CS = window.ConstraintSystem;
+  const {
+    CONSTRAINT_TYPES,
+    CoincidentConstraint,
+    PointOnLineConstraint,
+    ParallelConstraint,
+    PerpendicularConstraint,
+    EqualLengthConstraint,
+    FixedAngleConstraint,
+    DistanceConstraint,
+    HorizontalConstraint,
+    VerticalConstraint,
+    ConstraintSolver,
+    ParamManager,
+    makePointId,
+    parsePointId
+  } = CS;
 
   let viewport = { x: 0, y: 0, scale: 1 };
   let shapes = [];
@@ -47,14 +74,30 @@
   let dragVertexOriginalData = null;
   let hoveredEdge = null;
 
+  let constraintSolver = new ConstraintSolver();
+  let paramManager = new ParamManager();
+  let constraints = [];
+  let paramsData = {};
+  let selectedConstraintIdx = -1;
+  let editingConstraintIdx = -1;
+
+  let constraintSelection = [];
+  let constraintMode = null;
+
+  let shapeCounter = 0;
+
   function isSameVertex(a, b) {
     if (!a || !b) return false;
     return a.isHole === b.isHole && a.holeIndex === b.holeIndex && a.pointIndex === b.pointIndex;
   }
 
-  function isSameEdge(a, b) {
-    if (!a || !b) return false;
-    return a.isHole === b.isHole && a.holeIndex === b.holeIndex && a.edgeIndex === b.edgeIndex;
+  function showToast(msg, type) {
+    toastEl.textContent = msg;
+    toastEl.className = 'toast ' + (type || '');
+    setTimeout(() => toastEl.classList.add('hidden'), 0);
+    toastEl.classList.remove('hidden');
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(() => toastEl.classList.add('hidden'), 2200);
   }
 
   function resize() {
@@ -75,15 +118,6 @@
     };
   }
 
-  function bakeTransform(shape) {
-    const t = shape.transform;
-    shape.points = applyTransform(shape.points, t.tx, t.ty, t.rotation, t.scaleX, t.scaleY);
-    if (shape.holes) {
-      shape.holes = shape.holes.map(h => applyTransform(h, t.tx, t.ty, t.rotation, t.scaleX, t.scaleY));
-    }
-    shape.transform = { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 };
-  }
-
   function worldPointsOf(shape) {
     const t = shape.transform;
     return applyTransform(shape.points, t.tx, t.ty, t.rotation, t.scaleX, t.scaleY);
@@ -99,39 +133,61 @@
     return shapes.find(s => s.id === id);
   }
 
-  function deepCloneShapes(arr) {
-    return JSON.parse(JSON.stringify(arr));
+  function deepCloneState() {
+    return {
+      shapes: JSON.parse(JSON.stringify(shapes)),
+      constraints: JSON.parse(JSON.stringify(constraints.map(c => serializeConstraint(c)))),
+      paramsData: JSON.parse(JSON.stringify(paramsData))
+    };
+  }
+
+  function restoreState(state) {
+    shapes = JSON.parse(JSON.stringify(state.shapes));
+    constraints = state.constraints.map(d => deserializeConstraint(d));
+    paramsData = JSON.parse(JSON.stringify(state.paramsData));
+    rebuildSolverAndParams();
   }
 
   function pushHistory() {
-    undoStack.push(deepCloneShapes(shapes));
+    undoStack.push(deepCloneState());
     if (undoStack.length > MAX_HISTORY) undoStack.shift();
     redoStack = [];
   }
 
   function undo() {
     if (undoStack.length === 0) return;
-    redoStack.push(deepCloneShapes(shapes));
-    shapes = undoStack.pop();
+    redoStack.push(deepCloneState());
+    restoreState(undoStack.pop());
     selectedIds.clear();
     selectedVertex = null;
+    selectedConstraintIdx = -1;
+    constraintSelection = [];
+    constraintMode = null;
     updateToolbar();
     renderLayers();
+    renderConstraintList();
+    renderParams();
+    updateDOFDisplay();
     render();
   }
 
   function redo() {
     if (redoStack.length === 0) return;
-    undoStack.push(deepCloneShapes(shapes));
-    shapes = redoStack.pop();
+    undoStack.push(deepCloneState());
+    restoreState(redoStack.pop());
     selectedIds.clear();
     selectedVertex = null;
+    selectedConstraintIdx = -1;
+    constraintSelection = [];
+    constraintMode = null;
     updateToolbar();
     renderLayers();
+    renderConstraintList();
+    renderParams();
+    updateDOFDisplay();
     render();
   }
 
-  let shapeCounter = 0;
   function createShape(points, fill, holes) {
     shapeCounter++;
     return {
@@ -159,10 +215,7 @@
       const holes = worldHolesOf(s);
       let inHole = false;
       for (const hole of holes) {
-        if (pointInPolygonOrOnEdge(pt, hole)) {
-          inHole = true;
-          break;
-        }
+        if (pointInPolygonOrOnEdge(pt, hole)) { inHole = true; break; }
       }
       if (!inHole) return s;
     }
@@ -172,10 +225,8 @@
   function getBounds(points) {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const p of points) {
-      minX = Math.min(minX, p.x);
-      minY = Math.min(minY, p.y);
-      maxX = Math.max(maxX, p.x);
-      maxY = Math.max(maxY, p.y);
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
     }
     return { minX, minY, maxX, maxY };
   }
@@ -214,22 +265,22 @@
   }
 
   function hitTestVertex(wx, wy) {
-    if (selectedIds.size !== 1) return null;
-    const s = getShapeById([...selectedIds][0]);
-    if (!s) return null;
     const hitRadius = 7 / viewport.scale;
-    const pts = worldPointsOf(s);
-    for (let i = 0; i < pts.length; i++) {
-      if (dist({x: wx, y: wy}, pts[i]) < hitRadius) {
-        return { shape: s, isHole: false, holeIndex: -1, pointIndex: i };
+    for (const s of shapes) {
+      if (!s.visible) continue;
+      const pts = worldPointsOf(s);
+      for (let i = 0; i < pts.length; i++) {
+        if (dist({x: wx, y: wy}, pts[i]) < hitRadius) {
+          return { shape: s, isHole: false, holeIndex: -1, pointIndex: i };
+        }
       }
-    }
-    const holes = worldHolesOf(s);
-    for (let h = 0; h < holes.length; h++) {
-      const hole = holes[h];
-      for (let i = 0; i < hole.length; i++) {
-        if (dist({x: wx, y: wy}, hole[i]) < hitRadius) {
-          return { shape: s, isHole: true, holeIndex: h, pointIndex: i };
+      const holes = worldHolesOf(s);
+      for (let h = 0; h < holes.length; h++) {
+        const hole = holes[h];
+        for (let i = 0; i < hole.length; i++) {
+          if (dist({x: wx, y: wy}, hole[i]) < hitRadius) {
+            return { shape: s, isHole: true, holeIndex: h, pointIndex: i };
+          }
         }
       }
     }
@@ -237,79 +288,181 @@
   }
 
   function hitTestEdge(wx, wy) {
-    if (selectedIds.size !== 1) return null;
-    const s = getShapeById([...selectedIds][0]);
-    if (!s) return null;
     const hitRadius = 6 / viewport.scale;
-    const pts = worldPointsOf(s);
-    for (let i = 0; i < pts.length; i++) {
-      const a = pts[i];
-      const b = pts[(i + 1) % pts.length];
-      if (pointToSegmentDist({x: wx, y: wy}, a, b) < hitRadius) {
-        return { shape: s, isHole: false, holeIndex: -1, edgeIndex: i };
-      }
-    }
-    const holes = worldHolesOf(s);
-    for (let h = 0; h < holes.length; h++) {
-      const hole = holes[h];
-      for (let i = 0; i < hole.length; i++) {
-        const a = hole[i];
-        const b = hole[(i + 1) % hole.length];
+    for (const s of shapes) {
+      if (!s.visible) continue;
+      const pts = worldPointsOf(s);
+      for (let i = 0; i < pts.length; i++) {
+        const a = pts[i], b = pts[(i + 1) % pts.length];
         if (pointToSegmentDist({x: wx, y: wy}, a, b) < hitRadius) {
-          return { shape: s, isHole: true, holeIndex: h, edgeIndex: i };
+          return { shape: s, isHole: false, holeIndex: -1, edgeIndex: i };
+        }
+      }
+      const holes = worldHolesOf(s);
+      for (let h = 0; h < holes.length; h++) {
+        const hole = holes[h];
+        for (let i = 0; i < hole.length; i++) {
+          const a = hole[i], b = hole[(i + 1) % hole.length];
+          if (pointToSegmentDist({x: wx, y: wy}, a, b) < hitRadius) {
+            return { shape: s, isHole: true, holeIndex: h, edgeIndex: i };
+          }
         }
       }
     }
     return null;
   }
 
+  function hitTestConstraintIcon(wx, wy) {
+    const pointMap = buildPointMap();
+    const hitRadius = 16 / viewport.scale;
+    for (let i = 0; i < constraints.length; i++) {
+      const c = constraints[i];
+      const pos = c.getIconPosition(pointMap);
+      if (pos && dist({x: wx, y: wy}, pos) < hitRadius) return i;
+    }
+    return -1;
+  }
+
   function getSelectedShapes() {
     return [...selectedIds].map(id => getShapeById(id)).filter(Boolean);
   }
 
-  function drawPolygonPath(points, holes) {
-    ctx.beginPath();
-    if (points.length > 0) {
-      ctx.moveTo(points[0].x, points[0].y);
-      for (let i = 1; i < points.length; i++) {
-        ctx.lineTo(points[i].x, points[i].y);
+  function getVertexPointId(v) {
+    if (!v) return null;
+    return makePointId(v.shape.id, v.isHole, v.holeIndex, v.pointIndex);
+  }
+
+  function getEdgePointIds(e) {
+    if (!e) return null;
+    const pts = e.isHole ? worldHolesOf(e.shape)[e.holeIndex] : worldPointsOf(e.shape);
+    if (!pts) return null;
+    const a = makePointId(e.shape.id, e.isHole, e.holeIndex, e.edgeIndex);
+    const bIdx = (e.edgeIndex + 1) % pts.length;
+    const b = makePointId(e.shape.id, e.isHole, e.holeIndex, bIdx);
+    return { start: a, end: b };
+  }
+
+  function buildPointMap() {
+    const map = {};
+    for (const s of shapes) {
+      if (!s.visible) continue;
+      const pts = worldPointsOf(s);
+      for (let i = 0; i < pts.length; i++) {
+        map[makePointId(s.id, false, -1, i)] = { ...pts[i] };
       }
-      ctx.closePath();
-    }
-    if (holes) {
-      for (const hole of holes) {
-        if (hole.length > 0) {
-          ctx.moveTo(hole[0].x, hole[0].y);
-          for (let i = 1; i < hole.length; i++) {
-            ctx.lineTo(hole[i].x, hole[i].y);
-          }
-          ctx.closePath();
+      const holes = worldHolesOf(s);
+      for (let h = 0; h < holes.length; h++) {
+        const hole = holes[h];
+        for (let i = 0; i < hole.length; i++) {
+          map[makePointId(s.id, true, h, i)] = { ...hole[i] };
         }
       }
     }
+    return map;
+  }
+
+  function applyPointMap(pointMap) {
+    for (const s of shapes) {
+      if (!s.visible) continue;
+      const newPts = [];
+      for (let i = 0; i < s.points.length; i++) {
+        const id = makePointId(s.id, false, -1, i);
+        newPts.push(pointMap[id] ? { ...pointMap[id] } : { ...s.points[i] });
+      }
+      s.points = newPts;
+      if (s.holes) {
+        const newHoles = [];
+        for (let h = 0; h < s.holes.length; h++) {
+          const hole = s.holes[h];
+          const newHole = [];
+          for (let i = 0; i < hole.length; i++) {
+            const id = makePointId(s.id, true, h, i);
+            newHole.push(pointMap[id] ? { ...pointMap[id] } : { ...hole[i] });
+          }
+          newHoles.push(newHole);
+        }
+        s.holes = newHoles;
+      }
+      s.transform = { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 };
+    }
+  }
+
+  function serializeConstraint(c) {
+    return {
+      type: c.type, pointA: c.pointA, pointB: c.pointB,
+      point: c.point, lineStart: c.lineStart, lineEnd: c.lineEnd,
+      line1Start: c.line1Start, line1End: c.line1End,
+      line2Start: c.line2Start, line2End: c.line2End,
+      angle: c.angle, paramRef: c.paramRef, distance: c.distance
+    };
+  }
+
+  function deserializeConstraint(d) {
+    switch (d.type) {
+      case CONSTRAINT_TYPES.COINCIDENT: return new CoincidentConstraint(d.pointA, d.pointB);
+      case CONSTRAINT_TYPES.POINT_ON_LINE: return new PointOnLineConstraint(d.point, d.lineStart, d.lineEnd);
+      case CONSTRAINT_TYPES.PARALLEL: return new ParallelConstraint(d.line1Start, d.line1End, d.line2Start, d.line2End);
+      case CONSTRAINT_TYPES.PERPENDICULAR: return new PerpendicularConstraint(d.line1Start, d.line1End, d.line2Start, d.line2End);
+      case CONSTRAINT_TYPES.EQUAL_LENGTH: return new EqualLengthConstraint(d.line1Start, d.line1End, d.line2Start, d.line2End);
+      case CONSTRAINT_TYPES.FIXED_ANGLE: return new FixedAngleConstraint(d.lineStart, d.lineEnd, d.angle || 0, d.paramRef);
+      case CONSTRAINT_TYPES.DISTANCE: return new DistanceConstraint(d.pointA, d.pointB, d.distance || 0, d.paramRef);
+      case CONSTRAINT_TYPES.HORIZONTAL: return new HorizontalConstraint(d.pointA, d.pointB);
+      case CONSTRAINT_TYPES.VERTICAL: return new VerticalConstraint(d.pointA, d.pointB);
+      default: return null;
+    }
+  }
+
+  function rebuildSolverAndParams() {
+    constraintSolver = new ConstraintSolver();
+    paramManager = new ParamManager();
+    for (const name in paramsData) {
+      const pd = paramsData[name];
+      paramManager.addParam(name, pd.value || 0);
+      if (pd.expression) paramManager.setExpression(name, pd.expression);
+    }
+    paramManager.reevaluateAll();
+    for (const c of constraints) constraintSolver.addConstraint(c);
+    constraintSolver.params = paramManager.getAllParams();
+  }
+
+  function updateSolverParams() {
+    paramManager.reevaluateAll();
+    constraintSolver.params = paramManager.getAllParams();
+  }
+
+  function runSolver(fixedPoints, extraFixed, maxIter) {
+    if (constraints.length === 0) return { success: true, iterations: 0, residual: 0 };
+    const pointMap = buildPointMap();
+    updateSolverParams();
+    const result = constraintSolver.solve(pointMap, fixedPoints, extraFixed, maxIter);
+    applyPointMap(pointMap);
+    return result;
+  }
+
+  function initialSolve() {
+    if (constraints.length === 0) return;
+    rebuildSolverAndParams();
+    runSolver(new Set(), null, 200);
   }
 
   function render() {
     const w = window.innerWidth, h = window.innerHeight;
     ctx.fillStyle = '#f0f0f0';
     ctx.fillRect(0, 0, w, h);
-
     ctx.save();
     ctx.translate(w / 2, h / 2);
     ctx.scale(viewport.scale, viewport.scale);
     ctx.translate(-viewport.x, -viewport.y);
-
     drawGrid();
 
     for (const s of shapes) {
-      if (s.visible) {
-        renderShape(s);
-      }
+      if (s.visible) renderShape(s);
     }
 
-    if (isNodeEditMode && selectedIds.size === 1) {
-      const s = getSelectedShapes()[0];
-      if (s && s.visible && !s.locked) renderNodeEdit(s);
+    renderConstraintIcons();
+
+    if (isNodeEditMode) {
+      renderNodeEditGlobal();
     } else {
       for (const id of selectedIds) {
         const s = getShapeById(id);
@@ -318,10 +471,8 @@
     }
 
     if (isDrawing && currentTool === 'rect' && drawStart && drawEnd) {
-      const x = Math.min(drawStart.x, drawEnd.x);
-      const y = Math.min(drawStart.y, drawEnd.y);
-      const w2 = Math.abs(drawEnd.x - drawStart.x);
-      const h2 = Math.abs(drawEnd.y - drawStart.y);
+      const x = Math.min(drawStart.x, drawEnd.x), y = Math.min(drawStart.y, drawEnd.y);
+      const w2 = Math.abs(drawEnd.x - drawStart.x), h2 = Math.abs(drawEnd.y - drawStart.y);
       ctx.save();
       ctx.fillStyle = 'rgba(100, 150, 255, 0.3)';
       ctx.strokeStyle = '#4d9fff';
@@ -353,15 +504,10 @@
       ctx.setLineDash([6 / viewport.scale, 4 / viewport.scale]);
       ctx.beginPath();
       ctx.moveTo(polygonPoints[0].x, polygonPoints[0].y);
-      for (let i = 1; i < polygonPoints.length; i++) {
-        ctx.lineTo(polygonPoints[i].x, polygonPoints[i].y);
-      }
-      if (lastMouseWorld) {
-        ctx.lineTo(lastMouseWorld.x, lastMouseWorld.y);
-      }
+      for (let i = 1; i < polygonPoints.length; i++) ctx.lineTo(polygonPoints[i].x, polygonPoints[i].y);
+      if (lastMouseWorld) ctx.lineTo(lastMouseWorld.x, lastMouseWorld.y);
       ctx.stroke();
       ctx.restore();
-
       for (const p of polygonPoints) {
         ctx.save();
         ctx.fillStyle = '#4d9fff';
@@ -373,10 +519,8 @@
     }
 
     if (isMarquee && marqueeStart && marqueeEnd) {
-      const x = Math.min(marqueeStart.x, marqueeEnd.x);
-      const y = Math.min(marqueeStart.y, marqueeEnd.y);
-      const w3 = Math.abs(marqueeEnd.x - marqueeStart.x);
-      const h3 = Math.abs(marqueeEnd.y - marqueeStart.y);
+      const x = Math.min(marqueeStart.x, marqueeEnd.x), y = Math.min(marqueeStart.y, marqueeEnd.y);
+      const w3 = Math.abs(marqueeEnd.x - marqueeStart.x), h3 = Math.abs(marqueeEnd.y - marqueeStart.y);
       ctx.save();
       ctx.fillStyle = 'rgba(77, 159, 255, 0.15)';
       ctx.strokeStyle = '#4d9fff';
@@ -387,35 +531,84 @@
       ctx.restore();
     }
 
+    renderConstraintSelection();
     ctx.restore();
-
     zoomEl.textContent = Math.round(viewport.scale * 100) + '%';
   }
 
-  function renderPolyline(points, color) {
+  function renderConstraintSelection() {
+    if (constraintSelection.length === 0) return;
+    ctx.save();
+    const hitRadius = 10 / viewport.scale;
+    for (const sel of constraintSelection) {
+      if (sel.type === 'vertex') {
+        const v = sel.data;
+        const pts = v.isHole ? worldHolesOf(v.shape)[v.holeIndex] : worldPointsOf(v.shape);
+        if (pts && pts[v.pointIndex]) {
+          const p = pts[v.pointIndex];
+          ctx.fillStyle = 'rgba(77, 159, 255, 0.3)';
+          ctx.strokeStyle = '#1a73e8';
+          ctx.lineWidth = 2 / viewport.scale;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, hitRadius * 1.3, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        }
+      } else if (sel.type === 'edge') {
+        const e = sel.data;
+        const pts = e.isHole ? worldHolesOf(e.shape)[e.holeIndex] : worldPointsOf(e.shape);
+        if (pts) {
+          const a = pts[e.edgeIndex];
+          const b = pts[(e.edgeIndex + 1) % pts.length];
+          ctx.strokeStyle = '#1a73e8';
+          ctx.lineWidth = 5 / viewport.scale;
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        }
+      }
+    }
+    ctx.restore();
+  }
+
+  function getPointStatusColor(pid) {
+    const hasConflict = constraintSolver.conflictConstraints.size > 0;
+    if (hasConflict) {
+      for (const ci of constraintSolver.conflictConstraints) {
+        const c = constraints[ci];
+        if (c && c.getReferencedPoints().includes(pid)) return '#e53935';
+      }
+    }
+    const statusMap = constraintSolver.getPointStatusMap();
+    const status = statusMap[pid];
+    if (status === 'over') return '#e53935';
+    if (status === 'under') return '#43a047';
+    return '#000';
+  }
+
+  function renderPolyline(points, color, width) {
     ctx.save();
     ctx.strokeStyle = color;
-    ctx.lineWidth = 2 / viewport.scale;
+    ctx.lineWidth = (width || 2) / viewport.scale;
     ctx.beginPath();
     if (points.length > 0) {
       ctx.moveTo(points[0].x, points[0].y);
-      for (let i = 1; i < points.length; i++) {
-        ctx.lineTo(points[i].x, points[i].y);
-      }
+      for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
       ctx.closePath();
     }
     ctx.stroke();
     ctx.restore();
   }
 
-  function renderVertexSquare(p, isSelected, vertexSize) {
+  function renderVertexSquare(p, isSelected, vertexSize, color) {
     ctx.save();
     if (isSelected) {
-      ctx.fillStyle = '#ff6b35';
-      ctx.strokeStyle = '#fff';
+      ctx.fillStyle = '#ff6b35'; ctx.strokeStyle = '#fff';
+    } else if (color) {
+      ctx.fillStyle = '#fff'; ctx.strokeStyle = color;
     } else {
-      ctx.fillStyle = '#fff';
-      ctx.strokeStyle = '#1a73e8';
+      ctx.fillStyle = '#fff'; ctx.strokeStyle = '#1a73e8';
     }
     ctx.lineWidth = 2 / viewport.scale;
     ctx.fillRect(p.x - vertexSize / 2, p.y - vertexSize / 2, vertexSize, vertexSize);
@@ -424,8 +617,7 @@
   }
 
   function renderEdgeMidpoint(a, b) {
-    const midX = (a.x + b.x) / 2;
-    const midY = (a.y + b.y) / 2;
+    const midX = (a.x + b.x) / 2, midY = (a.y + b.y) / 2;
     ctx.save();
     ctx.fillStyle = '#4d9fff';
     ctx.strokeStyle = '#fff';
@@ -438,41 +630,58 @@
     ctx.restore();
   }
 
-  function renderNodeEdit(s) {
-    const pts = worldPointsOf(s);
-    const holes = worldHolesOf(s);
+  function renderNodeEditGlobal() {
     const vertexSize = 8 / viewport.scale;
+    for (const s of shapes) {
+      if (!s.visible) continue;
+      const pts = worldPointsOf(s);
+      const holes = worldHolesOf(s);
+      renderPolyline(pts, '#1a73e8', 2);
+      for (const hole of holes) renderPolyline(hole, '#1a73e8', 2);
 
-    renderPolyline(pts, '#1a73e8');
-    for (const hole of holes) {
-      renderPolyline(hole, '#1a73e8');
-    }
+      for (let i = 0; i < pts.length; i++) {
+        const pid = makePointId(s.id, false, -1, i);
+        const vcol = getPointStatusColor(pid);
+        let isSel = false;
+        if (selectedVertex && selectedVertex.shape &&
+            selectedVertex.shape.id === s.id &&
+            !selectedVertex.isHole &&
+            selectedVertex.pointIndex === i) isSel = true;
+        for (const sel of constraintSelection) {
+          if (sel.type === 'vertex' && sel.data.shape.id === s.id &&
+              !sel.data.isHole && sel.data.pointIndex === i) isSel = true;
+        }
+        renderVertexSquare(pts[i], isSel, vertexSize, vcol);
+      }
 
-    for (let i = 0; i < pts.length; i++) {
-      const isSel = selectedVertex && !selectedVertex.isHole && selectedVertex.pointIndex === i;
-      renderVertexSquare(pts[i], isSel, vertexSize);
-    }
-
-    for (let h = 0; h < holes.length; h++) {
-      const hole = holes[h];
-      for (let i = 0; i < hole.length; i++) {
-        const isSel = selectedVertex && selectedVertex.isHole && selectedVertex.holeIndex === h && selectedVertex.pointIndex === i;
-        renderVertexSquare(hole[i], isSel, vertexSize);
+      for (let h = 0; h < holes.length; h++) {
+        const hole = holes[h];
+        for (let i = 0; i < hole.length; i++) {
+          const pid = makePointId(s.id, true, h, i);
+          const vcol = getPointStatusColor(pid);
+          let isSel = false;
+          if (selectedVertex && selectedVertex.shape &&
+              selectedVertex.shape.id === s.id &&
+              selectedVertex.isHole &&
+              selectedVertex.holeIndex === h &&
+              selectedVertex.pointIndex === i) isSel = true;
+          for (const sel of constraintSelection) {
+            if (sel.type === 'vertex' && sel.data.shape.id === s.id &&
+                sel.data.isHole && sel.data.holeIndex === h &&
+                sel.data.pointIndex === i) isSel = true;
+          }
+          renderVertexSquare(hole[i], isSel, vertexSize, vcol);
+        }
       }
     }
 
-    if (hoveredEdge && !isDraggingVertex) {
-      if (!hoveredEdge.isHole) {
-        if (hoveredEdge.edgeIndex >= 0 && hoveredEdge.edgeIndex < pts.length) {
+    if (hoveredEdge && !isDraggingVertex && selectedIds.size === 1) {
+      const selShape = getSelectedShapes()[0];
+      if (selShape) {
+        const pts = hoveredEdge.isHole ? worldHolesOf(selShape)[hoveredEdge.holeIndex] : worldPointsOf(selShape);
+        if (pts && hoveredEdge.edgeIndex >= 0 && hoveredEdge.edgeIndex < pts.length) {
           const a = pts[hoveredEdge.edgeIndex];
           const b = pts[(hoveredEdge.edgeIndex + 1) % pts.length];
-          renderEdgeMidpoint(a, b);
-        }
-      } else {
-        const hole = holes[hoveredEdge.holeIndex];
-        if (hole && hoveredEdge.edgeIndex >= 0 && hoveredEdge.edgeIndex < hole.length) {
-          const a = hole[hoveredEdge.edgeIndex];
-          const b = hole[(hoveredEdge.edgeIndex + 1) % hole.length];
           renderEdgeMidpoint(a, b);
         }
       }
@@ -486,7 +695,6 @@
     const br = screenToWorld(w, h);
     const startX = Math.floor(tl.x / spacing) * spacing;
     const startY = Math.floor(tl.y / spacing) * spacing;
-
     ctx.save();
     ctx.fillStyle = '#d8d8d8';
     const dotSize = 1.5 / viewport.scale;
@@ -498,6 +706,24 @@
       }
     }
     ctx.restore();
+  }
+
+  function drawPolygonPath(points, holes) {
+    ctx.beginPath();
+    if (points.length > 0) {
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+      ctx.closePath();
+    }
+    if (holes) {
+      for (const hole of holes) {
+        if (hole.length > 0) {
+          ctx.moveTo(hole[0].x, hole[0].y);
+          for (let i = 1; i < hole.length; i++) ctx.lineTo(hole[i].x, hole[i].y);
+          ctx.closePath();
+        }
+      }
+    }
   }
 
   function renderShape(s) {
@@ -519,7 +745,6 @@
     const bounds = getBounds(pts);
     const ctr = boundsCenter(bounds);
     const handles = getControlHandles(bounds, ctr);
-
     ctx.save();
     ctx.strokeStyle = '#1a73e8';
     ctx.lineWidth = 2 / viewport.scale;
@@ -527,7 +752,6 @@
     ctx.strokeRect(bounds.minX, bounds.minY, bounds.maxX - bounds.minX, bounds.maxY - bounds.minY);
     ctx.setLineDash([]);
     ctx.restore();
-
     for (const h of handles) {
       ctx.save();
       ctx.fillStyle = '#fff';
@@ -538,7 +762,6 @@
       ctx.strokeRect(h.point.x - hs / 2, h.point.y - hs / 2, hs, hs);
       ctx.restore();
     }
-
     ctx.save();
     ctx.fillStyle = '#1a73e8';
     ctx.strokeStyle = '#fff';
@@ -554,9 +777,57 @@
     ctx.restore();
   }
 
+  function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+
+  function renderConstraintIcons() {
+    if (constraints.length === 0) return;
+    const pointMap = buildPointMap();
+    for (let i = 0; i < constraints.length; i++) {
+      const c = constraints[i];
+      const pos = c.getIconPosition(pointMap);
+      if (!pos) continue;
+      const isConflict = constraintSolver.conflictConstraints.has(i);
+      const isSelected = selectedConstraintIdx === i;
+      ctx.save();
+      const bgColor = isConflict ? '#ffcdd2' : (isSelected ? '#bbdefb' : '#e3f2fd');
+      const borderColor = isConflict ? '#c62828' : (isSelected ? '#1565c0' : '#1a73e8');
+      const textColor = isConflict ? '#c62828' : '#0d47a1';
+      ctx.fillStyle = bgColor;
+      ctx.strokeStyle = borderColor;
+      ctx.lineWidth = 1.5 / viewport.scale;
+      const pad = 5 / viewport.scale;
+      const label = c.getLabel();
+      ctx.font = `700 ${11 / viewport.scale}px -apple-system, BlinkMacSystemFont, sans-serif`;
+      const textW = ctx.measureText(label).width;
+      const iconSize = 14 / viewport.scale;
+      const bw = Math.max(textW + pad * 2, iconSize * 2);
+      const bh = iconSize * 1.5;
+      const bx = pos.x - bw / 2, by = pos.y - bh / 2;
+      roundRect(ctx, bx, by, bw, bh, 4 / viewport.scale);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = textColor;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, pos.x, pos.y);
+      ctx.restore();
+    }
+  }
+
   function renderLayers() {
     layersListEl.innerHTML = '';
-
     if (shapes.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'empty-layers';
@@ -564,14 +835,12 @@
       layersListEl.appendChild(empty);
       return;
     }
-
     for (let i = shapes.length - 1; i >= 0; i--) {
       const s = shapes[i];
       const item = document.createElement('div');
       item.className = 'layer-item';
       item.dataset.id = s.id;
       item.draggable = true;
-
       if (selectedIds.has(s.id)) item.classList.add('selected');
       if (s.locked) item.classList.add('locked');
 
@@ -587,10 +856,7 @@
         s.visible = !s.visible;
         if (!s.visible && selectedIds.has(s.id)) {
           selectedIds.delete(s.id);
-          if (selectedIds.size === 0) {
-            isNodeEditMode = false;
-            selectedVertex = null;
-          }
+          if (selectedIds.size === 0) { isNodeEditMode = false; selectedVertex = null; }
         }
         updateToolbar();
         renderLayers();
@@ -645,6 +911,7 @@
           selectedIds.add(s.id);
         }
         selectedVertex = null;
+        constraintSelection = [];
         updateToolbar();
         renderLayers();
         render();
@@ -655,33 +922,25 @@
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', s.id.toString());
       });
-
       item.addEventListener('dragend', () => {
         item.classList.remove('dragging');
         document.querySelectorAll('.layer-item.drag-over').forEach(el => el.classList.remove('drag-over'));
       });
-
       item.addEventListener('dragover', (e) => {
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
         document.querySelectorAll('.layer-item.drag-over').forEach(el => el.classList.remove('drag-over'));
         item.classList.add('drag-over');
       });
-
-      item.addEventListener('dragleave', () => {
-        item.classList.remove('drag-over');
-      });
-
+      item.addEventListener('dragleave', () => item.classList.remove('drag-over'));
       item.addEventListener('drop', (e) => {
         e.preventDefault();
         item.classList.remove('drag-over');
         const draggedId = parseInt(e.dataTransfer.getData('text/plain'), 10);
         if (isNaN(draggedId) || draggedId === s.id) return;
-
         const draggedIdx = shapes.findIndex(sh => sh.id === draggedId);
         const targetIdx = shapes.findIndex(sh => sh.id === s.id);
         if (draggedIdx === -1 || targetIdx === -1) return;
-
         pushHistory();
         const [dragged] = shapes.splice(draggedIdx, 1);
         const newTargetIdx = shapes.findIndex(sh => sh.id === s.id);
@@ -689,7 +948,6 @@
         renderLayers();
         render();
       });
-
       layersListEl.appendChild(item);
     }
   }
@@ -703,7 +961,6 @@
     nameEl.replaceWith(input);
     input.focus();
     input.select();
-
     const finish = (commit) => {
       const newName = input.value.trim() || shape.name;
       if (commit && newName !== shape.name) {
@@ -713,17 +970,433 @@
       input.replaceWith(nameEl);
       renderLayers();
     };
-
     input.addEventListener('keydown', (e) => {
       e.stopPropagation();
-      if (e.key === 'Enter') {
-        finish(true);
-      } else if (e.key === 'Escape') {
-        finish(false);
-      }
+      if (e.key === 'Enter') finish(true);
+      else if (e.key === 'Escape') finish(false);
     });
-
     input.addEventListener('blur', () => finish(true));
+  }
+
+  function renderConstraintList() {
+    constraintListEl.innerHTML = '';
+    if (constraints.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty-list';
+      empty.textContent = 'No constraints yet. Enter Node Mode (N), then pick a constraint type.';
+      constraintListEl.appendChild(empty);
+      return;
+    }
+    for (let i = 0; i < constraints.length; i++) {
+      const c = constraints[i];
+      const item = document.createElement('div');
+      item.className = 'constraint-item';
+      if (selectedConstraintIdx === i) item.classList.add('selected');
+      if (constraintSolver.conflictConstraints.has(i)) item.classList.add('conflict');
+      const icon = document.createElement('div');
+      icon.className = 'constraint-icon';
+      icon.textContent = c.getLabel().length <= 2 ? c.getLabel() : '◆';
+      const name = document.createElement('div');
+      name.className = 'constraint-name';
+      let typeName = c.type;
+      switch (c.type) {
+        case CONSTRAINT_TYPES.COINCIDENT: typeName = 'Coincident'; break;
+        case CONSTRAINT_TYPES.POINT_ON_LINE: typeName = 'Point on Line'; break;
+        case CONSTRAINT_TYPES.PARALLEL: typeName = 'Parallel'; break;
+        case CONSTRAINT_TYPES.PERPENDICULAR: typeName = 'Perpendicular'; break;
+        case CONSTRAINT_TYPES.EQUAL_LENGTH: typeName = 'Equal Length'; break;
+        case CONSTRAINT_TYPES.FIXED_ANGLE: typeName = 'Angle ' + (c.paramRef || (c.angle.toFixed(0) + '°')); break;
+        case CONSTRAINT_TYPES.DISTANCE: typeName = 'Dist ' + (c.paramRef || c.distance.toFixed(1)); break;
+        case CONSTRAINT_TYPES.HORIZONTAL: typeName = 'Horizontal'; break;
+        case CONSTRAINT_TYPES.VERTICAL: typeName = 'Vertical'; break;
+      }
+      name.textContent = typeName;
+      name.title = c.getLabel();
+      const delBtn = document.createElement('button');
+      delBtn.className = 'constraint-delete';
+      delBtn.textContent = '×';
+      delBtn.title = 'Delete constraint';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        pushHistory();
+        constraints.splice(i, 1);
+        selectedConstraintIdx = -1;
+        rebuildSolverAndParams();
+        initialSolve();
+        updateDOFDisplay();
+        renderConstraintList();
+        render();
+      });
+      item.addEventListener('click', () => {
+        selectedConstraintIdx = (selectedConstraintIdx === i) ? -1 : i;
+        renderConstraintList();
+        render();
+      });
+      item.addEventListener('dblclick', () => openConstraintEditDialog(i));
+      item.appendChild(icon);
+      item.appendChild(name);
+      item.appendChild(delBtn);
+      constraintListEl.appendChild(item);
+    }
+  }
+
+  function renderParams() {
+    paramsListEl.innerHTML = '';
+    const paramNames = Object.keys(paramsData);
+    if (paramNames.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty-list';
+      empty.textContent = 'No parameters. Click + above to add.';
+      paramsListEl.appendChild(empty);
+      return;
+    }
+    for (const name of paramNames) {
+      const pd = paramsData[name];
+      const item = document.createElement('div');
+      item.className = 'param-item';
+      const nameEl = document.createElement('div');
+      nameEl.className = 'param-name';
+      nameEl.textContent = name;
+      nameEl.title = name;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'param-value' + (pd.expression ? ' expr' : '');
+      input.value = pd.expression || pd.value.toString();
+      input.title = pd.expression ? 'Expression' : 'Value (enter expression like 2*a+10)';
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+      });
+      input.addEventListener('blur', () => {
+        const val = input.value.trim();
+        if (val === '') return;
+        pushHistory();
+        if (/^[0-9.\-+eE]+$/.test(val)) {
+          const num = parseFloat(val);
+          if (!isNaN(num) && isFinite(num)) {
+            pd.value = num;
+            pd.expression = null;
+            paramManager.setParam(name, num);
+          }
+        } else {
+          try {
+            pd.expression = val;
+            paramManager.setExpression(name, val);
+            pd.value = paramManager.getParam(name);
+          } catch (e) {
+            showToast('Invalid expression', 'error');
+          }
+        }
+        updateSolverParams();
+        initialSolve();
+        updateDOFDisplay();
+        renderParams();
+        renderConstraintList();
+        render();
+      });
+      const delBtn = document.createElement('button');
+      delBtn.className = 'param-delete';
+      delBtn.textContent = '×';
+      delBtn.title = 'Delete parameter';
+      delBtn.addEventListener('click', () => {
+        pushHistory();
+        for (const c of constraints) {
+          if (c.paramRef === name) c.paramRef = null;
+        }
+        delete paramsData[name];
+        paramManager.removeParam(name);
+        rebuildSolverAndParams();
+        initialSolve();
+        updateDOFDisplay();
+        renderParams();
+        renderConstraintList();
+        render();
+      });
+      item.appendChild(nameEl);
+      item.appendChild(input);
+      item.appendChild(delBtn);
+      paramsListEl.appendChild(item);
+    }
+  }
+
+  function updateDOFDisplay() {
+    const dof = constraintSolver.calculateDOF();
+    dofValueEl.textContent = dof.toString();
+    dofValueEl.className = 'dof-value ' + (dof > 0 ? 'positive' : (dof < 0 ? 'negative' : 'zero'));
+    let hint = '';
+    if (dof > 0) hint = '(Under-constrained)';
+    else if (dof === 0) hint = '(Fully constrained)';
+    else hint = '(Over-constrained!)';
+    dofHintEl.textContent = hint;
+    if (constraintMode) {
+      modeIndicatorEl.textContent = 'Adding: ' + constraintMode + ' (' + constraintSelection.length + ' sel)';
+    } else {
+      modeIndicatorEl.textContent = '';
+    }
+  }
+
+  function openConstraintEditDialog(idx) {
+    const c = constraints[idx];
+    if (!c) return;
+    editingConstraintIdx = idx;
+    paramSelectEl.innerHTML = '<option value="">-- None --</option>';
+    for (const name in paramsData) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name + ' = ' + paramsData[name].value.toFixed(2);
+      paramSelectEl.appendChild(opt);
+    }
+    if (c.type === CONSTRAINT_TYPES.FIXED_ANGLE) {
+      valueInputEl.value = c.angle;
+      valueInputEl.step = 1;
+      valueInputEl.disabled = false;
+    } else if (c.type === CONSTRAINT_TYPES.DISTANCE) {
+      valueInputEl.value = c.distance;
+      valueInputEl.step = 0.1;
+      valueInputEl.disabled = false;
+    } else {
+      valueInputEl.value = '';
+      valueInputEl.disabled = true;
+    }
+    paramSelectEl.value = c.paramRef || '';
+    paramSelectEl.disabled = (c.type !== CONSTRAINT_TYPES.FIXED_ANGLE && c.type !== CONSTRAINT_TYPES.DISTANCE);
+    constraintDialogEl.classList.remove('hidden');
+  }
+
+  function closeConstraintEditDialog() {
+    constraintDialogEl.classList.add('hidden');
+    editingConstraintIdx = -1;
+  }
+
+  function applyConstraintEdit() {
+    if (editingConstraintIdx < 0 || editingConstraintIdx >= constraints.length) return;
+    const c = constraints[editingConstraintIdx];
+    pushHistory();
+    const val = parseFloat(valueInputEl.value);
+    const param = paramSelectEl.value;
+    if (c.type === CONSTRAINT_TYPES.FIXED_ANGLE) {
+      if (!isNaN(val)) c.angle = val;
+      c.paramRef = param || null;
+    } else if (c.type === CONSTRAINT_TYPES.DISTANCE) {
+      if (!isNaN(val)) c.distance = val;
+      c.paramRef = param || null;
+    }
+    rebuildSolverAndParams();
+    initialSolve();
+    updateDOFDisplay();
+    renderConstraintList();
+    render();
+    closeConstraintEditDialog();
+  }
+
+  function addParam() {
+    const existingCount = Object.keys(paramsData).length;
+    let name = 'p' + (existingCount + 1);
+    let counter = 1;
+    while (paramsData[name]) {
+      name = 'p' + (existingCount + 1 + counter);
+      counter++;
+    }
+    pushHistory();
+    paramsData[name] = { value: 100, expression: null };
+    paramManager.addParam(name, 100);
+    rebuildSolverAndParams();
+    renderParams();
+    updateDOFDisplay();
+    showToast('Parameter ' + name + ' created', 'success');
+  }
+
+  function clearAllConstraints() {
+    if (constraints.length === 0) return;
+    pushHistory();
+    constraints = [];
+    selectedConstraintIdx = -1;
+    constraintMode = null;
+    constraintSelection = [];
+    rebuildSolverAndParams();
+    updateDOFDisplay();
+    renderConstraintList();
+    render();
+    showToast('All constraints cleared');
+  }
+
+  function canAddConstraint(type) {
+    const n = constraintSelection.length;
+    switch (type) {
+      case CONSTRAINT_TYPES.COINCIDENT:
+        return n === 2 && constraintSelection.every(s => s.type === 'vertex');
+      case CONSTRAINT_TYPES.POINT_ON_LINE:
+        return n === 2 &&
+          ((constraintSelection[0].type === 'vertex' && constraintSelection[1].type === 'edge') ||
+           (constraintSelection[1].type === 'vertex' && constraintSelection[0].type === 'edge'));
+      case CONSTRAINT_TYPES.PARALLEL:
+      case CONSTRAINT_TYPES.PERPENDICULAR:
+      case CONSTRAINT_TYPES.EQUAL_LENGTH:
+        return n === 2 && constraintSelection.every(s => s.type === 'edge');
+      case CONSTRAINT_TYPES.FIXED_ANGLE:
+        return n === 1 && constraintSelection[0].type === 'edge';
+      case CONSTRAINT_TYPES.DISTANCE:
+      case CONSTRAINT_TYPES.HORIZONTAL:
+      case CONSTRAINT_TYPES.VERTICAL:
+        return n === 2 && constraintSelection.every(s => s.type === 'vertex');
+      default: return false;
+    }
+  }
+
+  function createConstraintByType(type) {
+    if (!canAddConstraint(type)) return null;
+    switch (type) {
+      case CONSTRAINT_TYPES.COINCIDENT: {
+        const pidA = getVertexPointId(constraintSelection[0].data);
+        const pidB = getVertexPointId(constraintSelection[1].data);
+        return new CoincidentConstraint(pidA, pidB);
+      }
+      case CONSTRAINT_TYPES.POINT_ON_LINE: {
+        const pointSel = constraintSelection.find(s => s.type === 'vertex');
+        const edgeSel = constraintSelection.find(s => s.type === 'edge');
+        const pid = getVertexPointId(pointSel.data);
+        const eids = getEdgePointIds(edgeSel.data);
+        return new PointOnLineConstraint(pid, eids.start, eids.end);
+      }
+      case CONSTRAINT_TYPES.PARALLEL: {
+        const e1 = getEdgePointIds(constraintSelection[0].data);
+        const e2 = getEdgePointIds(constraintSelection[1].data);
+        return new ParallelConstraint(e1.start, e1.end, e2.start, e2.end);
+      }
+      case CONSTRAINT_TYPES.PERPENDICULAR: {
+        const e1 = getEdgePointIds(constraintSelection[0].data);
+        const e2 = getEdgePointIds(constraintSelection[1].data);
+        return new PerpendicularConstraint(e1.start, e1.end, e2.start, e2.end);
+      }
+      case CONSTRAINT_TYPES.EQUAL_LENGTH: {
+        const e1 = getEdgePointIds(constraintSelection[0].data);
+        const e2 = getEdgePointIds(constraintSelection[1].data);
+        return new EqualLengthConstraint(e1.start, e1.end, e2.start, e2.end);
+      }
+      case CONSTRAINT_TYPES.FIXED_ANGLE: {
+        const e = getEdgePointIds(constraintSelection[0].data);
+        const pts = constraintSelection[0].data.isHole ?
+          worldHolesOf(constraintSelection[0].data.shape)[constraintSelection[0].data.holeIndex] :
+          worldPointsOf(constraintSelection[0].data.shape);
+        const a = pts[constraintSelection[0].data.edgeIndex];
+        const b = pts[(constraintSelection[0].data.edgeIndex + 1) % pts.length];
+        const ang = Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI;
+        return new FixedAngleConstraint(e.start, e.end, ang);
+      }
+      case CONSTRAINT_TYPES.DISTANCE: {
+        const pidA = getVertexPointId(constraintSelection[0].data);
+        const pidB = getVertexPointId(constraintSelection[1].data);
+        const pts0 = constraintSelection[0].data.isHole ?
+          worldHolesOf(constraintSelection[0].data.shape)[constraintSelection[0].data.holeIndex] :
+          worldPointsOf(constraintSelection[0].data.shape);
+        const pts1 = constraintSelection[1].data.isHole ?
+          worldHolesOf(constraintSelection[1].data.shape)[constraintSelection[1].data.holeIndex] :
+          worldPointsOf(constraintSelection[1].data.shape);
+        const a = pts0[constraintSelection[0].data.pointIndex];
+        const b = pts1[constraintSelection[1].data.pointIndex];
+        const d = dist(a, b);
+        return new DistanceConstraint(pidA, pidB, d);
+      }
+      case CONSTRAINT_TYPES.HORIZONTAL: {
+        const pidA = getVertexPointId(constraintSelection[0].data);
+        const pidB = getVertexPointId(constraintSelection[1].data);
+        return new HorizontalConstraint(pidA, pidB);
+      }
+      case CONSTRAINT_TYPES.VERTICAL: {
+        const pidA = getVertexPointId(constraintSelection[0].data);
+        const pidB = getVertexPointId(constraintSelection[1].data);
+        return new VerticalConstraint(pidA, pidB);
+      }
+      default: return null;
+    }
+  }
+
+  function tryAddConstraint(type) {
+    const c = createConstraintByType(type);
+    if (!c) { showToast('Select required elements first', 'warning'); return; }
+    const testConstraints = constraints.concat([c]);
+    const testSolver = new ConstraintSolver();
+    for (const tc of testConstraints) testSolver.addConstraint(tc);
+    const testDof = testSolver.calculateDOF();
+    if (testDof < 0) {
+      showToast('Over-constrained! DOF would be ' + testDof, 'error');
+      return;
+    }
+    pushHistory();
+    constraints.push(c);
+    rebuildSolverAndParams();
+    initialSolve();
+    constraintSelection = [];
+    constraintMode = null;
+    selectedConstraintIdx = constraints.length - 1;
+    updateDOFDisplay();
+    renderConstraintList();
+    render();
+    showToast('Added: ' + type, 'success');
+  }
+
+  function startConstraintMode(type) {
+    constraintMode = type;
+    constraintSelection = [];
+    isNodeEditMode = true;
+    selectedVertex = null;
+    selectedConstraintIdx = -1;
+    updateToolbar();
+    updateDOFDisplay();
+    render();
+    showToast('Select elements for ' + type + ' (Esc to cancel)');
+  }
+
+  function checkConstraintAutoComplete() {
+    if (!constraintMode) return;
+    if (canAddConstraint(constraintMode)) {
+      tryAddConstraint(constraintMode);
+    }
+  }
+
+  function toggleConstraintSelection(world) {
+    if (!constraintMode) return;
+    const vHit = hitTestVertex(world.x, world.y);
+    if (vHit) {
+      const idx = constraintSelection.findIndex(s =>
+        s.type === 'vertex' &&
+        s.data.shape.id === vHit.shape.id &&
+        s.data.isHole === vHit.isHole &&
+        s.data.holeIndex === vHit.holeIndex &&
+        s.data.pointIndex === vHit.pointIndex
+      );
+      if (idx >= 0) constraintSelection.splice(idx, 1);
+      else constraintSelection.push({ type: 'vertex', data: vHit });
+      checkConstraintAutoComplete();
+      render();
+      updateDOFDisplay();
+      return;
+    }
+    const eHit = hitTestEdge(world.x, world.y);
+    if (eHit) {
+      const idx = constraintSelection.findIndex(s =>
+        s.type === 'edge' &&
+        s.data.shape.id === eHit.shape.id &&
+        s.data.isHole === eHit.isHole &&
+        s.data.holeIndex === eHit.holeIndex &&
+        s.data.edgeIndex === eHit.edgeIndex
+      );
+      if (idx >= 0) constraintSelection.splice(idx, 1);
+      else constraintSelection.push({ type: 'edge', data: eHit });
+      checkConstraintAutoComplete();
+      render();
+      updateDOFDisplay();
+      return;
+    }
+  }
+
+  function setShapeWorldPointsAndHoles(shape, newPts, newHoles) {
+    shape.points = newPts.map(p => ({ ...p }));
+    if (newHoles) shape.holes = newHoles.map(h => h.map(p => ({ ...p })));
+    shape.transform = { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 };
+  }
+
+  function translatePoints(points, dx, dy) {
+    return points.map(p => ({ x: p.x + dx, y: p.y + dy }));
   }
 
   function updateToolbar() {
@@ -731,13 +1404,9 @@
     const btnId = 'tool-' + currentTool;
     const btn = document.getElementById(btnId);
     if (btn) btn.classList.add('active');
-
-    const opBtns = ['op-union', 'op-subtract', 'op-intersect'];
-    const enabled = selectedIds.size === 2;
-    for (const id of opBtns) {
-      document.getElementById(id).disabled = !enabled;
-    }
-
+    document.querySelectorAll('.op-btn').forEach(b => {
+      b.disabled = selectedIds.size < 2;
+    });
     if (isNodeEditMode) {
       nodeEditIndicatorEl.classList.remove('hidden');
     } else {
@@ -745,369 +1414,194 @@
     }
   }
 
-  function toggleNodeEditMode() {
-    if (isNodeEditMode) {
-      isNodeEditMode = false;
-      selectedVertex = null;
-      hoveredEdge = null;
-    } else {
-      if (selectedIds.size === 1) {
-        const s = getSelectedShapes()[0];
-        if (s && !s.locked && s.visible) {
-          isNodeEditMode = true;
-          selectedVertex = null;
-          hoveredEdge = null;
-        }
-      }
-    }
-    updateToolbar();
-    render();
-  }
-
-  function performBoolean(op) {
-    if (selectedIds.size !== 2) return;
-    const ids = [...selectedIds];
-    const a = getShapeById(ids[0]);
-    const b = getShapeById(ids[1]);
-    if (!a || !b) return;
-
-    pushHistory();
-
-    const aPts = worldPointsOf(a);
-    const bPts = worldPointsOf(b);
-
-    let result;
-    if (op === 'union') result = weilerAtherton(aPts, bPts, 'union');
-    else if (op === 'intersect') result = weilerAtherton(aPts, bPts, 'intersect');
-    else result = weilerAtherton(aPts, bPts, 'subtract');
-
-    if (op === 'intersect' && result.polygons.length === 0) {
-      undoStack.pop();
-      alert('No intersection');
-      return;
-    }
-
-    shapes = shapes.filter(s => s.id !== a.id && s.id !== b.id);
-
-    const newShapes = [];
-    if (result.polygons.length > 0) {
-      const mainPoly = result.polygons[0];
-      const holes = result.holes || [];
-      const ns = createShape(ensureCCW(mainPoly), a.fill, holes.map(h => ensureCW(h)));
-      newShapes.push(ns);
-      shapes.push(ns);
-      for (let i = 1; i < result.polygons.length; i++) {
-        const ns2 = createShape(ensureCCW(result.polygons[i]), a.fill, []);
-        newShapes.push(ns2);
-        shapes.push(ns2);
-      }
-    }
-
-    selectedIds.clear();
-    for (const ns of newShapes) selectedIds.add(ns.id);
-    selectedVertex = null;
-    isNodeEditMode = false;
-    updateToolbar();
-    renderLayers();
-    render();
-  }
-
-  function exportSVG() {
-    if (shapes.length === 0) {
-      alert('Canvas is empty');
-      return;
-    }
-    const visibleShapes = shapes.filter(s => s.visible);
-    if (visibleShapes.length === 0) {
-      alert('No visible shapes');
-      return;
-    }
-    const allBounds = visibleShapes.map(s => getBounds(worldPointsOf(s)));
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const b of allBounds) {
-      minX = Math.min(minX, b.minX);
-      minY = Math.min(minY, b.minY);
-      maxX = Math.max(maxX, b.maxX);
-      maxY = Math.max(maxY, b.maxY);
-    }
-    const pad = 20;
-    minX -= pad; minY -= pad; maxX += pad; maxY += pad;
-    const vw = Math.ceil(maxX - minX), vh = Math.ceil(maxY - minY);
-
-    let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${vw}" height="${vh}" viewBox="${minX.toFixed(2)} ${minY.toFixed(2)} ${vw} ${vh}">`;
-
-    for (const s of visibleShapes) {
-      const wp = worldPointsOf(s);
-      const holes = worldHolesOf(s);
-      let d = '';
-      if (wp.length > 0) {
-        d += `M${wp[0].x.toFixed(2)} ${wp[0].y.toFixed(2)}`;
-        for (let i = 1; i < wp.length; i++) {
-          d += ` L${wp[i].x.toFixed(2)} ${wp[i].y.toFixed(2)}`;
-        }
-        d += ' Z';
-      }
-      if (holes && holes.length > 0) {
-        for (const hole of holes) {
-          if (hole.length > 0) {
-            const rev = hole.slice().reverse();
-            d += ` M${rev[0].x.toFixed(2)} ${rev[0].y.toFixed(2)}`;
-            for (let i = 1; i < rev.length; i++) {
-              d += ` L${rev[i].x.toFixed(2)} ${rev[i].y.toFixed(2)}`;
-            }
-            d += ' Z';
-          }
-        }
-      }
-      svg += `<path d="${d}" fill="${s.fill}" fill-rule="evenodd" stroke="${s.stroke}" stroke-width="${s.strokeWidth || 2}" stroke-linejoin="round" stroke-linecap="round"/>`;
-    }
-    svg += '</svg>';
-
-    const blob = new Blob([svg], { type: 'image/svg+xml' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'canvas.svg';
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  function setTool(tool) {
-    currentTool = tool;
-    isDrawing = false;
-    polygonPoints = [];
-    drawStart = drawEnd = null;
-    isNodeEditMode = false;
-    selectedVertex = null;
-    canvas.style.cursor = (tool === 'select') ? 'default' : 'crosshair';
-    updateToolbar();
-    render();
-  }
-
-  function translatePoints(points, dx, dy) {
-    return points.map(p => ({ x: p.x + dx, y: p.y + dy }));
-  }
-
-  function scalePointsAround(points, pivot, sx, sy) {
-    return points.map(p => {
-      const dx = p.x - pivot.x;
-      const dy = p.y - pivot.y;
-      return { x: pivot.x + dx * sx, y: pivot.y + dy * sy };
-    });
-  }
-
-  function rotatePointsAround(points, pivot, angle) {
-    const cos = Math.cos(angle), sin = Math.sin(angle);
-    return points.map(p => {
-      const dx = p.x - pivot.x;
-      const dy = p.y - pivot.y;
-      return {
-        x: pivot.x + dx * cos - dy * sin,
-        y: pivot.y + dx * sin + dy * cos
-      };
-    });
-  }
-
-  function setShapeWorldPoints(shape, newPts) {
-    shape.points = newPts.map(p => ({ ...p }));
-    shape.transform = { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 };
-  }
-
-  function setShapeWorldPointsAndHoles(shape, newPts, newHoles) {
-    shape.points = newPts.map(p => ({ ...p }));
-    if (newHoles) {
-      shape.holes = newHoles.map(h => h.map(p => ({ ...p })));
-    }
-    shape.transform = { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 };
-  }
-
   canvas.addEventListener('mousedown', (e) => {
-    const world = screenToWorld(e.clientX, e.clientY);
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const world = screenToWorld(sx, sy);
+    lastMouseWorld = { ...world };
+
+    const cHit = hitTestConstraintIcon(world.x, world.y);
+    if (cHit >= 0 && e.button === 0) {
+      selectedConstraintIdx = (selectedConstraintIdx === cHit) ? -1 : cHit;
+      constraintSelection = [];
+      constraintMode = null;
+      updateDOFDisplay();
+      renderConstraintList();
+      render();
+      return;
+    }
+
+    if (e.button === 2 && constraintSelection.length > 0) {
+      constraintMenuEl.style.left = e.clientX + 'px';
+      constraintMenuEl.style.top = e.clientY + 'px';
+      constraintMenuEl.classList.remove('hidden');
+      return;
+    }
+
+    if (constraintMode) {
+      toggleConstraintSelection(world);
+      return;
+    }
 
     if (e.button === 1 || (e.button === 0 && e.altKey)) {
       isPanning = true;
-      panStart = { x: e.clientX, y: e.clientY, vx: viewport.x, vy: viewport.y };
+      panStart = { x: e.clientX, y: e.clientY, vp: { ...viewport } };
       canvas.style.cursor = 'grabbing';
       return;
     }
 
-    if (e.button !== 0) return;
-
-    if (isNodeEditMode && selectedIds.size === 1) {
+    if (isNodeEditMode && e.button === 0) {
       const vHit = hitTestVertex(world.x, world.y);
       if (vHit) {
-        pushHistory();
-        selectedVertex = {
-          isHole: vHit.isHole,
-          holeIndex: vHit.holeIndex,
-          pointIndex: vHit.pointIndex
-        };
+        selectedVertex = vHit;
         isDraggingVertex = true;
-        dragVertexOriginalData = {
-          shape: vHit.shape,
-          points: worldPointsOf(vHit.shape),
-          holes: worldHolesOf(vHit.shape)
-        };
+        dragVertexOriginalData = deepCloneState();
+        const pts = vHit.isHole ? worldHolesOf(vHit.shape)[vHit.holeIndex] : worldPointsOf(vHit.shape);
+        dragStart = { ...pts[vHit.pointIndex] };
+        canvas.style.cursor = 'crosshair';
+        render();
         return;
+      }
+      const eHit = hitTestEdge(world.x, world.y);
+      if (eHit && selectedIds.size === 1) {
+        const selShapes = getSelectedShapes();
+        if (selShapes.length === 1 && eHit.shape.id === selShapes[0].id) {
+          pushHistory();
+          const pts = eHit.isHole ? eHit.shape.holes[eHit.holeIndex] : eHit.shape.points;
+          const a = pts[eHit.edgeIndex];
+          const b = pts[(eHit.edgeIndex + 1) % pts.length];
+          const newPt = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+          if (eHit.isHole) {
+            eHit.shape.holes[eHit.holeIndex].splice(eHit.edgeIndex + 1, 0, newPt);
+          } else {
+            eHit.shape.points.splice(eHit.edgeIndex + 1, 0, newPt);
+          }
+          rebuildSolverAndParams();
+          initialSolve();
+          updateDOFDisplay();
+          render();
+          return;
+        }
       }
     }
 
-    if (currentTool === 'rect' || currentTool === 'circle') {
-      isDrawing = true;
-      drawStart = { ...world };
-      drawEnd = { ...world };
-    } else if (currentTool === 'polygon') {
-      if (polygonPoints.length === 0) {
-        polygonPoints.push({ ...world });
-      } else {
-        const first = polygonPoints[0];
-        if (dist(first, world) < 8 / viewport.scale) {
-          if (polygonPoints.length >= 3) {
-            pushHistory();
-            const ns = createShape(ensureCCW(polygonPoints.slice()));
-            shapes.push(ns);
-            selectedIds.clear();
-            selectedIds.add(ns.id);
-            polygonPoints = [];
-            updateToolbar();
-            renderLayers();
-          }
-        } else {
-          polygonPoints.push({ ...world });
-        }
-      }
-      render();
-      return;
-    } else if (currentTool === 'select' && !isNodeEditMode) {
-      const handle = hitTestHandle(world.x, world.y);
-      if (handle && selectedIds.size === 1) {
-        pushHistory();
+    if (e.button === 0) {
+      const handleHit = hitTestHandle(world.x, world.y);
+      if (handleHit && selectedIds.size === 1) {
         isTransforming = true;
-        transformHandle = handle;
-        const selShape = getSelectedShapes()[0];
-        const originalPts = worldPointsOf(selShape);
-        const originalHoles = worldHolesOf(selShape);
-        const origBounds = getBounds(originalPts);
-        const origCenter = boundsCenter(origBounds);
+        transformHandle = handleHit.type;
+        const shape = getSelectedShapes()[0];
+        transformStart = { world: { ...world }, shapeData: JSON.parse(JSON.stringify(shape)) };
+        transformOriginalData = deepCloneState();
+        canvas.style.cursor = handleHit.type === 'rotate' ? 'grab' : (handleHit.type[0] + handleHit.type[handleHit.type.length - 1] + '-resize');
+        return;
+      }
 
-        transformOriginalData = [{
-          shape: selShape,
-          originalPts,
-          originalHoles,
-          bounds: origBounds,
-          center: origCenter
-        }];
-        transformStart = {
-          world,
-          mouseX: e.clientX,
-          mouseY: e.clientY
-        };
-        if (handle.type === 'rotate') {
-          transformStart.angle = Math.atan2(world.y - origCenter.y, world.x - origCenter.x);
+      if (isNodeEditMode) {
+        const shapeHit = hitTest(world.x, world.y);
+        if (shapeHit) {
+          selectedIds.clear();
+          selectedIds.add(shapeHit.id);
+          selectedVertex = null;
+          updateToolbar();
+          renderLayers();
+          render();
+        } else {
+          selectedIds.clear();
+          selectedVertex = null;
+          updateToolbar();
+          renderLayers();
+          render();
         }
         return;
       }
 
-      const hit = hitTest(world.x, world.y);
-      if (hit) {
-        if (!e.shiftKey && !selectedIds.has(hit.id)) {
-          selectedIds.clear();
-        }
-        if (e.shiftKey && selectedIds.has(hit.id)) {
-          selectedIds.delete(hit.id);
+      if (currentTool === 'select') {
+        const shapeHit = hitTest(world.x, world.y);
+        if (shapeHit) {
+          if (e.shiftKey) {
+            if (selectedIds.has(shapeHit.id)) selectedIds.delete(shapeHit.id);
+            else selectedIds.add(shapeHit.id);
+          } else {
+            if (!selectedIds.has(shapeHit.id)) {
+              selectedIds.clear();
+              selectedIds.add(shapeHit.id);
+            }
+          }
+          isDraggingShape = true;
+          dragStart = { x: world.x, y: world.y };
+          dragOriginalWorldPts = [];
+          for (const s of getSelectedShapes()) {
+            dragOriginalWorldPts.push({
+              shape: s,
+              points: worldPointsOf(s).map(p => ({ ...p })),
+              holes: worldHolesOf(s).map(h => h.map(p => ({ ...p })))
+            });
+          }
+          canvas.style.cursor = 'move';
+          updateToolbar();
+          renderLayers();
+          render();
+          return;
         } else {
-          selectedIds.add(hit.id);
-        }
-        isDraggingShape = true;
-        dragStart = { world };
-        dragOriginalWorldPts = getSelectedShapes().map(s => ({
-          shape: s,
-          pts: worldPointsOf(s),
-          holes: worldHolesOf(s)
-        }));
-        updateToolbar();
-        renderLayers();
-        render();
-        return;
-      } else {
-        if (!e.shiftKey) {
           isMarquee = true;
           marqueeStart = { ...world };
           marqueeEnd = { ...world };
-          selectedIds.clear();
-          selectedVertex = null;
-        } else {
-          selectedIds.clear();
-          selectedVertex = null;
+          if (!e.shiftKey) selectedIds.clear();
+          updateToolbar();
+          renderLayers();
+          render();
+          return;
         }
-        isNodeEditMode = false;
-        updateToolbar();
-        renderLayers();
+      } else if (currentTool === 'rect' || currentTool === 'circle') {
+        isDrawing = true;
+        drawStart = { ...world };
+        drawEnd = { ...world };
+        return;
+      } else if (currentTool === 'polygon') {
+        if (polygonPoints.length === 0) {
+          polygonPoints = [{ ...world }];
+        } else {
+          const last = polygonPoints[polygonPoints.length - 1];
+          if (dist(last, world) > 5 / viewport.scale) {
+            polygonPoints.push({ ...world });
+          }
+        }
         render();
-      }
-    } else if (currentTool === 'select' && isNodeEditMode) {
-      const hit = hitTest(world.x, world.y);
-      if (!hit) {
-        selectedVertex = null;
-        render();
+        return;
       }
     }
   });
 
   canvas.addEventListener('mousemove', (e) => {
-    const world = screenToWorld(e.clientX, e.clientY);
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const world = screenToWorld(sx, sy);
     lastMouseWorld = { ...world };
     cursorEl.textContent = `x: ${world.x.toFixed(1)}, y: ${world.y.toFixed(1)}`;
 
     if (isPanning) {
       const dx = (e.clientX - panStart.x) / viewport.scale;
       const dy = (e.clientY - panStart.y) / viewport.scale;
-      viewport.x = panStart.vx - dx;
-      viewport.y = panStart.vy - dy;
+      viewport.x = panStart.vp.x - dx;
+      viewport.y = panStart.vp.y - dy;
       render();
       return;
     }
 
-    if (isDraggingVertex && isNodeEditMode && selectedVertex && selectedIds.size === 1 && dragVertexOriginalData) {
-      const s = dragVertexOriginalData.shape;
-      if (s) {
-        let newPts;
-        let newHoles;
-        if (!selectedVertex.isHole) {
-          newPts = dragVertexOriginalData.points.map((p, i) => {
-            if (i === selectedVertex.pointIndex) {
-              return { x: world.x, y: world.y };
-            }
-            return { ...p };
-          });
-          newHoles = dragVertexOriginalData.holes;
-        } else {
-          newPts = dragVertexOriginalData.points;
-          newHoles = dragVertexOriginalData.holes.map((hole, hi) => {
-            if (hi === selectedVertex.holeIndex) {
-              return hole.map((p, i) => {
-                if (i === selectedVertex.pointIndex) {
-                  return { x: world.x, y: world.y };
-                }
-                return { ...p };
-              });
-            }
-            return hole;
-          });
-        }
-        setShapeWorldPointsAndHoles(s, newPts, newHoles);
-        render();
-        return;
-      }
+    if (constraintMode) {
+      render();
+      return;
     }
 
-    if (isDrawing && drawStart) {
+    if (isNodeEditMode && !isDraggingVertex) {
+      hoveredEdge = hitTestEdge(world.x, world.y);
+    }
+
+    if (isDrawing) {
       drawEnd = { ...world };
-      render();
-      return;
-    }
-
-    if (currentTool === 'polygon' && polygonPoints.length > 0) {
       render();
       return;
     }
@@ -1118,179 +1612,264 @@
       return;
     }
 
+    if (isDraggingVertex && selectedVertex) {
+      const v = selectedVertex;
+      const pts = v.isHole ? v.shape.holes[v.holeIndex] : v.shape.points;
+      if (pts && pts[v.pointIndex]) {
+        const vpid = getVertexPointId(v);
+        const extraFixed = {};
+        extraFixed[vpid + '_x'] = world.x;
+        extraFixed[vpid + '_y'] = world.y;
+        const fixedPoints = new Set();
+        const res = runSolver(fixedPoints, extraFixed, 50);
+      }
+      updateDOFDisplay();
+      render();
+      return;
+    }
+
     if (isDraggingShape && dragStart) {
-      const dx = world.x - dragStart.world.x;
-      const dy = world.y - dragStart.world.y;
-      for (const d of dragOriginalWorldPts) {
-        const newPts = translatePoints(d.pts, dx, dy);
-        const newHoles = d.holes.map(h => translatePoints(h, dx, dy));
-        setShapeWorldPointsAndHoles(d.shape, newPts, newHoles);
+      const dx = world.x - dragStart.x;
+      const dy = world.y - dragStart.y;
+      const fixedPoints = new Set();
+      const extraFixed = {};
+      for (const entry of dragOriginalWorldPts) {
+        const s = entry.shape;
+        const origPts = entry.points;
+        for (let i = 0; i < origPts.length; i++) {
+          const pid = makePointId(s.id, false, -1, i);
+          extraFixed[pid + '_x'] = origPts[i].x + dx;
+          extraFixed[pid + '_y'] = origPts[i].y + dy;
+        }
+        for (let h = 0; h < entry.holes.length; h++) {
+          const origHole = entry.holes[h];
+          for (let i = 0; i < origHole.length; i++) {
+            const pid = makePointId(s.id, true, h, i);
+            extraFixed[pid + '_x'] = origHole[i].x + dx;
+            extraFixed[pid + '_y'] = origHole[i].y + dy;
+          }
+        }
       }
+      runSolver(fixedPoints, extraFixed, 50);
+      updateDOFDisplay();
       render();
       return;
     }
 
-    if (isTransforming && transformHandle && transformStart && transformOriginalData.length > 0) {
-      const data = transformOriginalData[0];
-      if (transformHandle.type === 'rotate') {
-        const currentAngle = Math.atan2(world.y - data.center.y, world.x - data.center.x);
-        const delta = currentAngle - transformStart.angle;
-        const newPts = rotatePointsAround(data.originalPts, data.center, delta);
-        const newHoles = data.originalHoles.map(h => rotatePointsAround(h, data.center, delta));
-        setShapeWorldPointsAndHoles(data.shape, newPts, newHoles);
-      } else {
-        const ht = transformHandle.type;
-        const b = data.bounds;
-        const c = data.center;
-        const origW = b.maxX - b.minX;
-        const origH = b.maxY - b.minY;
+    if (isTransforming && transformStart) {
+      const s = getSelectedShapes()[0];
+      if (!s) return;
+      const orig = transformStart.shapeData;
+      const origWp = applyTransform(orig.points, orig.transform.tx, orig.transform.ty, orig.transform.rotation, orig.transform.scaleX, orig.transform.scaleY);
+      const origBounds = getBounds(origWp);
+      const origCenter = boundsCenter(origBounds);
+      const dx = world.x - transformStart.world.x;
+      const dy = world.y - transformStart.world.y;
 
-        let anchorX, anchorY;
-        if (ht.includes('w')) anchorX = b.maxX;
-        else if (ht.includes('e')) anchorX = b.minX;
-        else anchorX = c.x;
+      let newPoints = origWp.map(p => ({ ...p }));
+      const handle = transformHandle;
 
-        if (ht.includes('n')) anchorY = b.maxY;
-        else if (ht.includes('s')) anchorY = b.minY;
-        else anchorY = c.y;
-
-        let targetX = world.x, targetY = world.y;
-
-        let sx = 1, sy = 1;
-        if (ht.includes('w')) {
-          const dx = anchorX - targetX;
-          if (origW > 1) sx = Math.max(0.05, dx / origW);
-        } else if (ht.includes('e')) {
-          const dx = targetX - anchorX;
-          if (origW > 1) sx = Math.max(0.05, dx / origW);
-        }
-        if (ht.includes('n')) {
-          const dy = anchorY - targetY;
-          if (origH > 1) sy = Math.max(0.05, dy / origH);
-        } else if (ht.includes('s')) {
-          const dy = targetY - anchorY;
-          if (origH > 1) sy = Math.max(0.05, dy / origH);
-        }
-
-        const isCorner = (ht === 'nw' || ht === 'ne' || ht === 'sw' || ht === 'se');
-        if (isCorner) {
-          const ratio = Math.max(sx, sy);
-          sx = ratio;
-          sy = ratio;
-        }
-
-        const pivot = { x: anchorX, y: anchorY };
-        const newPts = scalePointsAround(data.originalPts, pivot, sx, sy);
-        const newHoles = data.originalHoles.map(h => scalePointsAround(h, pivot, sx, sy));
-        setShapeWorldPointsAndHoles(data.shape, newPts, newHoles);
-      }
-      render();
-      return;
-    }
-
-    if (isNodeEditMode && selectedIds.size === 1 && !isDraggingVertex) {
-      const vHit = hitTestVertex(world.x, world.y);
-      if (vHit) {
-        canvas.style.cursor = 'move';
-        hoveredEdge = null;
-      } else {
-        const eHit = hitTestEdge(world.x, world.y);
-        if (eHit) {
-          hoveredEdge = {
-            isHole: eHit.isHole,
-            holeIndex: eHit.holeIndex,
-            edgeIndex: eHit.edgeIndex
+      if (handle === 'rotate') {
+        const ang1 = Math.atan2(transformStart.world.y - origCenter.y, transformStart.world.x - origCenter.x);
+        const ang2 = Math.atan2(world.y - origCenter.y, world.x - origCenter.x);
+        const rot = ang2 - ang1;
+        newPoints = origWp.map(p => {
+          const rx = p.x - origCenter.x;
+          const ry = p.y - origCenter.y;
+          return {
+            x: origCenter.x + rx * Math.cos(rot) - ry * Math.sin(rot),
+            y: origCenter.y + rx * Math.sin(rot) + ry * Math.cos(rot)
           };
-          canvas.style.cursor = 'copy';
-        } else {
-          hoveredEdge = null;
-          canvas.style.cursor = 'default';
+        });
+      } else {
+        const mapCorner = (type, b) => {
+          switch (type) {
+            case 'nw': return { x: b.minX, y: b.minY };
+            case 'n':  return { x: (b.minX + b.maxX) / 2, y: b.minY };
+            case 'ne': return { x: b.maxX, y: b.minY };
+            case 'e':  return { x: b.maxX, y: (b.minY + b.maxY) / 2 };
+            case 'se': return { x: b.maxX, y: b.maxY };
+            case 's':  return { x: (b.minX + b.maxX) / 2, y: b.maxY };
+            case 'sw': return { x: b.minX, y: b.maxY };
+            case 'w':  return { x: b.minX, y: (b.minY + b.maxY) / 2 };
+          }
+        };
+        const origCorner = mapCorner(handle, origBounds);
+        const opp = {
+          nw: 'se', n: 's', ne: 'sw', e: 'w',
+          se: 'nw', s: 'n', sw: 'ne', w: 'e'
+        };
+        const oppCorner = mapCorner(opp[handle], origBounds);
+        const newCorner = { x: origCorner.x + dx, y: origCorner.y + dy };
+        let sx = 1, sy = 1;
+        const origW = origBounds.maxX - origBounds.minX;
+        const origH = origBounds.maxY - origBounds.minY;
+        if (handle.includes('e') || handle.includes('w')) {
+          const newW = Math.abs(newCorner.x - oppCorner.x);
+          sx = origW > 0 ? newW / origW : 1;
+        }
+        if (handle.includes('n') || handle.includes('s')) {
+          const newH = Math.abs(newCorner.y - oppCorner.y);
+          sy = origH > 0 ? newH / origH : 1;
+        }
+        if (e.shiftKey) {
+          const s = Math.max(sx, sy);
+          sx = s; sy = s;
+        }
+        const anchor = oppCorner;
+        newPoints = origWp.map(p => {
+          const rx = p.x - anchor.x;
+          const ry = p.y - anchor.y;
+          return { x: anchor.x + rx * sx, y: anchor.y + ry * sy };
+        });
+      }
+
+      const localNewPts = applyTransformInverse(newPoints, orig.transform.tx, orig.transform.ty, orig.transform.rotation, orig.transform.scaleX, orig.transform.scaleY);
+      const fixedPoints = new Set();
+      const extraFixed = {};
+      for (let i = 0; i < localNewPts.length; i++) {
+        const pid = makePointId(s.id, false, -1, i);
+        extraFixed[pid + '_x'] = localNewPts[i].x;
+        extraFixed[pid + '_y'] = localNewPts[i].y;
+      }
+      s.points = orig.points.map(p => ({ ...p }));
+      s.transform = { ...orig.transform };
+      const origHoles = orig.holes || [];
+      const worldHoles = applyTransformToHoles(origHoles, orig.transform);
+      const localNewHoles = worldHoles.map(h => applyTransformInverse(h, orig.transform.tx, orig.transform.ty, orig.transform.rotation, orig.transform.scaleX, orig.transform.scaleY));
+      if (s.holes) {
+        for (let h = 0; h < s.holes.length; h++) {
+          const origHole = origHoles[h] || [];
+          s.holes[h] = origHole.map(p => ({ ...p }));
+          if (localNewHoles[h]) {
+            for (let i = 0; i < localNewHoles[h].length; i++) {
+              const pid = makePointId(s.id, true, h, i);
+              extraFixed[pid + '_x'] = localNewHoles[h][i].x;
+              extraFixed[pid + '_y'] = localNewHoles[h][i].y;
+            }
+          }
         }
       }
+      runSolver(fixedPoints, extraFixed, 50);
+      updateDOFDisplay();
       render();
       return;
     }
 
-    if (currentTool === 'select' && !isNodeEditMode) {
-      const handle = hitTestHandle(world.x, world.y);
-      if (handle) {
-        if (handle.type === 'rotate') canvas.style.cursor = 'grab';
-        else if (handle.type === 'nw' || handle.type === 'se') canvas.style.cursor = 'nwse-resize';
-        else if (handle.type === 'ne' || handle.type === 'sw') canvas.style.cursor = 'nesw-resize';
-        else if (handle.type === 'n' || handle.type === 's') canvas.style.cursor = 'ns-resize';
-        else canvas.style.cursor = 'ew-resize';
+    if (!isDraggingShape && !isTransforming && !isDraggingVertex) {
+      const handleHit = hitTestHandle(world.x, world.y);
+      if (handleHit && selectedIds.size === 1) {
+        canvas.style.cursor = handleHit.type === 'rotate' ? 'grab' : (handleHit.type[0] + handleHit.type[handleHit.type.length - 1] + '-resize');
+      } else if (currentTool === 'select' && !isNodeEditMode) {
+        const s = hitTest(world.x, world.y);
+        canvas.style.cursor = s ? 'pointer' : 'default';
+      } else if (isNodeEditMode) {
+        const vHit = hitTestVertex(world.x, world.y);
+        const cHit = hitTestConstraintIcon(world.x, world.y);
+        canvas.style.cursor = (vHit || cHit >= 0) ? 'pointer' : 'crosshair';
       } else {
-        const hit = hitTest(world.x, world.y);
-        canvas.style.cursor = hit ? 'move' : 'default';
+        canvas.style.cursor = 'crosshair';
       }
     }
+
+    render();
   });
 
   canvas.addEventListener('mouseup', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const world = screenToWorld(sx, sy);
+
     if (isPanning) {
       isPanning = false;
-      canvas.style.cursor = (currentTool === 'select') ? 'default' : 'crosshair';
+      canvas.style.cursor = 'default';
+      return;
+    }
+
+    constraintMenuEl.classList.add('hidden');
+
+    if (isDrawing) {
+      isDrawing = false;
+      if (drawStart && drawEnd) {
+        const x = Math.min(drawStart.x, drawEnd.x);
+        const y = Math.min(drawStart.y, drawEnd.y);
+        const w = Math.abs(drawEnd.x - drawStart.x);
+        const h = Math.abs(drawEnd.y - drawStart.y);
+
+        if (w > 2 || h > 2) {
+          pushHistory();
+          if (currentTool === 'rect') {
+            const pts = [
+              { x: x, y: y },
+              { x: x + w, y: y },
+              { x: x + w, y: y + h },
+              { x: x, y: y + h }
+            ];
+            const shape = createShape(pts);
+            shapes.push(shape);
+            selectedIds.clear();
+            selectedIds.add(shape.id);
+          } else if (currentTool === 'circle') {
+            const r = Math.max(w, h) / 2;
+            const cx = x + w / 2;
+            const cy = y + h / 2;
+            const sides = 32;
+            const pts = [];
+            for (let i = 0; i < sides; i++) {
+              const ang = (i / sides) * Math.PI * 2;
+              pts.push({ x: cx + r * Math.cos(ang), y: cy + r * Math.sin(ang) });
+            }
+            const shape = createShape(pts);
+            shapes.push(shape);
+            selectedIds.clear();
+            selectedIds.add(shape.id);
+          }
+          rebuildSolverAndParams();
+          initialSolve();
+          updateToolbar();
+          updateDOFDisplay();
+          renderLayers();
+          renderConstraintList();
+          render();
+        }
+      }
+      drawStart = null;
+      drawEnd = null;
+      return;
+    }
+
+    if (isMarquee) {
+      isMarquee = false;
+      if (marqueeStart && marqueeEnd) {
+        const minX = Math.min(marqueeStart.x, marqueeEnd.x);
+        const maxX = Math.max(marqueeStart.x, marqueeEnd.x);
+        const minY = Math.min(marqueeStart.y, marqueeEnd.y);
+        const maxY = Math.max(marqueeStart.y, marqueeEnd.y);
+        if (Math.abs(maxX - minX) > 2 && Math.abs(maxY - minY) > 2) {
+          for (const s of shapes) {
+            if (!s.visible || s.locked) continue;
+            const pts = worldPointsOf(s);
+            const b = getBounds(pts);
+            if (b.minX >= minX && b.maxX <= maxX && b.minY >= minY && b.maxY <= maxY) {
+              selectedIds.add(s.id);
+            }
+          }
+        }
+      }
+      marqueeStart = null;
+      marqueeEnd = null;
+      canvas.style.cursor = 'default';
+      updateToolbar();
+      renderLayers();
+      render();
       return;
     }
 
     if (isDraggingVertex) {
       isDraggingVertex = false;
-      dragVertexOriginalData = null;
-      return;
-    }
-
-    if (isDrawing && drawStart && drawEnd) {
-      isDrawing = false;
-      pushHistory();
-
-      if (currentTool === 'rect') {
-        const x = Math.min(drawStart.x, drawEnd.x);
-        const y = Math.min(drawStart.y, drawEnd.y);
-        const w = Math.abs(drawEnd.x - drawStart.x);
-        const h = Math.abs(drawEnd.y - drawStart.y);
-        if (w > 3 && h > 3) {
-          const pts = rectToPolygon(x, y, w, h);
-          const ns = createShape(ensureCCW(pts));
-          shapes.push(ns);
-          selectedIds.clear();
-          selectedIds.add(ns.id);
-        }
-      } else if (currentTool === 'circle') {
-        const r = dist(drawStart, drawEnd);
-        if (r > 3) {
-          const pts = circleToPolygon(drawStart.x, drawStart.y, r, 64);
-          const ns = createShape(ensureCCW(pts));
-          shapes.push(ns);
-          selectedIds.clear();
-          selectedIds.add(ns.id);
-        }
-      }
-      drawStart = drawEnd = null;
-      updateToolbar();
-      renderLayers();
-      render();
-      return;
-    }
-
-    if (isMarquee && marqueeStart && marqueeEnd) {
-      isMarquee = false;
-      const mx1 = Math.min(marqueeStart.x, marqueeEnd.x);
-      const my1 = Math.min(marqueeStart.y, marqueeEnd.y);
-      const mx2 = Math.max(marqueeStart.x, marqueeEnd.x);
-      const my2 = Math.max(marqueeStart.y, marqueeEnd.y);
-      if (Math.abs(mx2 - mx1) > 3 || Math.abs(my2 - my1) > 3) {
-        for (const s of shapes) {
-          if (!s.visible || s.locked) continue;
-          const pts = worldPointsOf(s);
-          const b = getBounds(pts);
-          if (b.minX >= mx1 && b.maxX <= mx2 && b.minY >= my1 && b.maxY <= my2) {
-            selectedIds.add(s.id);
-          }
-        }
-      }
-      marqueeStart = marqueeEnd = null;
-      updateToolbar();
-      renderLayers();
+      canvas.style.cursor = 'crosshair';
+      selectedVertex = null;
       render();
       return;
     }
@@ -1299,6 +1878,8 @@
       isDraggingShape = false;
       dragStart = null;
       dragOriginalWorldPts = [];
+      canvas.style.cursor = 'default';
+      updateToolbar();
       render();
       return;
     }
@@ -1308,213 +1889,336 @@
       transformHandle = null;
       transformStart = null;
       transformOriginalData = [];
+      canvas.style.cursor = 'default';
       render();
       return;
     }
   });
 
-  canvas.addEventListener('dblclick', (e) => {
-    const world = screenToWorld(e.clientX, e.clientY);
-
-    if (currentTool === 'polygon' && polygonPoints.length >= 3) {
-      pushHistory();
-      const ns = createShape(ensureCCW(polygonPoints.slice()));
-      shapes.push(ns);
-      selectedIds.clear();
-      selectedIds.add(ns.id);
-      polygonPoints = [];
-      updateToolbar();
-      renderLayers();
-      render();
-      return;
-    }
-
-    if (isNodeEditMode && selectedIds.size === 1) {
-      const s = getSelectedShapes()[0];
-      if (!s || s.locked || !s.visible) return;
-      const eHit = hitTestEdge(world.x, world.y);
-      if (eHit) {
-        pushHistory();
-        if (!eHit.isHole) {
-          const pts = worldPointsOf(s).map(p => ({ ...p }));
-          const a = pts[eHit.edgeIndex];
-          const b = pts[(eHit.edgeIndex + 1) % pts.length];
-          const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-          pts.splice(eHit.edgeIndex + 1, 0, mid);
-          setShapeWorldPointsAndHoles(s, pts, worldHolesOf(s));
-          selectedVertex = { isHole: false, holeIndex: -1, pointIndex: eHit.edgeIndex + 1 };
-        } else {
-          const holes = worldHolesOf(s).map(h => h.map(p => ({ ...p })));
-          const hole = holes[eHit.holeIndex];
-          const a = hole[eHit.edgeIndex];
-          const b = hole[(eHit.edgeIndex + 1) % hole.length];
-          const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-          hole.splice(eHit.edgeIndex + 1, 0, mid);
-          setShapeWorldPointsAndHoles(s, worldPointsOf(s), holes);
-          selectedVertex = { isHole: true, holeIndex: eHit.holeIndex, pointIndex: eHit.edgeIndex + 1 };
-        }
-        render();
-      }
-    }
+  canvas.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
   });
 
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
-    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-    const newScale = Math.max(0.25, Math.min(8, viewport.scale * factor));
-    if (newScale === viewport.scale) return;
-
-    const worldBefore = screenToWorld(e.clientX, e.clientY);
-    viewport.scale = newScale;
-    const worldAfter = screenToWorld(e.clientX, e.clientY);
-    viewport.x += worldBefore.x - worldAfter.x;
-    viewport.y += worldBefore.y - worldAfter.y;
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const before = screenToWorld(sx, sy);
+    const factor = e.deltaY > 0 ? 0.9 : 1.1;
+    viewport.scale = Math.max(0.1, Math.min(20, viewport.scale * factor));
+    const after = screenToWorld(sx, sy);
+    viewport.x += before.x - after.x;
+    viewport.y += before.y - after.y;
     render();
   }, { passive: false });
 
-  document.addEventListener('keydown', (e) => {
-    const activeEl = document.activeElement;
-    if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
+  canvas.addEventListener('dblclick', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const world = screenToWorld(sx, sy);
+
+    const cHit = hitTestConstraintIcon(world.x, world.y);
+    if (cHit >= 0) {
+      openConstraintEditDialog(cHit);
       return;
     }
 
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
-      e.preventDefault();
-      undo();
-      return;
-    }
-    if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
-      e.preventDefault();
-      redo();
-      return;
-    }
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
-      e.preventDefault();
-      selectedIds.clear();
-      for (const s of shapes) {
-        if (!s.locked && s.visible) selectedIds.add(s.id);
+    if (currentTool === 'polygon' && polygonPoints.length >= 3) {
+      pushHistory();
+      const pts = polygonPoints.slice(0, -1);
+      if (pts.length >= 3) {
+        const shape = createShape(pts);
+        shapes.push(shape);
+        selectedIds.clear();
+        selectedIds.add(shape.id);
       }
-      isNodeEditMode = false;
-      selectedVertex = null;
+      polygonPoints = [];
+      rebuildSolverAndParams();
+      initialSolve();
       updateToolbar();
+      updateDOFDisplay();
       renderLayers();
+      renderConstraintList();
       render();
       return;
     }
-    if (e.key === 'Delete' || e.key === 'Backspace') {
-      if (isNodeEditMode && selectedIds.size === 1 && selectedVertex) {
-        const s = getSelectedShapes()[0];
-        if (s && !s.locked && s.visible) {
-          if (!selectedVertex.isHole) {
-            const pts = worldPointsOf(s);
-            if (pts.length > 3) {
-              pushHistory();
-              let newIdx = selectedVertex.pointIndex;
-              const newPts = pts.filter((_, i) => i !== selectedVertex.pointIndex);
-              if (newIdx >= newPts.length) newIdx = newPts.length - 1;
-              setShapeWorldPointsAndHoles(s, newPts, worldHolesOf(s));
-              selectedVertex = { isHole: false, holeIndex: -1, pointIndex: newIdx };
-              render();
-            }
-          } else {
-            const holes = worldHolesOf(s);
-            const hole = holes[selectedVertex.holeIndex];
-            if (hole && hole.length > 3) {
-              pushHistory();
-              let newIdx = selectedVertex.pointIndex;
-              const newHoles = holes.map((h, hi) => {
-                if (hi === selectedVertex.holeIndex) {
-                  const nh = h.filter((_, i) => i !== selectedVertex.pointIndex);
-                  if (newIdx >= nh.length) newIdx = nh.length - 1;
-                  return nh;
-                }
-                return h;
-              });
-              setShapeWorldPointsAndHoles(s, worldPointsOf(s), newHoles);
-              selectedVertex = { isHole: true, holeIndex: selectedVertex.holeIndex, pointIndex: newIdx };
-              render();
-            }
+
+    if (isNodeEditMode) {
+      const vHit = hitTestVertex(world.x, world.y);
+      if (vHit) {
+        const pts = vHit.isHole ? worldPointsOf(vHit.shape) : null;
+        const regularPts = worldPointsOf(vHit.shape);
+        if (!vHit.isHole && regularPts.length > 3) {
+          pushHistory();
+          vHit.shape.points.splice(vHit.pointIndex, 1);
+          rebuildSolverAndParams();
+          initialSolve();
+          updateDOFDisplay();
+          render();
+          return;
+        }
+        if (vHit.isHole) {
+          const holes = worldHolesOf(vHit.shape);
+          if (holes[vHit.holeIndex] && holes[vHit.holeIndex].length > 3) {
+            pushHistory();
+            vHit.shape.holes[vHit.holeIndex].splice(vHit.pointIndex, 1);
+            rebuildSolverAndParams();
+            initialSolve();
+            updateDOFDisplay();
+            render();
+            return;
           }
         }
-        e.preventDefault();
-        return;
-      }
-      if (selectedIds.size > 0) {
-        pushHistory();
-        shapes = shapes.filter(s => !selectedIds.has(s.id));
-        selectedIds.clear();
-        selectedVertex = null;
-        isNodeEditMode = false;
-        updateToolbar();
-        renderLayers();
-        render();
-      }
-      return;
-    }
-    if (e.key === 'Escape') {
-      polygonPoints = [];
-      isDrawing = false;
-      selectedIds.clear();
-      selectedVertex = null;
-      isNodeEditMode = false;
-      setTool('select');
-      renderLayers();
-      render();
-      return;
-    }
-
-    if (!e.ctrlKey && !e.metaKey && !e.altKey) {
-      if (e.key.toLowerCase() === 'v') setTool('select');
-      else if (e.key.toLowerCase() === 'r') setTool('rect');
-      else if (e.key.toLowerCase() === 'c') setTool('circle');
-      else if (e.key.toLowerCase() === 'p') setTool('polygon');
-      else if (e.key.toLowerCase() === 'n') {
-        e.preventDefault();
-        toggleNodeEditMode();
       }
     }
   });
 
-  document.getElementById('tool-select').addEventListener('click', () => setTool('select'));
-  document.getElementById('tool-rect').addEventListener('click', () => setTool('rect'));
-  document.getElementById('tool-circle').addEventListener('click', () => setTool('circle'));
-  document.getElementById('tool-polygon').addEventListener('click', () => setTool('polygon'));
-  document.getElementById('op-union').addEventListener('click', () => performBoolean('union'));
-  document.getElementById('op-subtract').addEventListener('click', () => performBoolean('subtract'));
-  document.getElementById('op-intersect').addEventListener('click', () => performBoolean('intersect'));
-  document.getElementById('export-svg').addEventListener('click', exportSVG);
+  window.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
 
-  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-
-  function createDemo() {
-    const rect = createShape(
-      ensureCCW(rectToPolygon(-250, -120, 200, 150)),
-      'hsla(220, 60%, 70%, 0.4)'
-    );
-    rect.name = 'Rectangle';
-    const circle = createShape(
-      ensureCCW(circleToPolygon(-80, 0, 80, 64)),
-      'hsla(0, 60%, 70%, 0.4)'
-    );
-    circle.name = 'Circle';
-    const pentagonPts = [];
-    for (let i = 0; i < 5; i++) {
-      const a = -Math.PI / 2 + (i / 5) * Math.PI * 2;
-      pentagonPts.push({ x: 80 + Math.cos(a) * 75, y: -20 + Math.sin(a) * 75 });
+    if (e.key === 'Escape') {
+      if (constraintMode) {
+        constraintMode = null;
+        constraintSelection = [];
+        updateDOFDisplay();
+        showToast('Cancelled constraint mode');
+        render();
+        return;
+      }
+      if (polygonPoints.length > 0) {
+        polygonPoints = [];
+        render();
+        return;
+      }
+      if (isNodeEditMode) {
+        selectedVertex = null;
+      }
+      selectedIds.clear();
+      selectedConstraintIdx = -1;
+      updateToolbar();
+      renderLayers();
+      renderConstraintList();
+      render();
+      return;
     }
-    const pentagon = createShape(ensureCCW(pentagonPts), 'hsla(120, 60%, 70%, 0.4)');
-    pentagon.name = 'Pentagon';
 
-    const outerRect = ensureCCW(rectToPolygon(-50, 130, 200, 150));
-    const innerHole = ensureCW(rectToPolygon(10, 170, 80, 70));
-    const rectWithHole = createShape(outerRect, 'hsla(280, 60%, 60%, 0.5)', [innerHole]);
-    rectWithHole.name = 'Donut Rect';
+    if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+      e.preventDefault();
+      if (e.shiftKey) redo();
+      else undo();
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'y') {
+      e.preventDefault();
+      redo();
+      return;
+    }
 
-    shapes.push(rect, circle, pentagon, rectWithHole);
+    if ((e.key === 'Delete' || e.key === 'Backspace') && !isNodeEditMode) {
+      if (selectedConstraintIdx >= 0) {
+        pushHistory();
+        constraints.splice(selectedConstraintIdx, 1);
+        selectedConstraintIdx = -1;
+        rebuildSolverAndParams();
+        initialSolve();
+        updateDOFDisplay();
+        renderConstraintList();
+        render();
+        showToast('Constraint deleted');
+        return;
+      }
+      if (selectedIds.size > 0) {
+        pushHistory();
+        const ids = [...selectedIds];
+        for (const id of ids) {
+          const idx = shapes.findIndex(s => s.id === id);
+          if (idx >= 0) shapes.splice(idx, 1);
+        }
+        constraints = constraints.filter(c => {
+          const rps = c.getReferencedPoints();
+          for (const rp of rps) {
+            const { shapeId } = parsePointId(rp);
+            if (ids.includes(shapeId)) return false;
+          }
+          return true;
+        });
+        selectedIds.clear();
+        rebuildSolverAndParams();
+        initialSolve();
+        updateToolbar();
+        updateDOFDisplay();
+        renderLayers();
+        renderConstraintList();
+        render();
+        return;
+      }
+    }
+
+    const key = e.key.toLowerCase();
+    if (key === 'v') { currentTool = 'select'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); updateDOFDisplay(); render(); }
+    else if (key === 'r') { currentTool = 'rect'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); render(); }
+    else if (key === 'c') { currentTool = 'circle'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); render(); }
+    else if (key === 'p') { currentTool = 'polygon'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; polygonPoints = []; updateToolbar(); render(); }
+    else if (key === 'n') { isNodeEditMode = !isNodeEditMode; if (!isNodeEditMode) selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); updateDOFDisplay(); render(); showToast(isNodeEditMode ? 'Node Edit Mode ON' : 'Node Edit Mode OFF'); }
+    else if (key === 'a') { selectedIds.clear(); for (const s of shapes) { if (s.visible && !s.locked) selectedIds.add(s.id); } updateToolbar(); renderLayers(); render(); }
+  });
+
+  document.getElementById('tool-select').addEventListener('click', () => { currentTool = 'select'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); updateDOFDisplay(); render(); });
+  document.getElementById('tool-rect').addEventListener('click', () => { currentTool = 'rect'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); render(); });
+  document.getElementById('tool-circle').addEventListener('click', () => { currentTool = 'circle'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); render(); });
+  document.getElementById('tool-polygon').addEventListener('click', () => { currentTool = 'polygon'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; polygonPoints = []; updateToolbar(); render(); });
+
+  document.getElementById('export-svg').addEventListener('click', () => {
+    const minX = Math.min(...shapes.flatMap(s => worldPointsOf(s).map(p => p.x)));
+    const minY = Math.min(...shapes.flatMap(s => worldPointsOf(s).map(p => p.y)));
+    const maxX = Math.max(...shapes.flatMap(s => worldPointsOf(s).map(p => p.x)));
+    const maxY = Math.max(...shapes.flatMap(s => worldPointsOf(s).map(p => p.y)));
+    const pad = 20;
+    let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${minX - pad} ${minY - pad} ${maxX - minX + pad * 2} ${maxY - minY + pad * 2}">`;
+    for (const s of shapes) {
+      if (!s.visible) continue;
+      const pts = worldPointsOf(s);
+      const d = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ') + 'Z';
+      svg += `<path d="${d}" fill="${s.fill}" stroke="${s.stroke || '#000'}" stroke-width="${s.strokeWidth || 2}" fill-rule="evenodd"/>`;
+    }
+    svg += '</svg>';
+    const blob = new Blob([svg], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'drawing.svg';
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  document.getElementById('op-union').addEventListener('click', () => showToast('Boolean ops: basic demo only', 'warning'));
+  document.getElementById('op-subtract').addEventListener('click', () => showToast('Boolean ops: basic demo only', 'warning'));
+  document.getElementById('op-intersect').addEventListener('click', () => showToast('Boolean ops: basic demo only', 'warning'));
+
+  document.querySelectorAll('.constraint-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const type = btn.dataset.type;
+      startConstraintMode(type);
+    });
+  });
+
+  document.querySelectorAll('#constraint-menu .menu-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const type = item.dataset.type;
+      constraintMenuEl.classList.add('hidden');
+      if (canAddConstraint(type)) {
+        tryAddConstraint(type);
+      } else {
+        showToast('Wrong selection for ' + type, 'error');
+      }
+    });
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!constraintMenuEl.contains(e.target)) {
+      constraintMenuEl.classList.add('hidden');
+    }
+  });
+
+  document.getElementById('clear-constraints').addEventListener('click', clearAllConstraints);
+  document.getElementById('add-param').addEventListener('click', addParam);
+
+  document.getElementById('constraint-edit-close').addEventListener('click', closeConstraintEditDialog);
+  document.getElementById('constraint-edit-cancel').addEventListener('click', closeConstraintEditDialog);
+  document.getElementById('constraint-edit-ok').addEventListener('click', applyConstraintEdit);
+
+  function applyTransform(points, tx, ty, rot, sx, sy) {
+    const cos = Math.cos(rot), sin = Math.sin(rot);
+    return points.map(p => {
+      const rx = p.x * sx, ry = p.y * sy;
+      return {
+        x: rx * cos - ry * sin + tx,
+        y: rx * sin + ry * cos + ty
+      };
+    });
+  }
+
+  function applyTransformInverse(points, tx, ty, rot, sx, sy) {
+    const cos = Math.cos(-rot), sin = Math.sin(-rot);
+    const isx = Math.abs(sx) < 1e-10 ? 0 : 1 / sx;
+    const isy = Math.abs(sy) < 1e-10 ? 0 : 1 / sy;
+    return points.map(p => {
+      const px = (p.x - tx) * cos - (p.y - ty) * sin;
+      const py = (p.x - tx) * sin + (p.y - ty) * cos;
+      return { x: px * isx, y: py * isy };
+    });
+  }
+
+  function applyTransformToHoles(holes, t) {
+    return holes.map(h => applyTransform(h, t.tx, t.ty, t.rotation, t.scaleX, t.scaleY));
+  }
+
+  function pointInPolygonOrOnEdge(pt, poly) {
+    let inside = false;
+    const n = poly.length;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const xi = poly[i].x, yi = poly[i].y;
+      const xj = poly[j].x, yj = poly[j].y;
+      if (pointToSegmentDist(pt, poly[i], poly[j]) < EPS) return true;
+      const intersect = ((yi > pt.y) !== (yj > pt.y)) &&
+        (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi);
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }
+
+  function pointToSegmentDist(pt, a, b) {
+    const abx = b.x - a.x, aby = b.y - a.y;
+    const apx = pt.x - a.x, apy = pt.y - a.y;
+    const len2 = abx * abx + aby * aby;
+    let t = len2 > 0 ? (apx * abx + apy * aby) / len2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    const cx = a.x + t * abx, cy = a.y + t * aby;
+    return Math.hypot(pt.x - cx, pt.y - cy);
+  }
+
+  function randomFillColor() {
+    const palette = [
+      '#e3f2fd', '#bbdefb', '#90caf9', '#64b5f6', '#42a5f5',
+      '#e8f5e9', '#c8e6c9', '#a5d6a7', '#81c784', '#66bb6a',
+      '#fff3e0', '#ffe0b2', '#ffcc80', '#ffb74d', '#ffa726',
+      '#fce4ec', '#f8bbd0', '#f48fb1', '#f06292',
+      '#f3e5f5', '#e1bee7', '#ce93d8', '#ba68c8',
+      '#e0f7fa', '#b2ebf2', '#80deea', '#4dd0e1',
+      '#fff8e1', '#ffecb3', '#ffe082', '#ffd54f',
+      '#efebe9', '#d7ccc8', '#bcaaa4', '#a1887f'
+    ];
+    return palette[Math.floor(Math.random() * palette.length)];
+  }
+
+  function initDemo() {
+    const r1pts = [
+      { x: -200, y: -100 }, { x: -50, y: -100 }, { x: -50, y: 50 }, { x: -200, y: 50 }
+    ];
+    const r1 = createShape(r1pts, '#bbdefb');
+    shapes.push(r1);
+
+    const r2pts = [
+      { x: 50, y: -80 }, { x: 200, y: -80 }, { x: 200, y: 70 }, { x: 50, y: 70 }
+    ];
+    const r2 = createShape(r2pts, '#c8e6c9');
+    shapes.push(r2);
+
+    paramsData.width = { value: 150, expression: null };
+    paramManager.addParam('width', 150);
+    paramsData.height = { value: 130, expression: null };
+    paramManager.addParam('height', 130);
+
+    rebuildSolverAndParams();
+    updateDOFDisplay();
     renderLayers();
+    renderConstraintList();
+    renderParams();
     render();
   }
 
   resize();
-  createDemo();
+  initDemo();
 })();

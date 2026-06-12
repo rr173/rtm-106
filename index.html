@@ -39,22 +39,123 @@
     <span>Export SVG</span>
   </button>
 </div>
+
+<div id="constraint-toolbar">
+  <div class="panel-header">
+    <span>Constraints</span>
+  </div>
+  <div class="constraint-buttons">
+    <button class="constraint-btn" data-type="coincident" title="Coincident (make two points same)">
+      <span class="c-icon">◉</span><span class="c-label">Coincident</span>
+    </button>
+    <button class="constraint-btn" data-type="point-on-line" title="Point on Line">
+      <span class="c-icon">⊓</span><span class="c-label">Point on Line</span>
+    </button>
+    <button class="constraint-btn" data-type="parallel" title="Parallel">
+      <span class="c-icon">∥</span><span class="c-label">Parallel</span>
+    </button>
+    <button class="constraint-btn" data-type="perpendicular" title="Perpendicular">
+      <span class="c-icon">⟂</span><span class="c-label">Perpendicular</span>
+    </button>
+    <button class="constraint-btn" data-type="equal-length" title="Equal Length">
+      <span class="c-icon">≅</span><span class="c-label">Equal Length</span>
+    </button>
+    <button class="constraint-btn" data-type="fixed-angle" title="Fixed Angle">
+      <span class="c-icon">∠</span><span class="c-label">Fixed Angle</span>
+    </button>
+    <button class="constraint-btn" data-type="distance" title="Fixed Distance">
+      <span class="c-icon">↔</span><span class="c-label">Distance</span>
+    </button>
+    <button class="constraint-btn" data-type="horizontal" title="Horizontal">
+      <span class="c-icon">↔</span><span class="c-label">Horizontal</span>
+    </button>
+    <button class="constraint-btn" data-type="vertical" title="Vertical">
+      <span class="c-icon">↕</span><span class="c-label">Vertical</span>
+    </button>
+  </div>
+  <div class="constraint-status">
+    <span class="dof-label">DOF:</span>
+    <span id="dof-value" class="dof-value">0</span>
+    <span class="dof-hint" id="dof-hint"></span>
+  </div>
+  <div class="constraint-list-header">
+    <span>Constraint List</span>
+    <button id="clear-constraints" class="mini-btn" title="Clear all constraints">×</button>
+  </div>
+  <div id="constraint-list"></div>
+</div>
+
 <canvas id="canvas"></canvas>
+
 <div id="layers-panel">
   <div class="panel-header">
     <span>Layers</span>
   </div>
   <div id="layers-list"></div>
 </div>
+
+<div id="params-panel">
+  <div class="panel-header">
+    <span>Parameters</span>
+    <button id="add-param" class="mini-btn" title="Add parameter">+</button>
+  </div>
+  <div id="params-list"></div>
+  <div class="params-hint">Double-click constraint icon to bind parameter</div>
+</div>
+
 <div id="node-edit-indicator" class="hidden">
   <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
   <span>Node Edit Mode (N to toggle)</span>
 </div>
+
 <div id="hud">
   <span id="zoom-level">100%</span>
   <span id="cursor-pos">x: 0, y: 0</span>
+  <span id="mode-indicator"></span>
 </div>
+
+<div id="constraint-menu" class="context-menu hidden">
+  <div class="menu-title">Add Constraint</div>
+  <div class="menu-item" data-type="coincident">◉ Coincident (2 points)</div>
+  <div class="menu-item" data-type="point-on-line">⊓ Point on Line</div>
+  <div class="menu-item" data-type="parallel">∥ Parallel (2 edges)</div>
+  <div class="menu-item" data-type="perpendicular">⟂ Perpendicular (2 edges)</div>
+  <div class="menu-item" data-type="equal-length">≅ Equal Length (2 edges)</div>
+  <div class="menu-item" data-type="fixed-angle">∠ Fixed Angle (1 edge)</div>
+  <div class="menu-item" data-type="distance">↔ Distance (2 points)</div>
+  <div class="menu-item" data-type="horizontal">↔ Horizontal (2 points)</div>
+  <div class="menu-item" data-type="vertical">↕ Vertical (2 points)</div>
+</div>
+
+<div id="constraint-edit-dialog" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header">
+      <span>Edit Constraint</span>
+      <button class="modal-close" id="constraint-edit-close">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-row">
+        <label>Value:</label>
+        <input type="number" id="constraint-value-input" step="0.1" />
+      </div>
+      <div class="form-row">
+        <label>Bind to parameter:</label>
+        <select id="constraint-param-select">
+          <option value="">-- None --</option>
+        </select>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="modal-btn" id="constraint-edit-cancel">Cancel</button>
+      <button class="modal-btn primary" id="constraint-edit-ok">OK</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
 <script src="geometry.js"></script>
+<script src="constraint-solver.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
