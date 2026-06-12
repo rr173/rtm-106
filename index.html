@@ -1,60 +1,79 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Vector Boolean Editor</title>
+<title>多轨音频混音器工作站</title>
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-<div id="toolbar">
-  <button id="tool-select" class="tool-btn active" title="Select (V)">
-    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M4 2l15 7-6 2-2 6z"/></svg>
-  </button>
-  <button id="tool-rect" class="tool-btn" title="Rectangle (R)">
-    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="currentColor" stroke-width="2" d="M4 5h16v14H4z"/></svg>
-  </button>
-  <button id="tool-circle" class="tool-btn" title="Circle (C)">
-    <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/></svg>
-  </button>
-  <button id="tool-polygon" class="tool-btn" title="Polygon (P)">
-    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="currentColor" stroke-width="2" d="M12 3l8 6-3 9H7l-3-9z"/></svg>
-  </button>
-  <div class="sep"></div>
-  <button id="op-union" class="op-btn" disabled title="Union">
-    <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="9" cy="12" r="6" fill="currentColor" opacity="0.5"/><circle cx="15" cy="12" r="6" fill="currentColor" opacity="0.5"/></svg>
-    <span>Union</span>
-  </button>
-  <button id="op-subtract" class="op-btn" disabled title="Subtract">
-    <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="9" cy="12" r="7" fill="currentColor"/><circle cx="15" cy="12" r="5" fill="#fff"/></svg>
-    <span>Subtract</span>
-  </button>
-  <button id="op-intersect" class="op-btn" disabled title="Intersect">
-    <svg viewBox="0 0 24 24" width="22" height="22"><defs><clipPath id="c"><circle cx="15" cy="12" r="7"/></clipPath></defs><circle cx="9" cy="12" r="7" fill="currentColor" clip-path="url(#c)"/></svg>
-    <span>Intersect</span>
-  </button>
-  <div class="sep"></div>
-  <button id="export-svg" class="tool-btn" title="Export SVG">
-    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M12 3v12l-4-4-1.4 1.4L12 17.8l5.4-5.4L16 10l-4 4V3zM5 19h14v2H5z"/></svg>
-    <span>Export SVG</span>
-  </button>
-</div>
-<canvas id="canvas"></canvas>
-<div id="layers-panel">
-  <div class="panel-header">
-    <span>Layers</span>
+<div id="app">
+  <div id="toolbar">
+    <div class="toolbar-group transport">
+      <button id="btn-play" class="tool-btn" title="播放/暂停 (Space)">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path id="icon-play" fill="currentColor" d="M8 5v14l11-7z"/></svg>
+      </button>
+      <button id="btn-stop" class="tool-btn" title="停止 (Shift+Space)">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M6 6h12v12H6z"/></svg>
+      </button>
+      <div class="time-display">
+        <span id="time-current">00:00.000</span>
+        <span class="time-sep">/</span>
+        <span id="time-total">00:00.000</span>
+      </div>
+    </div>
+    <div class="toolbar-group">
+      <label class="bpm-label">BPM</label>
+      <input type="number" id="bpm-input" class="bpm-input" value="120" min="30" max="300" step="1"/>
+    </div>
+    <div class="toolbar-group">
+      <button id="btn-export" class="tool-btn export-btn" title="导出 WAV">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12 3v12l-4-4-1.4 1.4L12 17.8l5.4-5.4L16 10l-4 4V3zM5 19h14v2H5z"/></svg>
+        <span>导出 WAV</span>
+      </button>
+    </div>
+    <div class="toolbar-group master-group">
+      <label class="master-label">主音量</label>
+      <input type="range" id="master-volume" class="fader master-fader" min="0" max="150" value="100" step="1"/>
+      <span id="master-value" class="value-label">100%</span>
+    </div>
   </div>
-  <div id="layers-list"></div>
+
+  <div id="main-area">
+    <div id="tracks-panel">
+      <div class="tracks-header">
+        <span class="th-name">轨道</span>
+        <span class="th-levels">电平</span>
+        <span class="th-controls">M / S</span>
+        <span class="th-pan">声像</span>
+        <span class="th-volume">音量</span>
+      </div>
+      <div id="tracks-list"></div>
+    </div>
+
+    <div id="timeline-container">
+      <div id="timeline-ruler"></div>
+      <div id="timeline-scroll">
+        <div id="timeline-tracks"></div>
+      </div>
+      <div id="playhead"></div>
+    </div>
+  </div>
+
+  <div id="viz-area">
+    <div class="viz-panel spectrum-panel">
+      <div class="viz-title">频谱分析仪</div>
+      <canvas id="spectrum-canvas"></canvas>
+    </div>
+    <div class="viz-panel scope-panel">
+      <div class="viz-title">波形示波器</div>
+      <canvas id="scope-canvas"></canvas>
+    </div>
+  </div>
 </div>
-<div id="node-edit-indicator" class="hidden">
-  <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
-  <span>Node Edit Mode (N to toggle)</span>
-</div>
-<div id="hud">
-  <span id="zoom-level">100%</span>
-  <span id="cursor-pos">x: 0, y: 0</span>
-</div>
-<script src="geometry.js"></script>
+
+<input type="file" id="file-input" accept="audio/*" multiple hidden/>
+
 <script src="app.js"></script>
 </body>
 </html>
