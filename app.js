@@ -1,1281 +1,1520 @@
 (function() {
-  'use strict';
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const zoomEl = document.getElementById('zoom-level');
+  const cursorEl = document.getElementById('cursor-pos');
+  const layersListEl = document.getElementById('layers-list');
+  const nodeEditIndicatorEl = document.getElementById('node-edit-indicator');
 
-  const SAMPLE_RATE = 44100;
-  const TRACK_HEIGHT = 80;
-  const CLIP_VERTICAL_PADDING = 6;
-  const MIN_SECONDS_VISIBLE = 1;
-  const MAX_SECONDS_VISIBLE = 60;
-  const DEFAULT_BPM = 120;
-  const SPECTRUM_BARS = 64;
-  const SCOPE_SAMPLES = 1024;
+  const GRID_SIZE = 20;
 
-  const TRACK_COLORS = [
-    { bg: '#3a5a8a', border: '#5a7aaa' },
-    { bg: '#5a3a8a', border: '#7a5aaa' },
-    { bg: '#3a8a5a', border: '#5aaa7a' },
-    { bg: '#8a5a3a', border: '#aa7a5a' },
-    { bg: '#8a3a5a', border: '#aa5a7a' },
-    { bg: '#3a8a8a', border: '#5aaaaa' },
-  ];
+  let viewport = { x: 0, y: 0, scale: 1 };
+  let shapes = [];
+  let selectedIds = new Set();
+  let nextId = 1;
+  let currentTool = 'select';
 
-  let audioCtx = null;
-  let masterGain = null;
-  let masterAnalyser = null;
-  let tracks = [];
-  let nextTrackId = 1;
-  let nextClipId = 1;
+  let undoStack = [];
+  let redoStack = [];
+  const MAX_HISTORY = 50;
 
-  let isPlaying = false;
-  let playStartTime = 0;
-  let playStartOffset = 0;
-  let currentPlayTime = 0;
-  let totalDuration = 60;
+  let isDrawing = false;
+  let drawStart = null;
+  let drawEnd = null;
+  let polygonPoints = [];
 
-  let bpm = DEFAULT_BPM;
-  let pixelsPerSecond = 50;
-  let scrollOffsetX = 0;
+  let isPanning = false;
+  let panStart = null;
 
-  let selectedClipId = null;
-  let draggingClip = null;
-  let dragStartX = 0;
-  let dragStartClipTime = 0;
-  let snapEnabled = true;
+  let isDraggingShape = false;
+  let dragStart = null;
+  let dragOriginalWorldPts = [];
 
-  let pendingFileTrackId = null;
+  let isTransforming = false;
+  let transformHandle = null;
+  let transformStart = null;
+  let transformOriginalData = [];
 
-  let spectrumData = new Uint8Array(SPECTRUM_BARS);
-  let spectrumPeaks = new Array(SPECTRUM_BARS).fill(0);
-  let scopeTimeData = new Float32Array(SCOPE_SAMPLES);
+  let isMarquee = false;
+  let marqueeStart = null;
+  let marqueeEnd = null;
 
-  let trackPeakLevels = [];
-  let trackPeakHold = [];
-  let trackPeakHoldTime = [];
+  let lastMouseWorld = { x: 0, y: 0 };
 
-  const timelineScroll = document.getElementById('timeline-scroll');
-  const timelineTracks = document.getElementById('timeline-tracks');
-  const timelineRuler = document.getElementById('timeline-ruler');
-  const tracksList = document.getElementById('tracks-list');
-  const playhead = document.getElementById('playhead');
-  const fileInput = document.getElementById('file-input');
+  let isNodeEditMode = false;
+  let selectedVertex = null;
+  let isDraggingVertex = false;
+  let dragVertexOriginalData = null;
+  let hoveredEdge = null;
 
-  const spectrumCanvas = document.getElementById('spectrum-canvas');
-  const scopeCanvas = document.getElementById('scope-canvas');
-  const spectrumCtx = spectrumCanvas.getContext('2d');
-  const scopeCtx = scopeCanvas.getContext('2d');
-
-  const rulerCanvas = document.createElement('canvas');
-  rulerCanvas.className = 'ruler-canvas';
-  timelineRuler.appendChild(rulerCanvas);
-  const rulerCtx = rulerCanvas.getContext('2d');
-
-  const snapLine = document.createElement('div');
-  snapLine.className = 'snap-line';
-  document.getElementById('timeline-container').appendChild(snapLine);
-
-  function ensureAudioContext() {
-    if (!audioCtx) {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
-      masterGain = audioCtx.createGain();
-      masterGain.gain.value = 1.0;
-      masterAnalyser = audioCtx.createAnalyser();
-      masterAnalyser.fftSize = 2048;
-      masterGain.connect(masterAnalyser);
-      masterAnalyser.connect(audioCtx.destination);
-    }
-    if (audioCtx.state === 'suspended') {
-      audioCtx.resume();
-    }
+  function isSameVertex(a, b) {
+    if (!a || !b) return false;
+    return a.isHole === b.isHole && a.holeIndex === b.holeIndex && a.pointIndex === b.pointIndex;
   }
 
-  function createTrack(name) {
-    ensureAudioContext();
-    const id = nextTrackId++;
-    const gainNode = audioCtx.createGain();
-    gainNode.gain.value = 1.0;
-    const panNode = audioCtx.createStereoPanner();
-    panNode.pan.value = 0;
-    const analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 2048;
-    gainNode.connect(panNode);
-    panNode.connect(analyser);
-    analyser.connect(masterGain);
+  function isSameEdge(a, b) {
+    if (!a || !b) return false;
+    return a.isHole === b.isHole && a.holeIndex === b.holeIndex && a.edgeIndex === b.edgeIndex;
+  }
 
-    const track = {
-      id,
-      name: name || `Track ${id}`,
-      volume: 100,
-      pan: 0,
-      muted: false,
-      soloed: false,
-      clips: [],
-      gainNode,
-      panNode,
-      analyser,
-      color: TRACK_COLORS[(id - 1) % TRACK_COLORS.length],
-      levelDataL: new Float32Array(analyser.fftSize),
-      levelDataR: new Float32Array(analyser.fftSize),
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = window.innerWidth * dpr;
+    canvas.height = window.innerHeight * dpr;
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    render();
+  }
+  window.addEventListener('resize', resize);
+
+  function screenToWorld(sx, sy) {
+    return {
+      x: (sx - window.innerWidth / 2) / viewport.scale + viewport.x,
+      y: (sy - window.innerHeight / 2) / viewport.scale + viewport.y
     };
-    tracks.push(track);
-    trackPeakLevels[id] = [0, 0];
-    trackPeakHold[id] = [0, 0];
-    trackPeakHoldTime[id] = [0, 0];
-    return track;
   }
 
-  function initTracks() {
-    for (let i = 1; i <= 4; i++) {
-      createTrack(`Track ${i}`);
+  function bakeTransform(shape) {
+    const t = shape.transform;
+    shape.points = applyTransform(shape.points, t.tx, t.ty, t.rotation, t.scaleX, t.scaleY);
+    if (shape.holes) {
+      shape.holes = shape.holes.map(h => applyTransform(h, t.tx, t.ty, t.rotation, t.scaleX, t.scaleY));
     }
+    shape.transform = { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 };
   }
 
-  function formatTime(seconds) {
-    const m = Math.floor(seconds / 60);
-    const s = Math.floor(seconds % 60);
-    const ms = Math.floor((seconds % 1) * 1000);
-    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+  function worldPointsOf(shape) {
+    const t = shape.transform;
+    return applyTransform(shape.points, t.tx, t.ty, t.rotation, t.scaleX, t.scaleY);
   }
 
-  function timeToX(time) {
-    return time * pixelsPerSecond - scrollOffsetX;
+  function worldHolesOf(shape) {
+    if (!shape.holes) return [];
+    const t = shape.transform;
+    return shape.holes.map(h => applyTransform(h, t.tx, t.ty, t.rotation, t.scaleX, t.scaleY));
   }
 
-  function xToTime(x) {
-    return (x + scrollOffsetX) / pixelsPerSecond;
+  function getShapeById(id) {
+    return shapes.find(s => s.id === id);
   }
 
-  function snapTime(time) {
-    if (!snapEnabled) return time;
-    const beatDuration = 60 / bpm;
-    const snapped = Math.round(time / beatDuration) * beatDuration;
-    return Math.max(0, snapped);
+  function deepCloneShapes(arr) {
+    return JSON.parse(JSON.stringify(arr));
   }
 
-  function getBeatDuration() {
-    return 60 / bpm;
+  function pushHistory() {
+    undoStack.push(deepCloneShapes(shapes));
+    if (undoStack.length > MAX_HISTORY) undoStack.shift();
+    redoStack = [];
   }
 
-  function getBarDuration() {
-    return getBeatDuration() * 4;
+  function undo() {
+    if (undoStack.length === 0) return;
+    redoStack.push(deepCloneShapes(shapes));
+    shapes = undoStack.pop();
+    selectedIds.clear();
+    selectedVertex = null;
+    updateToolbar();
+    renderLayers();
+    render();
   }
 
-  function decodeAudioFile(file) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        ensureAudioContext();
-        audioCtx.decodeAudioData(e.target.result)
-          .then(resolve)
-          .catch(reject);
-      };
-      reader.onerror = reject;
-      reader.readAsArrayBuffer(file);
-    });
+  function redo() {
+    if (redoStack.length === 0) return;
+    undoStack.push(deepCloneShapes(shapes));
+    shapes = redoStack.pop();
+    selectedIds.clear();
+    selectedVertex = null;
+    updateToolbar();
+    renderLayers();
+    render();
   }
 
-  function generateWaveformData(buffer, width) {
-    const channelData = buffer.getChannelData(0);
-    const samplesPerPixel = Math.floor(channelData.length / width);
-    const waveform = new Float32Array(width * 2);
-
-    if (samplesPerPixel < 1) {
-      for (let i = 0; i < width; i++) {
-        const idx = Math.min(i, channelData.length - 1);
-        waveform[i * 2] = channelData[idx];
-        waveform[i * 2 + 1] = channelData[idx];
-      }
-      return waveform;
-    }
-
-    for (let i = 0; i < width; i++) {
-      let min = Infinity;
-      let max = -Infinity;
-      const start = i * samplesPerPixel;
-      const end = Math.min(start + samplesPerPixel, channelData.length);
-      for (let j = start; j < end; j++) {
-        const v = channelData[j];
-        if (v < min) min = v;
-        if (v > max) max = v;
-      }
-      waveform[i * 2] = min;
-      waveform[i * 2 + 1] = max;
-    }
-    return waveform;
-  }
-
-  function addClipToTrack(track, audioBuffer, fileName, startTime) {
-    const clip = {
-      id: nextClipId++,
-      trackId: track.id,
-      buffer: audioBuffer,
-      name: fileName || 'Audio Clip',
-      startTime: startTime || 0,
-      duration: audioBuffer.duration,
-      waveform: null,
-      waveformWidth: 0,
+  let shapeCounter = 0;
+  function createShape(points, fill, holes) {
+    shapeCounter++;
+    return {
+      id: nextId++,
+      name: 'Shape ' + shapeCounter,
+      type: 'polygon',
+      visible: true,
+      locked: false,
+      points: points,
+      holes: holes || [],
+      fill: fill || randomFillColor(),
+      stroke: '#000',
+      strokeWidth: 2,
+      transform: { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }
     };
-
-    const baseWidth = Math.ceil(clip.duration * pixelsPerSecond);
-    clip.waveform = generateWaveformData(audioBuffer, Math.max(100, baseWidth));
-    clip.waveformWidth = clip.waveform.length / 2;
-
-    track.clips.push(clip);
-    track.clips.sort((a, b) => a.startTime - b.startTime);
-
-    resolveClipOverlaps(track);
-    updateTotalDuration();
-    renderClips();
-    return clip;
   }
 
-  function resolveClipOverlaps(track) {
-    const clips = track.clips;
-    for (let i = 1; i < clips.length; i++) {
-      const prev = clips[i - 1];
-      const curr = clips[i];
-      if (curr.startTime < prev.startTime + prev.duration) {
-        curr.startTime = prev.startTime + prev.duration;
-      }
-    }
-  }
-
-  function updateTotalDuration() {
-    let maxEnd = 60;
-    for (const track of tracks) {
-      for (const clip of track.clips) {
-        const end = clip.startTime + clip.duration;
-        if (end > maxEnd) maxEnd = end;
-      }
-    }
-    totalDuration = maxEnd + 5;
-    document.getElementById('time-total').textContent = formatTime(totalDuration);
-  }
-
-  function getEffectiveGain(track) {
-    const anySolo = tracks.some(t => t.soloed);
-    if (track.muted) return 0;
-    if (anySolo && !track.soloed) return 0;
-    return track.volume / 100;
-  }
-
-  function applyTrackGains() {
-    for (const track of tracks) {
-      track.gainNode.gain.value = getEffectiveGain(track);
-    }
-  }
-
-  let scheduledSources = [];
-
-  function stopAllSources() {
-    for (const s of scheduledSources) {
-      try { s.stop(); } catch (e) {}
-      try { s.disconnect(); } catch (e) {}
-    }
-    scheduledSources = [];
-  }
-
-  function schedulePlayback(startOffset) {
-    stopAllSources();
-    const now = audioCtx.currentTime;
-    playStartTime = now;
-    playStartOffset = startOffset;
-
-    for (const track of tracks) {
-      for (const clip of track.clips) {
-        const clipStart = clip.startTime;
-        const clipEnd = clip.startTime + clip.duration;
-
-        if (clipEnd <= startOffset) continue;
-
-        const when = now + Math.max(0, clipStart - startOffset);
-        const offset = Math.max(0, startOffset - clipStart);
-        const duration = clipEnd - Math.max(clipStart, startOffset);
-
-        if (duration <= 0) continue;
-
-        const source = audioCtx.createBufferSource();
-        source.buffer = clip.buffer;
-        source.connect(track.gainNode);
-        try {
-          source.start(when, offset, duration);
-        } catch (e) {
-          try { source.start(when, offset); } catch (e2) {}
+  function hitTest(wx, wy) {
+    const pt = { x: wx, y: wy };
+    for (let i = shapes.length - 1; i >= 0; i--) {
+      const s = shapes[i];
+      if (!s.visible || s.locked) continue;
+      const wp = worldPointsOf(s);
+      if (!pointInPolygonOrOnEdge(pt, wp)) continue;
+      const holes = worldHolesOf(s);
+      let inHole = false;
+      for (const hole of holes) {
+        if (pointInPolygonOrOnEdge(pt, hole)) {
+          inHole = true;
+          break;
         }
-        scheduledSources.push(source);
+      }
+      if (!inHole) return s;
+    }
+    return null;
+  }
+
+  function getBounds(points) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of points) {
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x);
+      maxY = Math.max(maxY, p.y);
+    }
+    return { minX, minY, maxX, maxY };
+  }
+
+  function boundsCenter(b) {
+    return { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 };
+  }
+
+  function getControlHandles(bounds, ctr) {
+    return [
+      { type: 'nw', point: { x: bounds.minX, y: bounds.minY } },
+      { type: 'n',  point: { x: ctr.x, y: bounds.minY } },
+      { type: 'ne', point: { x: bounds.maxX, y: bounds.minY } },
+      { type: 'e',  point: { x: bounds.maxX, y: ctr.y } },
+      { type: 'se', point: { x: bounds.maxX, y: bounds.maxY } },
+      { type: 's',  point: { x: ctr.x, y: bounds.maxY } },
+      { type: 'sw', point: { x: bounds.minX, y: bounds.maxY } },
+      { type: 'w',  point: { x: bounds.minX, y: ctr.y } }
+    ];
+  }
+
+  function hitTestHandle(wx, wy) {
+    if (selectedIds.size !== 1) return null;
+    const s = getShapeById([...selectedIds][0]);
+    if (!s) return null;
+    const pts = worldPointsOf(s);
+    const bounds = getBounds(pts);
+    const ctr = boundsCenter(bounds);
+    const handles = getControlHandles(bounds, ctr);
+    const hitRadius = 8 / viewport.scale;
+    for (const h of handles) {
+      if (dist({x: wx, y: wy}, h.point) < hitRadius) return h;
+    }
+    if (dist({x: wx, y: wy}, ctr) < hitRadius * 1.5) return { type: 'rotate', point: ctr };
+    return null;
+  }
+
+  function hitTestVertex(wx, wy) {
+    if (selectedIds.size !== 1) return null;
+    const s = getShapeById([...selectedIds][0]);
+    if (!s) return null;
+    const hitRadius = 7 / viewport.scale;
+    const pts = worldPointsOf(s);
+    for (let i = 0; i < pts.length; i++) {
+      if (dist({x: wx, y: wy}, pts[i]) < hitRadius) {
+        return { shape: s, isHole: false, holeIndex: -1, pointIndex: i };
+      }
+    }
+    const holes = worldHolesOf(s);
+    for (let h = 0; h < holes.length; h++) {
+      const hole = holes[h];
+      for (let i = 0; i < hole.length; i++) {
+        if (dist({x: wx, y: wy}, hole[i]) < hitRadius) {
+          return { shape: s, isHole: true, holeIndex: h, pointIndex: i };
+        }
+      }
+    }
+    return null;
+  }
+
+  function hitTestEdge(wx, wy) {
+    if (selectedIds.size !== 1) return null;
+    const s = getShapeById([...selectedIds][0]);
+    if (!s) return null;
+    const hitRadius = 6 / viewport.scale;
+    const pts = worldPointsOf(s);
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i];
+      const b = pts[(i + 1) % pts.length];
+      if (pointToSegmentDist({x: wx, y: wy}, a, b) < hitRadius) {
+        return { shape: s, isHole: false, holeIndex: -1, edgeIndex: i };
+      }
+    }
+    const holes = worldHolesOf(s);
+    for (let h = 0; h < holes.length; h++) {
+      const hole = holes[h];
+      for (let i = 0; i < hole.length; i++) {
+        const a = hole[i];
+        const b = hole[(i + 1) % hole.length];
+        if (pointToSegmentDist({x: wx, y: wy}, a, b) < hitRadius) {
+          return { shape: s, isHole: true, holeIndex: h, edgeIndex: i };
+        }
+      }
+    }
+    return null;
+  }
+
+  function getSelectedShapes() {
+    return [...selectedIds].map(id => getShapeById(id)).filter(Boolean);
+  }
+
+  function drawPolygonPath(points, holes) {
+    ctx.beginPath();
+    if (points.length > 0) {
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) {
+        ctx.lineTo(points[i].x, points[i].y);
+      }
+      ctx.closePath();
+    }
+    if (holes) {
+      for (const hole of holes) {
+        if (hole.length > 0) {
+          ctx.moveTo(hole[0].x, hole[0].y);
+          for (let i = 1; i < hole.length; i++) {
+            ctx.lineTo(hole[i].x, hole[i].y);
+          }
+          ctx.closePath();
+        }
       }
     }
   }
 
-  function togglePlay() {
-    ensureAudioContext();
-    if (isPlaying) {
-      currentPlayTime = audioCtx.currentTime - playStartTime + playStartOffset;
-      stopAllSources();
-      isPlaying = false;
-      document.getElementById('btn-play').classList.remove('playing');
-      document.getElementById('icon-play').setAttribute('d', 'M8 5v14l11-7z');
+  function render() {
+    const w = window.innerWidth, h = window.innerHeight;
+    ctx.fillStyle = '#f0f0f0';
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.save();
+    ctx.translate(w / 2, h / 2);
+    ctx.scale(viewport.scale, viewport.scale);
+    ctx.translate(-viewport.x, -viewport.y);
+
+    drawGrid();
+
+    for (const s of shapes) {
+      if (s.visible) {
+        renderShape(s);
+      }
+    }
+
+    if (isNodeEditMode && selectedIds.size === 1) {
+      const s = getSelectedShapes()[0];
+      if (s && s.visible && !s.locked) renderNodeEdit(s);
     } else {
-      const maxTime = getMaxClipEnd();
-      if (currentPlayTime >= maxTime) {
-        currentPlayTime = 0;
+      for (const id of selectedIds) {
+        const s = getShapeById(id);
+        if (s && s.visible && !s.locked) renderSelection(s);
       }
-      applyTrackGains();
-      schedulePlayback(currentPlayTime);
-      isPlaying = true;
-      document.getElementById('btn-play').classList.add('playing');
-      document.getElementById('icon-play').setAttribute('d', 'M6 4h4v16H6zM14 4h4v16h-4z');
+    }
+
+    if (isDrawing && currentTool === 'rect' && drawStart && drawEnd) {
+      const x = Math.min(drawStart.x, drawEnd.x);
+      const y = Math.min(drawStart.y, drawEnd.y);
+      const w2 = Math.abs(drawEnd.x - drawStart.x);
+      const h2 = Math.abs(drawEnd.y - drawStart.y);
+      ctx.save();
+      ctx.fillStyle = 'rgba(100, 150, 255, 0.3)';
+      ctx.strokeStyle = '#4d9fff';
+      ctx.lineWidth = 2 / viewport.scale;
+      ctx.setLineDash([6 / viewport.scale, 4 / viewport.scale]);
+      ctx.fillRect(x, y, w2, h2);
+      ctx.strokeRect(x, y, w2, h2);
+      ctx.restore();
+    }
+
+    if (isDrawing && currentTool === 'circle' && drawStart && drawEnd) {
+      const r = dist(drawStart, drawEnd);
+      ctx.save();
+      ctx.fillStyle = 'rgba(100, 150, 255, 0.3)';
+      ctx.strokeStyle = '#4d9fff';
+      ctx.lineWidth = 2 / viewport.scale;
+      ctx.setLineDash([6 / viewport.scale, 4 / viewport.scale]);
+      ctx.beginPath();
+      ctx.arc(drawStart.x, drawStart.y, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    if (currentTool === 'polygon' && polygonPoints.length > 0) {
+      ctx.save();
+      ctx.strokeStyle = '#4d9fff';
+      ctx.lineWidth = 2 / viewport.scale;
+      ctx.setLineDash([6 / viewport.scale, 4 / viewport.scale]);
+      ctx.beginPath();
+      ctx.moveTo(polygonPoints[0].x, polygonPoints[0].y);
+      for (let i = 1; i < polygonPoints.length; i++) {
+        ctx.lineTo(polygonPoints[i].x, polygonPoints[i].y);
+      }
+      if (lastMouseWorld) {
+        ctx.lineTo(lastMouseWorld.x, lastMouseWorld.y);
+      }
+      ctx.stroke();
+      ctx.restore();
+
+      for (const p of polygonPoints) {
+        ctx.save();
+        ctx.fillStyle = '#4d9fff';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 4 / viewport.scale, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    if (isMarquee && marqueeStart && marqueeEnd) {
+      const x = Math.min(marqueeStart.x, marqueeEnd.x);
+      const y = Math.min(marqueeStart.y, marqueeEnd.y);
+      const w3 = Math.abs(marqueeEnd.x - marqueeStart.x);
+      const h3 = Math.abs(marqueeEnd.y - marqueeStart.y);
+      ctx.save();
+      ctx.fillStyle = 'rgba(77, 159, 255, 0.15)';
+      ctx.strokeStyle = '#4d9fff';
+      ctx.lineWidth = 1.5 / viewport.scale;
+      ctx.setLineDash([4 / viewport.scale, 3 / viewport.scale]);
+      ctx.fillRect(x, y, w3, h3);
+      ctx.strokeRect(x, y, w3, h3);
+      ctx.restore();
+    }
+
+    ctx.restore();
+
+    zoomEl.textContent = Math.round(viewport.scale * 100) + '%';
+  }
+
+  function renderPolyline(points, color) {
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2 / viewport.scale;
+    ctx.beginPath();
+    if (points.length > 0) {
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) {
+        ctx.lineTo(points[i].x, points[i].y);
+      }
+      ctx.closePath();
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function renderVertexSquare(p, isSelected, vertexSize) {
+    ctx.save();
+    if (isSelected) {
+      ctx.fillStyle = '#ff6b35';
+      ctx.strokeStyle = '#fff';
+    } else {
+      ctx.fillStyle = '#fff';
+      ctx.strokeStyle = '#1a73e8';
+    }
+    ctx.lineWidth = 2 / viewport.scale;
+    ctx.fillRect(p.x - vertexSize / 2, p.y - vertexSize / 2, vertexSize, vertexSize);
+    ctx.strokeRect(p.x - vertexSize / 2, p.y - vertexSize / 2, vertexSize, vertexSize);
+    ctx.restore();
+  }
+
+  function renderEdgeMidpoint(a, b) {
+    const midX = (a.x + b.x) / 2;
+    const midY = (a.y + b.y) / 2;
+    ctx.save();
+    ctx.fillStyle = '#4d9fff';
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.5 / viewport.scale;
+    const size = 6 / viewport.scale;
+    ctx.beginPath();
+    ctx.arc(midX, midY, size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function renderNodeEdit(s) {
+    const pts = worldPointsOf(s);
+    const holes = worldHolesOf(s);
+    const vertexSize = 8 / viewport.scale;
+
+    renderPolyline(pts, '#1a73e8');
+    for (const hole of holes) {
+      renderPolyline(hole, '#1a73e8');
+    }
+
+    for (let i = 0; i < pts.length; i++) {
+      const isSel = selectedVertex && !selectedVertex.isHole && selectedVertex.pointIndex === i;
+      renderVertexSquare(pts[i], isSel, vertexSize);
+    }
+
+    for (let h = 0; h < holes.length; h++) {
+      const hole = holes[h];
+      for (let i = 0; i < hole.length; i++) {
+        const isSel = selectedVertex && selectedVertex.isHole && selectedVertex.holeIndex === h && selectedVertex.pointIndex === i;
+        renderVertexSquare(hole[i], isSel, vertexSize);
+      }
+    }
+
+    if (hoveredEdge && !isDraggingVertex) {
+      if (!hoveredEdge.isHole) {
+        if (hoveredEdge.edgeIndex >= 0 && hoveredEdge.edgeIndex < pts.length) {
+          const a = pts[hoveredEdge.edgeIndex];
+          const b = pts[(hoveredEdge.edgeIndex + 1) % pts.length];
+          renderEdgeMidpoint(a, b);
+        }
+      } else {
+        const hole = holes[hoveredEdge.holeIndex];
+        if (hole && hoveredEdge.edgeIndex >= 0 && hoveredEdge.edgeIndex < hole.length) {
+          const a = hole[hoveredEdge.edgeIndex];
+          const b = hole[(hoveredEdge.edgeIndex + 1) % hole.length];
+          renderEdgeMidpoint(a, b);
+        }
+      }
     }
   }
 
-  function stopPlayback() {
-    stopAllSources();
-    isPlaying = false;
-    currentPlayTime = 0;
-    document.getElementById('btn-play').classList.remove('playing');
-    document.getElementById('icon-play').setAttribute('d', 'M8 5v14l11-7z');
-    updatePlayhead();
-  }
+  function drawGrid() {
+    const spacing = GRID_SIZE;
+    const w = window.innerWidth, h = window.innerHeight;
+    const tl = screenToWorld(0, 0);
+    const br = screenToWorld(w, h);
+    const startX = Math.floor(tl.x / spacing) * spacing;
+    const startY = Math.floor(tl.y / spacing) * spacing;
 
-  function getMaxClipEnd() {
-    let max = 0;
-    for (const track of tracks) {
-      for (const clip of track.clips) {
-        max = Math.max(max, clip.startTime + clip.duration);
+    ctx.save();
+    ctx.fillStyle = '#d8d8d8';
+    const dotSize = 1.5 / viewport.scale;
+    for (let x = startX; x <= br.x; x += spacing) {
+      for (let y = startY; y <= br.y; y += spacing) {
+        ctx.beginPath();
+        ctx.arc(x, y, dotSize, 0, Math.PI * 2);
+        ctx.fill();
       }
     }
-    return Math.max(max, 60);
+    ctx.restore();
   }
 
-  function updatePlayhead() {
-    if (isPlaying) {
-      currentPlayTime = audioCtx.currentTime - playStartTime + playStartOffset;
-      const maxTime = getMaxClipEnd();
-      if (currentPlayTime >= maxTime) {
-        stopPlayback();
-        return;
-      }
-    }
-    const x = timeToX(currentPlayTime);
-    const timelineContainer = document.getElementById('timeline-container');
-    const tracksPanelWidth = document.getElementById('tracks-panel').offsetWidth;
-    playhead.style.left = (tracksPanelWidth + x) + 'px';
-    document.getElementById('time-current').textContent = formatTime(currentPlayTime);
+  function renderShape(s) {
+    const pts = worldPointsOf(s);
+    const holes = worldHolesOf(s);
+    ctx.save();
+    drawPolygonPath(pts, holes);
+    ctx.fillStyle = s.fill;
+    ctx.fill('evenodd');
+    ctx.lineWidth = (s.strokeWidth || 2) / viewport.scale;
+    ctx.strokeStyle = s.stroke || '#000';
+    ctx.stroke();
+    ctx.restore();
   }
 
-  function renderTracks() {
-    tracksList.innerHTML = '';
+  function renderSelection(s) {
+    if (s.locked) return;
+    const pts = worldPointsOf(s);
+    const bounds = getBounds(pts);
+    const ctr = boundsCenter(bounds);
+    const handles = getControlHandles(bounds, ctr);
 
-    for (const track of tracks) {
-      const row = document.createElement('div');
-      row.className = 'track-row';
-      row.dataset.trackId = track.id;
+    ctx.save();
+    ctx.strokeStyle = '#1a73e8';
+    ctx.lineWidth = 2 / viewport.scale;
+    ctx.setLineDash([4 / viewport.scale, 3 / viewport.scale]);
+    ctx.strokeRect(bounds.minX, bounds.minY, bounds.maxX - bounds.minX, bounds.maxY - bounds.minY);
+    ctx.setLineDash([]);
+    ctx.restore();
 
-      const info = document.createElement('div');
-      info.className = 'track-info';
-
-      const nameEl = document.createElement('div');
-      nameEl.className = 'track-name';
-      nameEl.textContent = track.name;
-      nameEl.title = '双击重命名';
-      nameEl.addEventListener('dblclick', () => startRenameTrack(track, nameEl));
-      info.appendChild(nameEl);
-
-      const addBtn = document.createElement('button');
-      addBtn.className = 'add-clip-btn';
-      addBtn.innerHTML = '+';
-      addBtn.title = '添加音频片段';
-      addBtn.addEventListener('click', () => {
-        pendingFileTrackId = track.id;
-        fileInput.click();
-      });
-      info.appendChild(addBtn);
-
-      row.appendChild(info);
-
-      const levels = document.createElement('div');
-      levels.className = 'track-levels';
-      for (let ch = 0; ch < 2; ch++) {
-        const meter = document.createElement('div');
-        meter.className = 'level-meter';
-        meter.dataset.trackId = track.id;
-        meter.dataset.channel = ch;
-        const fill = document.createElement('div');
-        fill.className = 'level-fill';
-        const peak = document.createElement('div');
-        peak.className = 'level-peak';
-        meter.appendChild(fill);
-        meter.appendChild(peak);
-        levels.appendChild(meter);
-      }
-      row.appendChild(levels);
-
-      const controls = document.createElement('div');
-      controls.className = 'track-controls';
-      const msBtns = document.createElement('div');
-      msBtns.className = 'ms-buttons';
-
-      const muteBtn = document.createElement('button');
-      muteBtn.className = 'ms-btn mute' + (track.muted ? ' active' : '');
-      muteBtn.textContent = 'M';
-      muteBtn.title = '静音';
-      muteBtn.addEventListener('click', () => {
-        track.muted = !track.muted;
-        muteBtn.classList.toggle('active', track.muted);
-        applyTrackGains();
-      });
-
-      const soloBtn = document.createElement('button');
-      soloBtn.className = 'ms-btn solo' + (track.soloed ? ' active' : '');
-      soloBtn.textContent = 'S';
-      soloBtn.title = '独奏';
-      soloBtn.addEventListener('click', () => {
-        track.soloed = !track.soloed;
-        soloBtn.classList.toggle('active', track.soloed);
-        applyTrackGains();
-      });
-
-      msBtns.appendChild(muteBtn);
-      msBtns.appendChild(soloBtn);
-      controls.appendChild(msBtns);
-      row.appendChild(controls);
-
-      const panWrap = document.createElement('div');
-      panWrap.className = 'track-pan';
-      const panKnobWrap = document.createElement('div');
-      panKnobWrap.className = 'pan-knob-wrapper';
-      const panKnob = document.createElement('div');
-      panKnob.className = 'pan-knob';
-      const panIndicator = document.createElement('div');
-      panIndicator.className = 'pan-indicator';
-      panIndicator.style.transform = `translateX(-50%) rotate(${track.pan * 135}deg)`;
-      panKnob.appendChild(panIndicator);
-      panKnobWrap.appendChild(panKnob);
-      const panVal = document.createElement('span');
-      panVal.className = 'pan-value';
-      panVal.textContent = track.pan === 0 ? 'C' : (track.pan < 0 ? `L${Math.round(Math.abs(track.pan) * 100)}` : `R${Math.round(track.pan * 100)}`);
-      panKnobWrap.appendChild(panVal);
-      panWrap.appendChild(panKnobWrap);
-      attachPanKnob(panKnob, panIndicator, panVal, track);
-      row.appendChild(panWrap);
-
-      const volWrap = document.createElement('div');
-      volWrap.className = 'track-volume';
-      const volFader = document.createElement('input');
-      volFader.type = 'range';
-      volFader.className = 'fader track-fader';
-      volFader.min = '0';
-      volFader.max = '150';
-      volFader.value = track.volume;
-      volFader.step = '1';
-      const volVal = document.createElement('span');
-      volVal.className = 'value-label';
-      volVal.textContent = track.volume + '%';
-      volVal.style.fontSize = '10px';
-      volFader.addEventListener('input', () => {
-        track.volume = parseInt(volFader.value, 10);
-        volVal.textContent = track.volume + '%';
-        applyTrackGains();
-      });
-      volWrap.appendChild(volFader);
-      volWrap.appendChild(volVal);
-      row.appendChild(volWrap);
-
-      tracksList.appendChild(row);
+    for (const h of handles) {
+      ctx.save();
+      ctx.fillStyle = '#fff';
+      ctx.strokeStyle = '#1a73e8';
+      ctx.lineWidth = 1.5 / viewport.scale;
+      const hs = 6 / viewport.scale;
+      ctx.fillRect(h.point.x - hs / 2, h.point.y - hs / 2, hs, hs);
+      ctx.strokeRect(h.point.x - hs / 2, h.point.y - hs / 2, hs, hs);
+      ctx.restore();
     }
 
-    syncTimelineHeights();
+    ctx.save();
+    ctx.fillStyle = '#1a73e8';
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.5 / viewport.scale;
+    ctx.beginPath();
+    ctx.arc(ctr.x, ctr.y, 7 / viewport.scale, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(ctr.x, ctr.y, 14 / viewport.scale, 0, Math.PI * 2);
+    ctx.strokeStyle = '#1a73e8';
+    ctx.stroke();
+    ctx.restore();
   }
 
-  function startRenameTrack(track, nameEl) {
+  function renderLayers() {
+    layersListEl.innerHTML = '';
+
+    if (shapes.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty-layers';
+      empty.textContent = 'No layers yet';
+      layersListEl.appendChild(empty);
+      return;
+    }
+
+    for (let i = shapes.length - 1; i >= 0; i--) {
+      const s = shapes[i];
+      const item = document.createElement('div');
+      item.className = 'layer-item';
+      item.dataset.id = s.id;
+      item.draggable = true;
+
+      if (selectedIds.has(s.id)) item.classList.add('selected');
+      if (s.locked) item.classList.add('locked');
+
+      const visibilityBtn = document.createElement('button');
+      visibilityBtn.className = 'layer-btn ' + (s.visible ? 'active' : 'inactive');
+      visibilityBtn.innerHTML = s.visible
+        ? '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>'
+        : '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78l3.15 3.15.02-.16c0-1.66-1.34-3-3-3l-.17.01z"/></svg>';
+      visibilityBtn.title = s.visible ? 'Hide' : 'Show';
+      visibilityBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        pushHistory();
+        s.visible = !s.visible;
+        if (!s.visible && selectedIds.has(s.id)) {
+          selectedIds.delete(s.id);
+          if (selectedIds.size === 0) {
+            isNodeEditMode = false;
+            selectedVertex = null;
+          }
+        }
+        updateToolbar();
+        renderLayers();
+        render();
+      });
+
+      const colorSwatch = document.createElement('div');
+      colorSwatch.className = 'layer-color';
+      colorSwatch.style.background = s.fill;
+
+      const nameEl = document.createElement('span');
+      nameEl.className = 'layer-name';
+      nameEl.textContent = s.name;
+      nameEl.title = 'Double-click to rename';
+      nameEl.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        startRenameLayer(item, s, nameEl);
+      });
+
+      const lockBtn = document.createElement('button');
+      lockBtn.className = 'layer-btn ' + (s.locked ? 'active' : 'inactive');
+      lockBtn.innerHTML = s.locked
+        ? '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>'
+        : '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6zm9 14H6V10h12v10zm-6-3c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2z"/></svg>';
+      lockBtn.title = s.locked ? 'Unlock' : 'Lock';
+      lockBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        pushHistory();
+        s.locked = !s.locked;
+        if (s.locked && selectedIds.has(s.id)) {
+          selectedIds.delete(s.id);
+          selectedVertex = null;
+          isNodeEditMode = false;
+        }
+        updateToolbar();
+        renderLayers();
+        render();
+      });
+
+      item.appendChild(visibilityBtn);
+      item.appendChild(colorSwatch);
+      item.appendChild(nameEl);
+      item.appendChild(lockBtn);
+
+      item.addEventListener('click', (e) => {
+        if (s.locked) return;
+        if (e.shiftKey) {
+          if (selectedIds.has(s.id)) selectedIds.delete(s.id);
+          else selectedIds.add(s.id);
+        } else {
+          selectedIds.clear();
+          selectedIds.add(s.id);
+        }
+        selectedVertex = null;
+        updateToolbar();
+        renderLayers();
+        render();
+      });
+
+      item.addEventListener('dragstart', (e) => {
+        item.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', s.id.toString());
+      });
+
+      item.addEventListener('dragend', () => {
+        item.classList.remove('dragging');
+        document.querySelectorAll('.layer-item.drag-over').forEach(el => el.classList.remove('drag-over'));
+      });
+
+      item.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        document.querySelectorAll('.layer-item.drag-over').forEach(el => el.classList.remove('drag-over'));
+        item.classList.add('drag-over');
+      });
+
+      item.addEventListener('dragleave', () => {
+        item.classList.remove('drag-over');
+      });
+
+      item.addEventListener('drop', (e) => {
+        e.preventDefault();
+        item.classList.remove('drag-over');
+        const draggedId = parseInt(e.dataTransfer.getData('text/plain'), 10);
+        if (isNaN(draggedId) || draggedId === s.id) return;
+
+        const draggedIdx = shapes.findIndex(sh => sh.id === draggedId);
+        const targetIdx = shapes.findIndex(sh => sh.id === s.id);
+        if (draggedIdx === -1 || targetIdx === -1) return;
+
+        pushHistory();
+        const [dragged] = shapes.splice(draggedIdx, 1);
+        const newTargetIdx = shapes.findIndex(sh => sh.id === s.id);
+        shapes.splice(newTargetIdx, 0, dragged);
+        renderLayers();
+        render();
+      });
+
+      layersListEl.appendChild(item);
+    }
+  }
+
+  function startRenameLayer(item, shape, nameEl) {
     const input = document.createElement('input');
     input.type = 'text';
-    input.className = 'track-name-input';
-    input.value = track.name;
+    input.className = 'layer-name-input';
+    input.value = shape.name;
+    input.maxLength = 50;
     nameEl.replaceWith(input);
     input.focus();
     input.select();
 
     const finish = (commit) => {
-      const newName = input.value.trim() || track.name;
-      if (commit) track.name = newName;
-      nameEl.textContent = track.name;
+      const newName = input.value.trim() || shape.name;
+      if (commit && newName !== shape.name) {
+        pushHistory();
+        shape.name = newName;
+      }
       input.replaceWith(nameEl);
+      renderLayers();
     };
 
     input.addEventListener('keydown', (e) => {
       e.stopPropagation();
-      if (e.key === 'Enter') finish(true);
-      else if (e.key === 'Escape') finish(false);
+      if (e.key === 'Enter') {
+        finish(true);
+      } else if (e.key === 'Escape') {
+        finish(false);
+      }
     });
+
     input.addEventListener('blur', () => finish(true));
   }
 
-  function attachPanKnob(knobEl, indicatorEl, valueEl, track) {
-    let isDragging = false;
-    let startY = 0;
-    let startPan = 0;
+  function updateToolbar() {
+    document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+    const btnId = 'tool-' + currentTool;
+    const btn = document.getElementById(btnId);
+    if (btn) btn.classList.add('active');
 
-    function onDown(e) {
-      isDragging = true;
-      startY = e.clientY;
-      startPan = track.pan;
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-      e.preventDefault();
+    const opBtns = ['op-union', 'op-subtract', 'op-intersect'];
+    const enabled = selectedIds.size === 2;
+    for (const id of opBtns) {
+      document.getElementById(id).disabled = !enabled;
     }
 
-    function onMove(e) {
-      if (!isDragging) return;
-      const delta = (startY - e.clientY) / 150;
-      track.pan = Math.max(-1, Math.min(1, startPan + delta));
-      track.panNode.pan.value = track.pan;
-      indicatorEl.style.transform = `translateX(-50%) rotate(${track.pan * 135}deg)`;
-      valueEl.textContent = track.pan === 0 ? 'C' : (track.pan < 0 ? `L${Math.round(Math.abs(track.pan) * 100)}` : `R${Math.round(track.pan * 100)}`);
+    if (isNodeEditMode) {
+      nodeEditIndicatorEl.classList.remove('hidden');
+    } else {
+      nodeEditIndicatorEl.classList.add('hidden');
     }
-
-    function onUp() {
-      isDragging = false;
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-    }
-
-    knobEl.addEventListener('mousedown', onDown);
   }
 
-  function syncTimelineHeights() {
-    timelineTracks.innerHTML = '';
-    timelineTracks.style.width = Math.ceil(totalDuration * pixelsPerSecond) + 'px';
-
-    for (const track of tracks) {
-      const ttrack = document.createElement('div');
-      ttrack.className = 'timeline-track';
-      ttrack.dataset.trackId = track.id;
-      ttrack.style.height = TRACK_HEIGHT + 'px';
-
-      ttrack.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        ttrack.classList.add('drop-target');
-      });
-      ttrack.addEventListener('dragleave', () => {
-        ttrack.classList.remove('drop-target');
-      });
-      ttrack.addEventListener('drop', (e) => {
-        e.preventDefault();
-        ttrack.classList.remove('drop-target');
-        const files = e.dataTransfer.files;
-        if (files && files.length > 0) {
-          handleFiles(files, track.id);
+  function toggleNodeEditMode() {
+    if (isNodeEditMode) {
+      isNodeEditMode = false;
+      selectedVertex = null;
+      hoveredEdge = null;
+    } else {
+      if (selectedIds.size === 1) {
+        const s = getSelectedShapes()[0];
+        if (s && !s.locked && s.visible) {
+          isNodeEditMode = true;
+          selectedVertex = null;
+          hoveredEdge = null;
         }
-      });
+      }
+    }
+    updateToolbar();
+    render();
+  }
 
-      ttrack.addEventListener('click', (e) => {
-        if (e.target === ttrack) {
-          selectedClipId = null;
-          renderClips();
+  function performBoolean(op) {
+    if (selectedIds.size !== 2) return;
+    const ids = [...selectedIds];
+    const a = getShapeById(ids[0]);
+    const b = getShapeById(ids[1]);
+    if (!a || !b) return;
+
+    pushHistory();
+
+    const aPts = worldPointsOf(a);
+    const bPts = worldPointsOf(b);
+
+    let result;
+    if (op === 'union') result = weilerAtherton(aPts, bPts, 'union');
+    else if (op === 'intersect') result = weilerAtherton(aPts, bPts, 'intersect');
+    else result = weilerAtherton(aPts, bPts, 'subtract');
+
+    if (op === 'intersect' && result.polygons.length === 0) {
+      undoStack.pop();
+      alert('No intersection');
+      return;
+    }
+
+    shapes = shapes.filter(s => s.id !== a.id && s.id !== b.id);
+
+    const newShapes = [];
+    if (result.polygons.length > 0) {
+      const mainPoly = result.polygons[0];
+      const holes = result.holes || [];
+      const ns = createShape(ensureCCW(mainPoly), a.fill, holes.map(h => ensureCW(h)));
+      newShapes.push(ns);
+      shapes.push(ns);
+      for (let i = 1; i < result.polygons.length; i++) {
+        const ns2 = createShape(ensureCCW(result.polygons[i]), a.fill, []);
+        newShapes.push(ns2);
+        shapes.push(ns2);
+      }
+    }
+
+    selectedIds.clear();
+    for (const ns of newShapes) selectedIds.add(ns.id);
+    selectedVertex = null;
+    isNodeEditMode = false;
+    updateToolbar();
+    renderLayers();
+    render();
+  }
+
+  function exportSVG() {
+    if (shapes.length === 0) {
+      alert('Canvas is empty');
+      return;
+    }
+    const visibleShapes = shapes.filter(s => s.visible);
+    if (visibleShapes.length === 0) {
+      alert('No visible shapes');
+      return;
+    }
+    const allBounds = visibleShapes.map(s => getBounds(worldPointsOf(s)));
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const b of allBounds) {
+      minX = Math.min(minX, b.minX);
+      minY = Math.min(minY, b.minY);
+      maxX = Math.max(maxX, b.maxX);
+      maxY = Math.max(maxY, b.maxY);
+    }
+    const pad = 20;
+    minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+    const vw = Math.ceil(maxX - minX), vh = Math.ceil(maxY - minY);
+
+    let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${vw}" height="${vh}" viewBox="${minX.toFixed(2)} ${minY.toFixed(2)} ${vw} ${vh}">`;
+
+    for (const s of visibleShapes) {
+      const wp = worldPointsOf(s);
+      const holes = worldHolesOf(s);
+      let d = '';
+      if (wp.length > 0) {
+        d += `M${wp[0].x.toFixed(2)} ${wp[0].y.toFixed(2)}`;
+        for (let i = 1; i < wp.length; i++) {
+          d += ` L${wp[i].x.toFixed(2)} ${wp[i].y.toFixed(2)}`;
         }
-      });
-
-      const hint = document.createElement('div');
-      hint.className = 'track-drop-hint';
-      hint.textContent = '拖拽音频文件到此处';
-      ttrack.appendChild(hint);
-
-      timelineTracks.appendChild(ttrack);
-    }
-
-    renderClips();
-    drawRuler();
-    renderGrid();
-  }
-
-  function renderClips() {
-    document.querySelectorAll('.audio-clip').forEach(el => el.remove());
-
-    for (const track of tracks) {
-      const ttrack = timelineTracks.querySelector(`.timeline-track[data-track-id="${track.id}"]`);
-      if (!ttrack) continue;
-
-      const hint = ttrack.querySelector('.track-drop-hint');
-      if (hint) hint.style.display = track.clips.length > 0 ? 'none' : 'block';
-
-      for (const clip of track.clips) {
-        const clipEl = document.createElement('div');
-        clipEl.className = 'audio-clip' + (selectedClipId === clip.id ? ' selected' : '');
-        clipEl.dataset.clipId = clip.id;
-        const left = timeToX(clip.startTime);
-        const width = clip.duration * pixelsPerSecond;
-        clipEl.style.left = left + 'px';
-        clipEl.style.width = Math.max(20, width) + 'px';
-        clipEl.style.background = track.color.bg;
-        clipEl.style.borderColor = track.color.border;
-        clipEl.style.top = CLIP_VERTICAL_PADDING + 'px';
-        clipEl.style.height = (TRACK_HEIGHT - CLIP_VERTICAL_PADDING * 2) + 'px';
-
-        const nameLabel = document.createElement('div');
-        nameLabel.className = 'clip-name';
-        nameLabel.textContent = clip.name;
-        clipEl.appendChild(nameLabel);
-
-        const waveformCanvas = document.createElement('canvas');
-        waveformCanvas.className = 'clip-canvas';
-        clipEl.appendChild(waveformCanvas);
-
-        drawClipWaveform(waveformCanvas, clip, track);
-
-        clipEl.addEventListener('mousedown', (e) => {
-          e.stopPropagation();
-          startDragClip(e, clip);
-        });
-
-        clipEl.addEventListener('click', (e) => {
-          e.stopPropagation();
-          selectedClipId = clip.id;
-          renderClips();
-        });
-
-        ttrack.appendChild(clipEl);
+        d += ' Z';
       }
-    }
-  }
-
-  function drawClipWaveform(canvas, clip, track) {
-    const w = Math.max(1, Math.floor(clip.duration * pixelsPerSecond));
-    const h = TRACK_HEIGHT - CLIP_VERTICAL_PADDING * 2;
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = w * dpr;
-    canvas.height = h * dpr;
-    canvas.style.width = w + 'px';
-    canvas.style.height = h + 'px';
-    const ctx = canvas.getContext('2d');
-    ctx.scale(dpr, dpr);
-
-    ctx.fillStyle = 'rgba(255,255,255,0.9)';
-    const midY = h / 2;
-    const amp = (h / 2) - 4;
-
-    const wf = clip.waveform;
-    const srcWidth = wf.length / 2;
-    const ratio = srcWidth / w;
-
-    for (let x = 0; x < w; x++) {
-      const srcX = Math.floor(x * ratio);
-      const min = wf[srcX * 2];
-      const max = wf[srcX * 2 + 1];
-      const y1 = midY - max * amp;
-      const y2 = midY - min * amp;
-      ctx.fillRect(x, y1, 1, Math.max(1, y2 - y1));
-    }
-  }
-
-  function startDragClip(e, clip) {
-    ensureAudioContext();
-    draggingClip = clip;
-    dragStartX = e.clientX;
-    dragStartClipTime = clip.startTime;
-    snapEnabled = !e.altKey;
-    selectedClipId = clip.id;
-    renderClips();
-
-    document.addEventListener('mousemove', onDragClip);
-    document.addEventListener('mouseup', endDragClip);
-    e.preventDefault();
-  }
-
-  function onDragClip(e) {
-    if (!draggingClip) return;
-    snapEnabled = !e.altKey;
-
-    const timelineRect = timelineScroll.getBoundingClientRect();
-    const deltaX = e.clientX - dragStartX;
-    const deltaTime = deltaX / pixelsPerSecond;
-    let newTime = dragStartClipTime + deltaTime;
-    newTime = Math.max(0, newTime);
-
-    if (snapEnabled) {
-      newTime = snapTime(newTime);
-    }
-
-    const snapX = timeToX(newTime);
-    const timelineContainer = document.getElementById('timeline-container');
-    const tracksPanelWidth = document.getElementById('tracks-panel').offsetWidth;
-    snapLine.style.display = 'block';
-    snapLine.style.left = (tracksPanelWidth + snapX) + 'px';
-
-    const clipEl = document.querySelector(`.audio-clip[data-clip-id="${draggingClip.id}"]`);
-    if (clipEl) {
-      clipEl.style.left = snapX + 'px';
-    }
-  }
-
-  function endDragClip(e) {
-    if (draggingClip) {
-      const deltaX = e.clientX - dragStartX;
-      const deltaTime = deltaX / pixelsPerSecond;
-      let newTime = dragStartClipTime + deltaTime;
-      newTime = Math.max(0, newTime);
-      if (snapEnabled) newTime = snapTime(newTime);
-      draggingClip.startTime = newTime;
-
-      const track = tracks.find(t => t.id === draggingClip.trackId);
-      if (track) {
-        track.clips.sort((a, b) => a.startTime - b.startTime);
-        resolveClipOverlaps(track);
-      }
-
-      draggingClip = null;
-      snapLine.style.display = 'none';
-      renderClips();
-    }
-    document.removeEventListener('mousemove', onDragClip);
-    document.removeEventListener('mouseup', endDragClip);
-  }
-
-  function renderGrid() {
-    document.querySelectorAll('.beat-line').forEach(el => el.remove());
-
-    for (const track of tracks) {
-      const ttrack = timelineTracks.querySelector(`.timeline-track[data-track-id="${track.id}"]`);
-      if (!ttrack) continue;
-
-      const overlay = document.createElement('div');
-      overlay.className = 'grid-overlay';
-
-      const beatDur = getBeatDuration();
-      const barDur = getBarDuration();
-      const totalPx = totalDuration * pixelsPerSecond;
-
-      for (let t = 0; t <= totalDuration; t += beatDur) {
-        const x = t * pixelsPerSecond;
-        if (x > totalPx + 100) break;
-        const line = document.createElement('div');
-        line.className = 'beat-line' + (t % barDur < 0.001 ? ' bar' : '');
-        line.style.left = x + 'px';
-        overlay.appendChild(line);
-      }
-      ttrack.appendChild(overlay);
-    }
-  }
-
-  function drawRuler() {
-    const dpr = window.devicePixelRatio || 1;
-    const w = timelineRuler.clientWidth;
-    const h = timelineRuler.clientHeight;
-    rulerCanvas.width = w * dpr;
-    rulerCanvas.height = h * dpr;
-    rulerCanvas.style.width = w + 'px';
-    rulerCanvas.style.height = h + 'px';
-    rulerCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-    rulerCtx.fillStyle = '#25252b';
-    rulerCtx.fillRect(0, 0, w, h);
-
-    rulerCtx.strokeStyle = '#3a3a42';
-    rulerCtx.fillStyle = '#8a8a95';
-    rulerCtx.font = '10px "SF Mono", Monaco, Consolas, monospace';
-
-    const beatDur = getBeatDuration();
-    const barDur = getBarDuration();
-    const startSeconds = scrollOffsetX / pixelsPerSecond;
-    const endSeconds = startSeconds + w / pixelsPerSecond;
-
-    const startBeat = Math.floor(startSeconds / beatDur);
-    const endBeat = Math.ceil(endSeconds / beatDur);
-
-    for (let i = startBeat; i <= endBeat; i++) {
-      const t = i * beatDur;
-      const x = timeToX(t);
-      if (x < -10 || x > w + 10) continue;
-
-      const isBar = (t % barDur) < 0.001;
-
-      if (isBar) {
-        rulerCtx.strokeStyle = '#5a5a65';
-        rulerCtx.lineWidth = 1;
-        rulerCtx.beginPath();
-        rulerCtx.moveTo(x, 0);
-        rulerCtx.lineTo(x, h);
-        rulerCtx.stroke();
-
-        rulerCtx.fillStyle = '#b0b0b8';
-        const barNum = Math.floor(t / barDur) + 1;
-        rulerCtx.fillText(barNum.toString(), x + 3, 14);
-        rulerCtx.fillText(formatTime(t), x + 3, h - 4);
-      } else {
-        rulerCtx.strokeStyle = '#3a3a42';
-        rulerCtx.lineWidth = 1;
-        rulerCtx.beginPath();
-        rulerCtx.moveTo(x, h - 8);
-        rulerCtx.lineTo(x, h);
-        rulerCtx.stroke();
-      }
-    }
-
-    rulerCtx.strokeStyle = '#0f0f12';
-    rulerCtx.lineWidth = 1;
-    rulerCtx.beginPath();
-    rulerCtx.moveTo(0, h - 0.5);
-    rulerCtx.lineTo(w, h - 0.5);
-    rulerCtx.stroke();
-  }
-
-  function updateLevelMeters() {
-    const now = performance.now();
-
-    for (const track of tracks) {
-      const analyser = track.analyser;
-      if (!analyser) continue;
-
-      analyser.getFloatTimeDomainData(track.levelDataL);
-      let peakL = 0;
-      for (let i = 0; i < track.levelDataL.length; i++) {
-        const abs = Math.abs(track.levelDataL[i]);
-        if (abs > peakL) peakL = abs;
-      }
-
-      let peakR = peakL;
-
-      const effectiveGain = getEffectiveGain(track);
-      peakL *= effectiveGain;
-      peakR *= effectiveGain;
-
-      for (let ch = 0; ch < 2; ch++) {
-        const peak = ch === 0 ? peakL : peakR;
-        const meter = document.querySelector(`.level-meter[data-track-id="${track.id}"][data-channel="${ch}"]`);
-        if (!meter) continue;
-        const fill = meter.querySelector('.level-fill');
-        const peakEl = meter.querySelector('.level-peak');
-
-        const db = 20 * Math.log10(Math.max(0.0001, peak));
-        const pct = Math.max(0, Math.min(100, (db + 60) / 60 * 100));
-
-        fill.style.height = pct + '%';
-
-        const currentPeak = trackPeakHold[track.id] ? trackPeakHold[track.id][ch] || 0 : 0;
-        const peakHold = trackPeakHoldTime[track.id] ? trackPeakHoldTime[track.id][ch] || 0 : 0;
-
-        if (pct > currentPeak || now - peakHold > 2000) {
-          if (!trackPeakHold[track.id]) trackPeakHold[track.id] = [0, 0];
-          if (!trackPeakHoldTime[track.id]) trackPeakHoldTime[track.id] = [0, 0];
-          trackPeakHold[track.id][ch] = pct;
-          trackPeakHoldTime[track.id][ch] = now;
-        }
-
-        const displayPeak = trackPeakHold[track.id] ? trackPeakHold[track.id][ch] : 0;
-        peakEl.style.bottom = displayPeak + '%';
-      }
-    }
-  }
-
-  function drawSpectrum() {
-    const dpr = window.devicePixelRatio || 1;
-    const w = spectrumCanvas.clientWidth;
-    const h = spectrumCanvas.clientHeight;
-    spectrumCanvas.width = w * dpr;
-    spectrumCanvas.height = h * dpr;
-    spectrumCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-    spectrumCtx.fillStyle = '#0a0a0e';
-    spectrumCtx.fillRect(0, 0, w, h);
-
-    if (!masterAnalyser) return;
-
-    const freqData = new Uint8Array(masterAnalyser.frequencyBinCount);
-    masterAnalyser.getByteFrequencyData(freqData);
-
-    const barCount = SPECTRUM_BARS;
-    const barWidth = w / barCount;
-    const gap = 1;
-    const minFreq = 20;
-    const maxFreq = 20000;
-    const minLog = Math.log10(minFreq);
-    const maxLog = Math.log10(maxFreq);
-    const nyquist = SAMPLE_RATE / 2;
-
-    for (let i = 0; i < barCount; i++) {
-      const freqLowLog = minLog + (maxLog - minLog) * (i / barCount);
-      const freqHighLog = minLog + (maxLog - minLog) * ((i + 1) / barCount);
-      const freqLow = Math.pow(10, freqLowLog);
-      const freqHigh = Math.pow(10, freqHighLog);
-
-      const binLow = Math.floor(freqLow / nyquist * freqData.length);
-      const binHigh = Math.ceil(freqHigh / nyquist * freqData.length);
-
-      let sum = 0;
-      let count = 0;
-      for (let j = Math.max(0, binLow); j < Math.min(freqData.length, binHigh); j++) {
-        sum += freqData[j];
-        count++;
-      }
-      const avg = count > 0 ? sum / count : 0;
-
-      const barHeight = (avg / 255) * h;
-      spectrumPeaks[i] *= 0.95;
-      if (barHeight > spectrumPeaks[i]) spectrumPeaks[i] = barHeight;
-
-      const x = i * barWidth + gap / 2;
-      const bw = barWidth - gap;
-      const bh = Math.max(1, barHeight);
-      const y = h - bh;
-
-      const pct = i / barCount;
-      const hue = 200 - pct * 180;
-      spectrumCtx.fillStyle = `hsl(${hue}, 80%, 55%)`;
-      spectrumCtx.fillRect(x, y, bw, bh);
-
-      spectrumCtx.fillStyle = `hsla(${hue}, 80%, 70%, 0.8)`;
-      const py = h - spectrumPeaks[i] - 1;
-      spectrumCtx.fillRect(x, py, bw, 1);
-    }
-  }
-
-  function drawScope() {
-    const dpr = window.devicePixelRatio || 1;
-    const w = scopeCanvas.clientWidth;
-    const h = scopeCanvas.clientHeight;
-    scopeCanvas.width = w * dpr;
-    scopeCanvas.height = h * dpr;
-    scopeCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-    scopeCtx.fillStyle = '#0a0a0e';
-    scopeCtx.fillRect(0, 0, w, h);
-
-    scopeCtx.strokeStyle = '#1a3a1a';
-    scopeCtx.lineWidth = 1;
-    scopeCtx.beginPath();
-    scopeCtx.moveTo(0, h / 2);
-    scopeCtx.lineTo(w, h / 2);
-    scopeCtx.stroke();
-
-    if (!masterAnalyser) return;
-
-    masterAnalyser.getFloatTimeDomainData(scopeTimeData);
-
-    scopeCtx.strokeStyle = '#4aff6a';
-    scopeCtx.lineWidth = 1.5;
-    scopeCtx.beginPath();
-
-    const mid = h / 2;
-    const amp = (h / 2) * 0.8;
-
-    for (let i = 0; i < scopeTimeData.length; i++) {
-      const x = (i / scopeTimeData.length) * w;
-      const y = mid - scopeTimeData[i] * amp;
-      if (i === 0) {
-        scopeCtx.moveTo(x, y);
-      } else {
-        scopeCtx.lineTo(x, y);
-      }
-    }
-    scopeCtx.stroke();
-  }
-
-  function renderFrame() {
-    updatePlayhead();
-    updateLevelMeters();
-    drawSpectrum();
-    drawScope();
-    requestAnimationFrame(renderFrame);
-  }
-
-  async function handleFiles(files, targetTrackId) {
-    for (const file of files) {
-      if (!file.type.startsWith('audio/') && !/\.(wav|mp3|ogg)$/i.test(file.name)) continue;
-
-      try {
-        const buffer = await decodeAudioFile(file);
-        const track = targetTrackId
-          ? tracks.find(t => t.id === targetTrackId)
-          : tracks[0];
-        if (track) {
-          let startTime = 0;
-          if (track.clips.length > 0) {
-            const lastClip = track.clips[track.clips.length - 1];
-            startTime = lastClip.startTime + lastClip.duration;
+      if (holes && holes.length > 0) {
+        for (const hole of holes) {
+          if (hole.length > 0) {
+            const rev = hole.slice().reverse();
+            d += ` M${rev[0].x.toFixed(2)} ${rev[0].y.toFixed(2)}`;
+            for (let i = 1; i < rev.length; i++) {
+              d += ` L${rev[i].x.toFixed(2)} ${rev[i].y.toFixed(2)}`;
+            }
+            d += ' Z';
           }
-          addClipToTrack(track, buffer, file.name.replace(/\.[^/.]+$/, ''), startTime);
         }
-      } catch (e) {
-        console.error('解码音频失败:', e);
-        alert('无法解码音频文件: ' + file.name);
       }
+      svg += `<path d="${d}" fill="${s.fill}" fill-rule="evenodd" stroke="${s.stroke}" stroke-width="${s.strokeWidth || 2}" stroke-linejoin="round" stroke-linecap="round"/>`;
     }
+    svg += '</svg>';
+
+    const blob = new Blob([svg], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'canvas.svg';
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
-  function exportWAV() {
-    ensureAudioContext();
+  function setTool(tool) {
+    currentTool = tool;
+    isDrawing = false;
+    polygonPoints = [];
+    drawStart = drawEnd = null;
+    isNodeEditMode = false;
+    selectedVertex = null;
+    canvas.style.cursor = (tool === 'select') ? 'default' : 'crosshair';
+    updateToolbar();
+    render();
+  }
 
-    if (tracks.every(t => t.clips.length === 0)) {
-      alert('没有音频可导出');
+  function translatePoints(points, dx, dy) {
+    return points.map(p => ({ x: p.x + dx, y: p.y + dy }));
+  }
+
+  function scalePointsAround(points, pivot, sx, sy) {
+    return points.map(p => {
+      const dx = p.x - pivot.x;
+      const dy = p.y - pivot.y;
+      return { x: pivot.x + dx * sx, y: pivot.y + dy * sy };
+    });
+  }
+
+  function rotatePointsAround(points, pivot, angle) {
+    const cos = Math.cos(angle), sin = Math.sin(angle);
+    return points.map(p => {
+      const dx = p.x - pivot.x;
+      const dy = p.y - pivot.y;
+      return {
+        x: pivot.x + dx * cos - dy * sin,
+        y: pivot.y + dx * sin + dy * cos
+      };
+    });
+  }
+
+  function setShapeWorldPoints(shape, newPts) {
+    shape.points = newPts.map(p => ({ ...p }));
+    shape.transform = { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 };
+  }
+
+  function setShapeWorldPointsAndHoles(shape, newPts, newHoles) {
+    shape.points = newPts.map(p => ({ ...p }));
+    if (newHoles) {
+      shape.holes = newHoles.map(h => h.map(p => ({ ...p })));
+    }
+    shape.transform = { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 };
+  }
+
+  canvas.addEventListener('mousedown', (e) => {
+    const world = screenToWorld(e.clientX, e.clientY);
+
+    if (e.button === 1 || (e.button === 0 && e.altKey)) {
+      isPanning = true;
+      panStart = { x: e.clientX, y: e.clientY, vx: viewport.x, vy: viewport.y };
+      canvas.style.cursor = 'grabbing';
       return;
     }
 
-    let maxEnd = 0;
-    for (const track of tracks) {
-      for (const clip of track.clips) {
-        maxEnd = Math.max(maxEnd, clip.startTime + clip.duration);
-      }
-    }
-    if (maxEnd === 0) {
-      alert('没有音频可导出');
-      return;
-    }
+    if (e.button !== 0) return;
 
-    const duration = maxEnd + 0.5;
-    const offlineCtx = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(2, Math.ceil(duration * SAMPLE_RATE), SAMPLE_RATE);
-    const offlineMaster = offlineCtx.createGain();
-    offlineMaster.gain.value = parseFloat(document.getElementById('master-volume').value) / 100;
-    offlineMaster.connect(offlineCtx.destination);
-
-    for (const track of tracks) {
-      const tGain = offlineCtx.createGain();
-      tGain.gain.value = getEffectiveGain(track);
-      const tPan = offlineCtx.createStereoPanner();
-      tPan.pan.value = track.pan;
-      tGain.connect(tPan);
-      tPan.connect(offlineMaster);
-
-      for (const clip of track.clips) {
-        const source = offlineCtx.createBufferSource();
-        source.buffer = clip.buffer;
-        source.connect(tGain);
-        source.start(clip.startTime);
-      }
-    }
-
-    offlineCtx.startRendering().then((renderedBuffer) => {
-      const wavBlob = audioBufferToWav(renderedBuffer);
-      const now = new Date();
-      const ts = now.getFullYear().toString()
-        + String(now.getMonth() + 1).padStart(2, '0')
-        + String(now.getDate()).padStart(2, '0') + '_'
-        + String(now.getHours()).padStart(2, '0')
-        + String(now.getMinutes()).padStart(2, '0')
-        + String(now.getSeconds()).padStart(2, '0');
-      const url = URL.createObjectURL(wavBlob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `mix_${ts}.wav`;
-      a.click();
-      URL.revokeObjectURL(url);
-    }).catch((e) => {
-      console.error('导出失败:', e);
-      alert('导出失败: ' + e.message);
-    });
-  }
-
-  function audioBufferToWav(buffer) {
-    const numChannels = buffer.numberOfChannels;
-    const sampleRate = buffer.sampleRate;
-    const format = 1;
-    const bitDepth = 16;
-
-    const bytesPerSample = bitDepth / 8;
-    const blockAlign = numChannels * bytesPerSample;
-
-    const dataLength = buffer.length * blockAlign;
-    const bufferLength = 44 + dataLength;
-
-    const arrayBuffer = new ArrayBuffer(bufferLength);
-    const view = new DataView(arrayBuffer);
-
-    writeString(view, 0, 'RIFF');
-    view.setUint32(4, bufferLength - 8, true);
-    writeString(view, 8, 'WAVE');
-    writeString(view, 12, 'fmt ');
-    view.setUint32(16, 16, true);
-    view.setUint16(20, format, true);
-    view.setUint16(22, numChannels, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * blockAlign, true);
-    view.setUint16(32, blockAlign, true);
-    view.setUint16(34, bitDepth, true);
-    writeString(view, 36, 'data');
-    view.setUint32(40, dataLength, true);
-
-    const channels = [];
-    for (let c = 0; c < numChannels; c++) {
-      channels.push(buffer.getChannelData(c));
-    }
-
-    let offset = 44;
-    for (let i = 0; i < buffer.length; i++) {
-      for (let c = 0; c < numChannels; c++) {
-        let sample = channels[c][i];
-        sample = Math.max(-1, Math.min(1, sample));
-        sample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
-        view.setInt16(offset, sample, true);
-        offset += 2;
-      }
-    }
-
-    return new Blob([arrayBuffer], { type: 'audio/wav' });
-  }
-
-  function writeString(view, offset, str) {
-    for (let i = 0; i < str.length; i++) {
-      view.setUint8(offset + i, str.charCodeAt(i));
-    }
-  }
-
-  function setupEventListeners() {
-    document.getElementById('btn-play').addEventListener('click', togglePlay);
-    document.getElementById('btn-stop').addEventListener('click', stopPlayback);
-    document.getElementById('btn-export').addEventListener('click', exportWAV);
-
-    document.getElementById('master-volume').addEventListener('input', (e) => {
-      const val = parseInt(e.target.value, 10);
-      document.getElementById('master-value').textContent = val + '%';
-      if (masterGain) masterGain.gain.value = val / 100;
-    });
-
-    document.getElementById('bpm-input').addEventListener('change', (e) => {
-      bpm = Math.max(30, Math.min(300, parseInt(e.target.value, 10) || DEFAULT_BPM));
-      e.target.value = bpm;
-      drawRuler();
-      renderGrid();
-    });
-
-    fileInput.addEventListener('change', (e) => {
-      if (e.target.files && e.target.files.length > 0) {
-        handleFiles(e.target.files, pendingFileTrackId);
-        fileInput.value = '';
-        pendingFileTrackId = null;
-      }
-    });
-
-    timelineScroll.addEventListener('scroll', () => {
-      scrollOffsetX = timelineScroll.scrollLeft;
-      drawRuler();
-      renderGrid();
-      updatePlayhead();
-    });
-
-    timelineScroll.addEventListener('wheel', (e) => {
-      if (e.ctrlKey || e.metaKey) {
-        e.preventDefault();
-        const oldPps = pixelsPerSecond;
-        const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-        const newPps = Math.max(MIN_SECONDS_VISIBLE, Math.min(MAX_SECONDS_VISIBLE * 10, pixelsPerSecond * factor));
-        if (newPps !== pixelsPerSecond) {
-          const rect = timelineScroll.getBoundingClientRect();
-          const mouseX = e.clientX - rect.left;
-          const mouseTime = xToTime(mouseX);
-          pixelsPerSecond = newPps;
-          scrollOffsetX = mouseTime * pixelsPerSecond - mouseX;
-          timelineScroll.scrollLeft = scrollOffsetX;
-          syncTimelineHeights();
-          renderClips();
-        }
-      }
-    }, { passive: false });
-
-    document.addEventListener('keydown', (e) => {
-      const active = document.activeElement;
-      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
-
-      if (e.code === 'Space' && !e.shiftKey) {
-        e.preventDefault();
-        togglePlay();
-      } else if (e.code === 'Space' && e.shiftKey) {
-        e.preventDefault();
-        stopPlayback();
-      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedClipId !== null) {
-        e.preventDefault();
-        deleteSelectedClip();
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd' && selectedClipId !== null) {
-        e.preventDefault();
-        duplicateSelectedClip();
-      } else if (e.altKey) {
-        snapEnabled = false;
-      }
-    });
-
-    document.addEventListener('keyup', (e) => {
-      if (!e.altKey) snapEnabled = true;
-    });
-
-    document.body.addEventListener('dragover', (e) => {
-      if (e.dataTransfer && e.dataTransfer.types.includes('Files')) {
-        e.preventDefault();
-      }
-    });
-
-    document.body.addEventListener('drop', (e) => {
-      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-        const targetTimelineTrack = e.target.closest('.timeline-track');
-        if (targetTimelineTrack) return;
-        e.preventDefault();
-        handleFiles(e.dataTransfer.files, null);
-      }
-    });
-
-    timelineRuler.addEventListener('click', (e) => {
-      ensureAudioContext();
-      const rect = timelineRuler.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const time = xToTime(x);
-      currentPlayTime = Math.max(0, time);
-      if (isPlaying) {
-        stopAllSources();
-        applyTrackGains();
-        schedulePlayback(currentPlayTime);
-      }
-      updatePlayhead();
-    });
-
-    window.addEventListener('resize', () => {
-      drawRuler();
-    });
-  }
-
-  function deleteSelectedClip() {
-    for (const track of tracks) {
-      const idx = track.clips.findIndex(c => c.id === selectedClipId);
-      if (idx !== -1) {
-        track.clips.splice(idx, 1);
-        selectedClipId = null;
-        updateTotalDuration();
-        renderClips();
-        syncTimelineHeights();
-        return;
-      }
-    }
-  }
-
-  function duplicateSelectedClip() {
-    for (const track of tracks) {
-      const clip = track.clips.find(c => c.id === selectedClipId);
-      if (clip) {
-        const newClip = {
-          id: nextClipId++,
-          trackId: track.id,
-          buffer: clip.buffer,
-          name: clip.name + ' (副本)',
-          startTime: clip.startTime + clip.duration,
-          duration: clip.duration,
-          waveform: clip.waveform,
-          waveformWidth: clip.waveformWidth,
+    if (isNodeEditMode && selectedIds.size === 1) {
+      const vHit = hitTestVertex(world.x, world.y);
+      if (vHit) {
+        pushHistory();
+        selectedVertex = {
+          isHole: vHit.isHole,
+          holeIndex: vHit.holeIndex,
+          pointIndex: vHit.pointIndex
         };
-        track.clips.push(newClip);
-        track.clips.sort((a, b) => a.startTime - b.startTime);
-        resolveClipOverlaps(track);
-        selectedClipId = newClip.id;
-        updateTotalDuration();
-        renderClips();
+        isDraggingVertex = true;
+        dragVertexOriginalData = {
+          shape: vHit.shape,
+          points: worldPointsOf(vHit.shape),
+          holes: worldHolesOf(vHit.shape)
+        };
         return;
       }
     }
+
+    if (currentTool === 'rect' || currentTool === 'circle') {
+      isDrawing = true;
+      drawStart = { ...world };
+      drawEnd = { ...world };
+    } else if (currentTool === 'polygon') {
+      if (polygonPoints.length === 0) {
+        polygonPoints.push({ ...world });
+      } else {
+        const first = polygonPoints[0];
+        if (dist(first, world) < 8 / viewport.scale) {
+          if (polygonPoints.length >= 3) {
+            pushHistory();
+            const ns = createShape(ensureCCW(polygonPoints.slice()));
+            shapes.push(ns);
+            selectedIds.clear();
+            selectedIds.add(ns.id);
+            polygonPoints = [];
+            updateToolbar();
+            renderLayers();
+          }
+        } else {
+          polygonPoints.push({ ...world });
+        }
+      }
+      render();
+      return;
+    } else if (currentTool === 'select' && !isNodeEditMode) {
+      const handle = hitTestHandle(world.x, world.y);
+      if (handle && selectedIds.size === 1) {
+        pushHistory();
+        isTransforming = true;
+        transformHandle = handle;
+        const selShape = getSelectedShapes()[0];
+        const originalPts = worldPointsOf(selShape);
+        const originalHoles = worldHolesOf(selShape);
+        const origBounds = getBounds(originalPts);
+        const origCenter = boundsCenter(origBounds);
+
+        transformOriginalData = [{
+          shape: selShape,
+          originalPts,
+          originalHoles,
+          bounds: origBounds,
+          center: origCenter
+        }];
+        transformStart = {
+          world,
+          mouseX: e.clientX,
+          mouseY: e.clientY
+        };
+        if (handle.type === 'rotate') {
+          transformStart.angle = Math.atan2(world.y - origCenter.y, world.x - origCenter.x);
+        }
+        return;
+      }
+
+      const hit = hitTest(world.x, world.y);
+      if (hit) {
+        if (!e.shiftKey && !selectedIds.has(hit.id)) {
+          selectedIds.clear();
+        }
+        if (e.shiftKey && selectedIds.has(hit.id)) {
+          selectedIds.delete(hit.id);
+        } else {
+          selectedIds.add(hit.id);
+        }
+        isDraggingShape = true;
+        dragStart = { world };
+        dragOriginalWorldPts = getSelectedShapes().map(s => ({
+          shape: s,
+          pts: worldPointsOf(s),
+          holes: worldHolesOf(s)
+        }));
+        updateToolbar();
+        renderLayers();
+        render();
+        return;
+      } else {
+        if (!e.shiftKey) {
+          isMarquee = true;
+          marqueeStart = { ...world };
+          marqueeEnd = { ...world };
+          selectedIds.clear();
+          selectedVertex = null;
+        } else {
+          selectedIds.clear();
+          selectedVertex = null;
+        }
+        isNodeEditMode = false;
+        updateToolbar();
+        renderLayers();
+        render();
+      }
+    } else if (currentTool === 'select' && isNodeEditMode) {
+      const hit = hitTest(world.x, world.y);
+      if (!hit) {
+        selectedVertex = null;
+        render();
+      }
+    }
+  });
+
+  canvas.addEventListener('mousemove', (e) => {
+    const world = screenToWorld(e.clientX, e.clientY);
+    lastMouseWorld = { ...world };
+    cursorEl.textContent = `x: ${world.x.toFixed(1)}, y: ${world.y.toFixed(1)}`;
+
+    if (isPanning) {
+      const dx = (e.clientX - panStart.x) / viewport.scale;
+      const dy = (e.clientY - panStart.y) / viewport.scale;
+      viewport.x = panStart.vx - dx;
+      viewport.y = panStart.vy - dy;
+      render();
+      return;
+    }
+
+    if (isDraggingVertex && isNodeEditMode && selectedVertex && selectedIds.size === 1 && dragVertexOriginalData) {
+      const s = dragVertexOriginalData.shape;
+      if (s) {
+        let newPts;
+        let newHoles;
+        if (!selectedVertex.isHole) {
+          newPts = dragVertexOriginalData.points.map((p, i) => {
+            if (i === selectedVertex.pointIndex) {
+              return { x: world.x, y: world.y };
+            }
+            return { ...p };
+          });
+          newHoles = dragVertexOriginalData.holes;
+        } else {
+          newPts = dragVertexOriginalData.points;
+          newHoles = dragVertexOriginalData.holes.map((hole, hi) => {
+            if (hi === selectedVertex.holeIndex) {
+              return hole.map((p, i) => {
+                if (i === selectedVertex.pointIndex) {
+                  return { x: world.x, y: world.y };
+                }
+                return { ...p };
+              });
+            }
+            return hole;
+          });
+        }
+        setShapeWorldPointsAndHoles(s, newPts, newHoles);
+        render();
+        return;
+      }
+    }
+
+    if (isDrawing && drawStart) {
+      drawEnd = { ...world };
+      render();
+      return;
+    }
+
+    if (currentTool === 'polygon' && polygonPoints.length > 0) {
+      render();
+      return;
+    }
+
+    if (isMarquee) {
+      marqueeEnd = { ...world };
+      render();
+      return;
+    }
+
+    if (isDraggingShape && dragStart) {
+      const dx = world.x - dragStart.world.x;
+      const dy = world.y - dragStart.world.y;
+      for (const d of dragOriginalWorldPts) {
+        const newPts = translatePoints(d.pts, dx, dy);
+        const newHoles = d.holes.map(h => translatePoints(h, dx, dy));
+        setShapeWorldPointsAndHoles(d.shape, newPts, newHoles);
+      }
+      render();
+      return;
+    }
+
+    if (isTransforming && transformHandle && transformStart && transformOriginalData.length > 0) {
+      const data = transformOriginalData[0];
+      if (transformHandle.type === 'rotate') {
+        const currentAngle = Math.atan2(world.y - data.center.y, world.x - data.center.x);
+        const delta = currentAngle - transformStart.angle;
+        const newPts = rotatePointsAround(data.originalPts, data.center, delta);
+        const newHoles = data.originalHoles.map(h => rotatePointsAround(h, data.center, delta));
+        setShapeWorldPointsAndHoles(data.shape, newPts, newHoles);
+      } else {
+        const ht = transformHandle.type;
+        const b = data.bounds;
+        const c = data.center;
+        const origW = b.maxX - b.minX;
+        const origH = b.maxY - b.minY;
+
+        let anchorX, anchorY;
+        if (ht.includes('w')) anchorX = b.maxX;
+        else if (ht.includes('e')) anchorX = b.minX;
+        else anchorX = c.x;
+
+        if (ht.includes('n')) anchorY = b.maxY;
+        else if (ht.includes('s')) anchorY = b.minY;
+        else anchorY = c.y;
+
+        let targetX = world.x, targetY = world.y;
+
+        let sx = 1, sy = 1;
+        if (ht.includes('w')) {
+          const dx = anchorX - targetX;
+          if (origW > 1) sx = Math.max(0.05, dx / origW);
+        } else if (ht.includes('e')) {
+          const dx = targetX - anchorX;
+          if (origW > 1) sx = Math.max(0.05, dx / origW);
+        }
+        if (ht.includes('n')) {
+          const dy = anchorY - targetY;
+          if (origH > 1) sy = Math.max(0.05, dy / origH);
+        } else if (ht.includes('s')) {
+          const dy = targetY - anchorY;
+          if (origH > 1) sy = Math.max(0.05, dy / origH);
+        }
+
+        const isCorner = (ht === 'nw' || ht === 'ne' || ht === 'sw' || ht === 'se');
+        if (isCorner) {
+          const ratio = Math.max(sx, sy);
+          sx = ratio;
+          sy = ratio;
+        }
+
+        const pivot = { x: anchorX, y: anchorY };
+        const newPts = scalePointsAround(data.originalPts, pivot, sx, sy);
+        const newHoles = data.originalHoles.map(h => scalePointsAround(h, pivot, sx, sy));
+        setShapeWorldPointsAndHoles(data.shape, newPts, newHoles);
+      }
+      render();
+      return;
+    }
+
+    if (isNodeEditMode && selectedIds.size === 1 && !isDraggingVertex) {
+      const vHit = hitTestVertex(world.x, world.y);
+      if (vHit) {
+        canvas.style.cursor = 'move';
+        hoveredEdge = null;
+      } else {
+        const eHit = hitTestEdge(world.x, world.y);
+        if (eHit) {
+          hoveredEdge = {
+            isHole: eHit.isHole,
+            holeIndex: eHit.holeIndex,
+            edgeIndex: eHit.edgeIndex
+          };
+          canvas.style.cursor = 'copy';
+        } else {
+          hoveredEdge = null;
+          canvas.style.cursor = 'default';
+        }
+      }
+      render();
+      return;
+    }
+
+    if (currentTool === 'select' && !isNodeEditMode) {
+      const handle = hitTestHandle(world.x, world.y);
+      if (handle) {
+        if (handle.type === 'rotate') canvas.style.cursor = 'grab';
+        else if (handle.type === 'nw' || handle.type === 'se') canvas.style.cursor = 'nwse-resize';
+        else if (handle.type === 'ne' || handle.type === 'sw') canvas.style.cursor = 'nesw-resize';
+        else if (handle.type === 'n' || handle.type === 's') canvas.style.cursor = 'ns-resize';
+        else canvas.style.cursor = 'ew-resize';
+      } else {
+        const hit = hitTest(world.x, world.y);
+        canvas.style.cursor = hit ? 'move' : 'default';
+      }
+    }
+  });
+
+  canvas.addEventListener('mouseup', (e) => {
+    if (isPanning) {
+      isPanning = false;
+      canvas.style.cursor = (currentTool === 'select') ? 'default' : 'crosshair';
+      return;
+    }
+
+    if (isDraggingVertex) {
+      isDraggingVertex = false;
+      dragVertexOriginalData = null;
+      return;
+    }
+
+    if (isDrawing && drawStart && drawEnd) {
+      isDrawing = false;
+      pushHistory();
+
+      if (currentTool === 'rect') {
+        const x = Math.min(drawStart.x, drawEnd.x);
+        const y = Math.min(drawStart.y, drawEnd.y);
+        const w = Math.abs(drawEnd.x - drawStart.x);
+        const h = Math.abs(drawEnd.y - drawStart.y);
+        if (w > 3 && h > 3) {
+          const pts = rectToPolygon(x, y, w, h);
+          const ns = createShape(ensureCCW(pts));
+          shapes.push(ns);
+          selectedIds.clear();
+          selectedIds.add(ns.id);
+        }
+      } else if (currentTool === 'circle') {
+        const r = dist(drawStart, drawEnd);
+        if (r > 3) {
+          const pts = circleToPolygon(drawStart.x, drawStart.y, r, 64);
+          const ns = createShape(ensureCCW(pts));
+          shapes.push(ns);
+          selectedIds.clear();
+          selectedIds.add(ns.id);
+        }
+      }
+      drawStart = drawEnd = null;
+      updateToolbar();
+      renderLayers();
+      render();
+      return;
+    }
+
+    if (isMarquee && marqueeStart && marqueeEnd) {
+      isMarquee = false;
+      const mx1 = Math.min(marqueeStart.x, marqueeEnd.x);
+      const my1 = Math.min(marqueeStart.y, marqueeEnd.y);
+      const mx2 = Math.max(marqueeStart.x, marqueeEnd.x);
+      const my2 = Math.max(marqueeStart.y, marqueeEnd.y);
+      if (Math.abs(mx2 - mx1) > 3 || Math.abs(my2 - my1) > 3) {
+        for (const s of shapes) {
+          if (!s.visible || s.locked) continue;
+          const pts = worldPointsOf(s);
+          const b = getBounds(pts);
+          if (b.minX >= mx1 && b.maxX <= mx2 && b.minY >= my1 && b.maxY <= my2) {
+            selectedIds.add(s.id);
+          }
+        }
+      }
+      marqueeStart = marqueeEnd = null;
+      updateToolbar();
+      renderLayers();
+      render();
+      return;
+    }
+
+    if (isDraggingShape) {
+      isDraggingShape = false;
+      dragStart = null;
+      dragOriginalWorldPts = [];
+      render();
+      return;
+    }
+
+    if (isTransforming) {
+      isTransforming = false;
+      transformHandle = null;
+      transformStart = null;
+      transformOriginalData = [];
+      render();
+      return;
+    }
+  });
+
+  canvas.addEventListener('dblclick', (e) => {
+    const world = screenToWorld(e.clientX, e.clientY);
+
+    if (currentTool === 'polygon' && polygonPoints.length >= 3) {
+      pushHistory();
+      const ns = createShape(ensureCCW(polygonPoints.slice()));
+      shapes.push(ns);
+      selectedIds.clear();
+      selectedIds.add(ns.id);
+      polygonPoints = [];
+      updateToolbar();
+      renderLayers();
+      render();
+      return;
+    }
+
+    if (isNodeEditMode && selectedIds.size === 1) {
+      const s = getSelectedShapes()[0];
+      if (!s || s.locked || !s.visible) return;
+      const eHit = hitTestEdge(world.x, world.y);
+      if (eHit) {
+        pushHistory();
+        if (!eHit.isHole) {
+          const pts = worldPointsOf(s).map(p => ({ ...p }));
+          const a = pts[eHit.edgeIndex];
+          const b = pts[(eHit.edgeIndex + 1) % pts.length];
+          const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+          pts.splice(eHit.edgeIndex + 1, 0, mid);
+          setShapeWorldPointsAndHoles(s, pts, worldHolesOf(s));
+          selectedVertex = { isHole: false, holeIndex: -1, pointIndex: eHit.edgeIndex + 1 };
+        } else {
+          const holes = worldHolesOf(s).map(h => h.map(p => ({ ...p })));
+          const hole = holes[eHit.holeIndex];
+          const a = hole[eHit.edgeIndex];
+          const b = hole[(eHit.edgeIndex + 1) % hole.length];
+          const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+          hole.splice(eHit.edgeIndex + 1, 0, mid);
+          setShapeWorldPointsAndHoles(s, worldPointsOf(s), holes);
+          selectedVertex = { isHole: true, holeIndex: eHit.holeIndex, pointIndex: eHit.edgeIndex + 1 };
+        }
+        render();
+      }
+    }
+  });
+
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    const newScale = Math.max(0.25, Math.min(8, viewport.scale * factor));
+    if (newScale === viewport.scale) return;
+
+    const worldBefore = screenToWorld(e.clientX, e.clientY);
+    viewport.scale = newScale;
+    const worldAfter = screenToWorld(e.clientX, e.clientY);
+    viewport.x += worldBefore.x - worldAfter.x;
+    viewport.y += worldBefore.y - worldAfter.y;
+    render();
+  }, { passive: false });
+
+  document.addEventListener('keydown', (e) => {
+    const activeEl = document.activeElement;
+    if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
+      return;
+    }
+
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      undo();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
+      e.preventDefault();
+      redo();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+      e.preventDefault();
+      selectedIds.clear();
+      for (const s of shapes) {
+        if (!s.locked && s.visible) selectedIds.add(s.id);
+      }
+      isNodeEditMode = false;
+      selectedVertex = null;
+      updateToolbar();
+      renderLayers();
+      render();
+      return;
+    }
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      if (isNodeEditMode && selectedIds.size === 1 && selectedVertex) {
+        const s = getSelectedShapes()[0];
+        if (s && !s.locked && s.visible) {
+          if (!selectedVertex.isHole) {
+            const pts = worldPointsOf(s);
+            if (pts.length > 3) {
+              pushHistory();
+              let newIdx = selectedVertex.pointIndex;
+              const newPts = pts.filter((_, i) => i !== selectedVertex.pointIndex);
+              if (newIdx >= newPts.length) newIdx = newPts.length - 1;
+              setShapeWorldPointsAndHoles(s, newPts, worldHolesOf(s));
+              selectedVertex = { isHole: false, holeIndex: -1, pointIndex: newIdx };
+              render();
+            }
+          } else {
+            const holes = worldHolesOf(s);
+            const hole = holes[selectedVertex.holeIndex];
+            if (hole && hole.length > 3) {
+              pushHistory();
+              let newIdx = selectedVertex.pointIndex;
+              const newHoles = holes.map((h, hi) => {
+                if (hi === selectedVertex.holeIndex) {
+                  const nh = h.filter((_, i) => i !== selectedVertex.pointIndex);
+                  if (newIdx >= nh.length) newIdx = nh.length - 1;
+                  return nh;
+                }
+                return h;
+              });
+              setShapeWorldPointsAndHoles(s, worldPointsOf(s), newHoles);
+              selectedVertex = { isHole: true, holeIndex: selectedVertex.holeIndex, pointIndex: newIdx };
+              render();
+            }
+          }
+        }
+        e.preventDefault();
+        return;
+      }
+      if (selectedIds.size > 0) {
+        pushHistory();
+        shapes = shapes.filter(s => !selectedIds.has(s.id));
+        selectedIds.clear();
+        selectedVertex = null;
+        isNodeEditMode = false;
+        updateToolbar();
+        renderLayers();
+        render();
+      }
+      return;
+    }
+    if (e.key === 'Escape') {
+      polygonPoints = [];
+      isDrawing = false;
+      selectedIds.clear();
+      selectedVertex = null;
+      isNodeEditMode = false;
+      setTool('select');
+      renderLayers();
+      render();
+      return;
+    }
+
+    if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (e.key.toLowerCase() === 'v') setTool('select');
+      else if (e.key.toLowerCase() === 'r') setTool('rect');
+      else if (e.key.toLowerCase() === 'c') setTool('circle');
+      else if (e.key.toLowerCase() === 'p') setTool('polygon');
+      else if (e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        toggleNodeEditMode();
+      }
+    }
+  });
+
+  document.getElementById('tool-select').addEventListener('click', () => setTool('select'));
+  document.getElementById('tool-rect').addEventListener('click', () => setTool('rect'));
+  document.getElementById('tool-circle').addEventListener('click', () => setTool('circle'));
+  document.getElementById('tool-polygon').addEventListener('click', () => setTool('polygon'));
+  document.getElementById('op-union').addEventListener('click', () => performBoolean('union'));
+  document.getElementById('op-subtract').addEventListener('click', () => performBoolean('subtract'));
+  document.getElementById('op-intersect').addEventListener('click', () => performBoolean('intersect'));
+  document.getElementById('export-svg').addEventListener('click', exportSVG);
+
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  function createDemo() {
+    const rect = createShape(
+      ensureCCW(rectToPolygon(-250, -120, 200, 150)),
+      'hsla(220, 60%, 70%, 0.4)'
+    );
+    rect.name = 'Rectangle';
+    const circle = createShape(
+      ensureCCW(circleToPolygon(-80, 0, 80, 64)),
+      'hsla(0, 60%, 70%, 0.4)'
+    );
+    circle.name = 'Circle';
+    const pentagonPts = [];
+    for (let i = 0; i < 5; i++) {
+      const a = -Math.PI / 2 + (i / 5) * Math.PI * 2;
+      pentagonPts.push({ x: 80 + Math.cos(a) * 75, y: -20 + Math.sin(a) * 75 });
+    }
+    const pentagon = createShape(ensureCCW(pentagonPts), 'hsla(120, 60%, 70%, 0.4)');
+    pentagon.name = 'Pentagon';
+
+    const outerRect = ensureCCW(rectToPolygon(-50, 130, 200, 150));
+    const innerHole = ensureCW(rectToPolygon(10, 170, 80, 70));
+    const rectWithHole = createShape(outerRect, 'hsla(280, 60%, 60%, 0.5)', [innerHole]);
+    rectWithHole.name = 'Donut Rect';
+
+    shapes.push(rect, circle, pentagon, rectWithHole);
+    renderLayers();
+    render();
   }
 
-  function init() {
-    initTracks();
-    renderTracks();
-    syncTimelineHeights();
-    setupEventListeners();
-    requestAnimationFrame(renderFrame);
-    document.getElementById('time-total').textContent = formatTime(totalDuration);
-    updatePlayhead();
-  }
-
-  init();
+  resize();
+  createDemo();
 })();
