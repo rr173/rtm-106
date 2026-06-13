@@ -440,7 +440,21 @@
   }
 
   function runSolver(fixedPoints, extraFixed, maxIter) {
-    if (constraints.length === 0) return { success: true, iterations: 0, residual: 0 };
+    if (constraints.length === 0) {
+      if (extraFixed && Object.keys(extraFixed).length > 0) {
+        const pointMap = buildPointMap();
+        for (const key in extraFixed) {
+          const parts = key.split('_');
+          const coord = parts.pop();
+          const id = parts.join('_');
+          if (pointMap[id]) {
+            pointMap[id][coord] = extraFixed[key];
+          }
+        }
+        applyPointMap(pointMap);
+      }
+      return { success: true, iterations: 0, residual: 0 };
+    }
     const pointMap = buildPointMap();
     updateSolverParams();
     const result = constraintSolver.solve(pointMap, fixedPoints, extraFixed, maxIter);
@@ -2661,16 +2675,32 @@
   document.getElementById('tool-polygon').addEventListener('click', () => { currentTool = 'polygon'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; polygonPoints = []; updateToolbar(); render(); });
 
   document.getElementById('export-svg').addEventListener('click', () => {
-    const minX = Math.min(...shapes.flatMap(s => worldPointsOf(s).map(p => p.x)));
-    const minY = Math.min(...shapes.flatMap(s => worldPointsOf(s).map(p => p.y)));
-    const maxX = Math.max(...shapes.flatMap(s => worldPointsOf(s).map(p => p.x)));
-    const maxY = Math.max(...shapes.flatMap(s => worldPointsOf(s).map(p => p.y)));
+    const allX = [];
+    const allY = [];
+    for (const s of shapes) {
+      if (!s.visible) continue;
+      const pts = worldPointsOf(s);
+      for (const p of pts) { allX.push(p.x); allY.push(p.y); }
+      const holes = worldHolesOf(s);
+      for (const hole of holes) {
+        for (const p of hole) { allX.push(p.x); allY.push(p.y); }
+      }
+    }
+    if (allX.length === 0) { showToast('No shapes to export'); return; }
+    const minX = Math.min(...allX);
+    const minY = Math.min(...allY);
+    const maxX = Math.max(...allX);
+    const maxY = Math.max(...allY);
     const pad = 20;
     let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${minX - pad} ${minY - pad} ${maxX - minX + pad * 2} ${maxY - minY + pad * 2}">`;
     for (const s of shapes) {
       if (!s.visible) continue;
       const pts = worldPointsOf(s);
-      const d = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ') + 'Z';
+      let d = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ') + 'Z';
+      const holes = worldHolesOf(s);
+      for (const hole of holes) {
+        d += ' ' + hole.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ') + 'Z';
+      }
       svg += `<path d="${d}" fill="${s.fill}" stroke="${s.stroke || '#000'}" stroke-width="${s.strokeWidth || 2}" fill-rule="evenodd"/>`;
     }
     svg += '</svg>';
