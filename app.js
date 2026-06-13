@@ -86,6 +86,15 @@
 
   let shapeCounter = 0;
 
+  const SNAP_THRESHOLD = 8;
+  let snapEnabled = true;
+  let snapInfo = {
+    active: false,
+    lines: [],
+    distances: []
+  };
+  let keys = { shift: false, alt: false };
+
   function isSameVertex(a, b) {
     if (!a || !b) return false;
     return a.isHole === b.isHole && a.holeIndex === b.holeIndex && a.pointIndex === b.pointIndex;
@@ -532,6 +541,7 @@
     }
 
     renderConstraintSelection();
+    renderSnapGuides();
     ctx.restore();
     zoomEl.textContent = Math.round(viewport.scale * 100) + '%';
   }
@@ -1415,10 +1425,498 @@
     document.querySelectorAll('.op-btn').forEach(b => {
       b.disabled = selectedIds.size < 2;
     });
+    const alignDisabled = selectedIds.size < 2;
+    document.querySelectorAll('.align-btn').forEach(b => {
+      b.disabled = alignDisabled;
+    });
+    document.getElementById('distribute-h').disabled = selectedIds.size < 3;
+    document.getElementById('distribute-v').disabled = selectedIds.size < 3;
     if (isNodeEditMode) {
       nodeEditIndicatorEl.classList.remove('hidden');
     } else {
       nodeEditIndicatorEl.classList.add('hidden');
+    }
+  }
+
+  function getShapesBounds(shapeList) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const s of shapeList) {
+      const pts = worldPointsOf(s);
+      const b = getBounds(pts);
+      minX = Math.min(minX, b.minX);
+      minY = Math.min(minY, b.minY);
+      maxX = Math.max(maxX, b.maxX);
+      maxY = Math.max(maxY, b.maxY);
+    }
+    return { minX, minY, maxX, maxY };
+  }
+
+  function alignShapes(alignment) {
+    const sel = getSelectedShapes();
+    if (sel.length < 2) return;
+
+    pushHistory();
+
+    const bounds = getShapesBounds(sel);
+    const extraFixed = {};
+
+    for (const s of sel) {
+      const pts = worldPointsOf(s);
+      const sb = getBounds(pts);
+      let dx = 0, dy = 0;
+
+      switch (alignment) {
+        case 'left':
+          dx = bounds.minX - sb.minX;
+          break;
+        case 'center':
+          dx = (bounds.minX + bounds.maxX) / 2 - (sb.minX + sb.maxX) / 2;
+          break;
+        case 'right':
+          dx = bounds.maxX - sb.maxX;
+          break;
+        case 'top':
+          dy = bounds.minY - sb.minY;
+          break;
+        case 'middle':
+          dy = (bounds.minY + bounds.maxY) / 2 - (sb.minY + sb.maxY) / 2;
+          break;
+        case 'bottom':
+          dy = bounds.maxY - sb.maxY;
+          break;
+      }
+
+      const newPts = pts.map(p => ({ x: p.x + dx, y: p.y + dy }));
+      for (let i = 0; i < newPts.length; i++) {
+        const pid = makePointId(s.id, false, -1, i);
+        extraFixed[pid + '_x'] = newPts[i].x;
+        extraFixed[pid + '_y'] = newPts[i].y;
+      }
+
+      const holes = worldHolesOf(s);
+      for (let h = 0; h < holes.length; h++) {
+        const hole = holes[h];
+        const newHole = hole.map(p => ({ x: p.x + dx, y: p.y + dy }));
+        for (let i = 0; i < newHole.length; i++) {
+          const pid = makePointId(s.id, true, h, i);
+          extraFixed[pid + '_x'] = newHole[i].x;
+          extraFixed[pid + '_y'] = newHole[i].y;
+        }
+      }
+    }
+
+    const fixedPoints = new Set();
+    runSolver(fixedPoints, extraFixed, 100);
+    rebuildSolverAndParams();
+    initialSolve();
+    updateDOFDisplay();
+    renderLayers();
+    render();
+    showToast('Aligned: ' + alignment, 'success');
+  }
+
+  function distributeShapes(direction) {
+    const sel = getSelectedShapes();
+    if (sel.length < 3) return;
+
+    pushHistory();
+
+    const withBounds = sel.map(s => {
+      const pts = worldPointsOf(s);
+      const b = getBounds(pts);
+      return {
+        shape: s,
+        bounds: b,
+        centerX: (b.minX + b.maxX) / 2,
+        centerY: (b.minY + b.maxY) / 2,
+        left: b.minX,
+        right: b.maxX,
+        top: b.minY,
+        bottom: b.maxY
+      };
+    });
+
+    let sorted;
+    if (direction === 'horizontal') {
+      sorted = withBounds.slice().sort((a, b) => a.centerX - b.centerX);
+      const totalSpan = sorted[sorted.length - 1].right - sorted[0].left;
+      const totalWidth = sorted.reduce((sum, item) => sum + (item.right - item.left), 0);
+      const gap = (totalSpan - totalWidth) / (sorted.length - 1);
+
+      let currentX = sorted[0].left;
+      for (const item of sorted) {
+        const dx = currentX - item.left;
+        item.offsetX = dx;
+        item.offsetY = 0;
+        currentX = item.right + dx + gap;
+      }
+    } else {
+      sorted = withBounds.slice().sort((a, b) => a.centerY - b.centerY);
+      const totalSpan = sorted[sorted.length - 1].bottom - sorted[0].top;
+      const totalHeight = sorted.reduce((sum, item) => sum + (item.bottom - item.top), 0);
+      const gap = (totalSpan - totalHeight) / (sorted.length - 1);
+
+      let currentY = sorted[0].top;
+      for (const item of sorted) {
+        const dy = currentY - item.top;
+        item.offsetX = 0;
+        item.offsetY = dy;
+        currentY = item.bottom + dy + gap;
+      }
+    }
+
+    const extraFixed = {};
+    for (const item of sorted) {
+      const s = item.shape;
+      const pts = worldPointsOf(s);
+      const newPts = pts.map(p => ({ x: p.x + item.offsetX, y: p.y + item.offsetY }));
+      for (let i = 0; i < newPts.length; i++) {
+        const pid = makePointId(s.id, false, -1, i);
+        extraFixed[pid + '_x'] = newPts[i].x;
+        extraFixed[pid + '_y'] = newPts[i].y;
+      }
+
+      const holes = worldHolesOf(s);
+      for (let h = 0; h < holes.length; h++) {
+        const hole = holes[h];
+        const newHole = hole.map(p => ({ x: p.x + item.offsetX, y: p.y + item.offsetY }));
+        for (let i = 0; i < newHole.length; i++) {
+          const pid = makePointId(s.id, true, h, i);
+          extraFixed[pid + '_x'] = newHole[i].x;
+          extraFixed[pid + '_y'] = newHole[i].y;
+        }
+      }
+    }
+
+    const fixedPoints = new Set();
+    runSolver(fixedPoints, extraFixed, 100);
+    rebuildSolverAndParams();
+    initialSolve();
+    updateDOFDisplay();
+    renderLayers();
+    render();
+    showToast('Distributed: ' + direction, 'success');
+  }
+
+  function collectSnapTargets(excludeIds) {
+    const targets = {
+      vertices: [],
+      edges: [],
+      centers: [],
+      midpoints: []
+    };
+
+    for (const s of shapes) {
+      if (!s.visible || s.locked) continue;
+      if (excludeIds && excludeIds.has(s.id)) continue;
+
+      const pts = worldPointsOf(s);
+      const b = getBounds(pts);
+      const ctr = boundsCenter(b);
+
+      targets.centers.push({ x: ctr.x, y: ctr.y, shapeId: s.id, type: 'center' });
+
+      for (let i = 0; i < pts.length; i++) {
+        const p = pts[i];
+        targets.vertices.push({ x: p.x, y: p.y, shapeId: s.id, type: 'vertex' });
+      }
+
+      for (let i = 0; i < pts.length; i++) {
+        const a = pts[i];
+        const bPt = pts[(i + 1) % pts.length];
+        targets.edges.push({ a, b: bPt, shapeId: s.id });
+        targets.midpoints.push({
+          x: (a.x + bPt.x) / 2,
+          y: (a.y + bPt.y) / 2,
+          shapeId: s.id,
+          type: 'midpoint'
+        });
+      }
+
+      const holes = worldHolesOf(s);
+      for (const hole of holes) {
+        for (let i = 0; i < hole.length; i++) {
+          const p = hole[i];
+          targets.vertices.push({ x: p.x, y: p.y, shapeId: s.id, type: 'vertex', isHole: true });
+        }
+        for (let i = 0; i < hole.length; i++) {
+          const a = hole[i];
+          const bPt = hole[(i + 1) % hole.length];
+          targets.edges.push({ a, b: bPt, shapeId: s.id, isHole: true });
+          targets.midpoints.push({
+            x: (a.x + bPt.x) / 2,
+            y: (a.y + bPt.y) / 2,
+            shapeId: s.id,
+            type: 'midpoint',
+            isHole: true
+          });
+        }
+      }
+    }
+
+    return targets;
+  }
+
+  function snapToGrid(x, y) {
+    const threshold = SNAP_THRESHOLD / viewport.scale;
+    const gridX = Math.round(x / GRID_SIZE) * GRID_SIZE;
+    const gridY = Math.round(y / GRID_SIZE) * GRID_SIZE;
+    let snapped = { x, y, snapped: false, lines: [] };
+
+    if (Math.abs(x - gridX) < threshold) {
+      snapped.x = gridX;
+      snapped.snapped = true;
+      snapped.lines.push({ type: 'vertical', x: gridX, kind: 'grid' });
+    }
+    if (Math.abs(y - gridY) < threshold) {
+      snapped.y = gridY;
+      snapped.snapped = true;
+      snapped.lines.push({ type: 'horizontal', y: gridY, kind: 'grid' });
+    }
+
+    return snapped;
+  }
+
+  function computeSnap(point, excludeIds, isDragging) {
+    snapInfo = { active: false, lines: [], distances: [] };
+    if (!snapEnabled || keys.alt) return { x: point.x, y: point.y };
+
+    const threshold = SNAP_THRESHOLD / viewport.scale;
+    let bestX = point.x, bestY = point.y;
+    let bestDistX = Infinity, bestDistY = Infinity;
+    const lines = [];
+    const distances = [];
+
+    const gridSnap = snapToGrid(point.x, point.y);
+    if (gridSnap.snapped) {
+      if (gridSnap.lines.some(l => l.type === 'vertical')) {
+        bestX = gridSnap.x;
+        bestDistX = Math.abs(point.x - gridSnap.x);
+      }
+      if (gridSnap.lines.some(l => l.type === 'horizontal')) {
+        bestY = gridSnap.y;
+        bestDistY = Math.abs(point.y - gridSnap.y);
+      }
+      lines.push(...gridSnap.lines);
+    }
+
+    const targets = collectSnapTargets(excludeIds);
+
+    const candidates = [
+      ...targets.vertices,
+      ...targets.midpoints,
+      ...targets.centers
+    ];
+
+    for (const target of candidates) {
+      const dx = Math.abs(point.x - target.x);
+      const dy = Math.abs(point.y - target.y);
+
+      if (dx < threshold && dx < bestDistX) {
+        bestX = target.x;
+        bestDistX = dx;
+        lines.push({ type: 'vertical', x: target.x, kind: target.type, target });
+        if (dx > 0.1) distances.push({ type: 'vertical', x1: point.x, x2: target.x, y: point.y, value: Math.abs(target.x - point.x) });
+      }
+      if (dy < threshold && dy < bestDistY) {
+        bestY = target.y;
+        bestDistY = dy;
+        lines.push({ type: 'horizontal', y: target.y, kind: target.type, target });
+        if (dy > 0.1) distances.push({ type: 'horizontal', y1: point.y, y2: target.y, x: point.x, value: Math.abs(target.y - point.y) });
+      }
+    }
+
+    for (const edge of targets.edges) {
+      const proj = projectPointToSegment(point, edge.a, edge.b);
+      if (proj.onSegment) {
+        const dx = Math.abs(point.x - proj.x);
+        const dy = Math.abs(point.y - proj.y);
+        const d = dist(point, proj);
+
+        if (d < threshold) {
+          if (dx < bestDistX) {
+            bestX = proj.x;
+            bestDistX = dx;
+          }
+          if (dy < bestDistY) {
+            bestY = proj.y;
+            bestDistY = dy;
+          }
+          lines.push({ type: 'edge', a: edge.a, b: edge.b, kind: 'edge', target: proj });
+        }
+      }
+    }
+
+    if (isDragging && excludeIds && excludeIds.size > 0) {
+      const selBounds = [];
+      for (const id of excludeIds) {
+        const s = getShapeById(id);
+        if (s) {
+          const pts = worldPointsOf(s);
+          const b = getBounds(pts);
+          selBounds.push({
+            left: b.minX,
+            right: b.maxX,
+            top: b.minY,
+            bottom: b.maxY,
+            centerX: (b.minX + b.maxX) / 2,
+            centerY: (b.minY + b.maxY) / 2
+          });
+        }
+      }
+
+      if (selBounds.length > 0) {
+        const selLeft = Math.min(...selBounds.map(b => b.left));
+        const selRight = Math.max(...selBounds.map(b => b.right));
+        const selTop = Math.min(...selBounds.map(b => b.top));
+        const selBottom = Math.max(...selBounds.map(b => b.bottom));
+        const selCenterX = (selLeft + selRight) / 2;
+        const selCenterY = (selTop + selBottom) / 2;
+
+        for (const s of shapes) {
+          if (!s.visible || s.locked || excludeIds.has(s.id)) continue;
+          const pts = worldPointsOf(s);
+          const b = getBounds(pts);
+          const targetCenterX = (b.minX + b.maxX) / 2;
+          const targetCenterY = (b.minY + b.maxY) / 2;
+
+          const dxCenter = Math.abs(selCenterX - targetCenterX);
+          const dyCenter = Math.abs(selCenterY - targetCenterY);
+
+          if (dxCenter < threshold && dxCenter < bestDistX) {
+            bestDistX = dxCenter;
+            lines.push({ type: 'vertical', x: targetCenterX, kind: 'centerline' });
+            if (dxCenter > 0.1) distances.push({ type: 'vertical', x1: selCenterX, x2: targetCenterX, y: selCenterY, value: dxCenter });
+          }
+          if (dyCenter < threshold && dyCenter < bestDistY) {
+            bestDistY = dyCenter;
+            lines.push({ type: 'horizontal', y: targetCenterY, kind: 'centerline' });
+            if (dyCenter > 0.1) distances.push({ type: 'horizontal', y1: selCenterY, y2: targetCenterY, x: selCenterX, value: dyCenter });
+          }
+
+          const dxLeft = Math.abs(selLeft - b.minX);
+          const dxRight = Math.abs(selRight - b.maxX);
+          const dyTop = Math.abs(selTop - b.minY);
+          const dyBottom = Math.abs(selBottom - b.maxY);
+
+          if (dxLeft < threshold && dxLeft < bestDistX) {
+            bestDistX = dxLeft;
+            lines.push({ type: 'vertical', x: b.minX, kind: 'edge-align' });
+          }
+          if (dxRight < threshold && dxRight < bestDistX) {
+            bestDistX = dxRight;
+            lines.push({ type: 'vertical', x: b.maxX, kind: 'edge-align' });
+          }
+          if (dyTop < threshold && dyTop < bestDistY) {
+            bestDistY = dyTop;
+            lines.push({ type: 'horizontal', y: b.minY, kind: 'edge-align' });
+          }
+          if (dyBottom < threshold && dyBottom < bestDistY) {
+            bestDistY = dyBottom;
+            lines.push({ type: 'horizontal', y: b.maxY, kind: 'edge-align' });
+          }
+        }
+      }
+    }
+
+    if (lines.length > 0) {
+      snapInfo = { active: true, lines, distances };
+    }
+
+    return { x: bestX, y: bestY };
+  }
+
+  function projectPointToSegment(p, a, b) {
+    const ab = { x: b.x - a.x, y: b.y - a.y };
+    const ap = { x: p.x - a.x, y: p.y - a.y };
+    const ab2 = ab.x * ab.x + ab.y * ab.y;
+    if (ab2 < 1e-10) return { x: a.x, y: a.y, onSegment: true };
+    let t = (ap.x * ab.x + ap.y * ab.y) / ab2;
+    t = Math.max(0, Math.min(1, t));
+    return {
+      x: a.x + t * ab.x,
+      y: a.y + t * ab.y,
+      onSegment: t > 0 && t < 1
+    };
+  }
+
+  function renderSnapGuides() {
+    if (!snapInfo.active || snapInfo.lines.length === 0) return;
+
+    ctx.save();
+    const w = window.innerWidth, h = window.innerHeight;
+    const tl = screenToWorld(0, 0);
+    const br = screenToWorld(w, h);
+
+    for (const line of snapInfo.lines) {
+      let color = '#e53935';
+      if (line.kind === 'grid') color = '#43a047';
+      else if (line.kind === 'centerline') color = '#1a73e8';
+      else if (line.kind === 'edge-align') color = '#fb8c00';
+      else if (line.kind === 'edge') color = '#8e24aa';
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5 / viewport.scale;
+      ctx.setLineDash([6 / viewport.scale, 4 / viewport.scale]);
+
+      if (line.type === 'vertical') {
+        ctx.beginPath();
+        ctx.moveTo(line.x, tl.y - 100);
+        ctx.lineTo(line.x, br.y + 100);
+        ctx.stroke();
+      } else if (line.type === 'horizontal') {
+        ctx.beginPath();
+        ctx.moveTo(tl.x - 100, line.y);
+        ctx.lineTo(br.x + 100, line.y);
+        ctx.stroke();
+      } else if (line.type === 'edge' && line.a && line.b) {
+        ctx.beginPath();
+        ctx.moveTo(line.a.x, line.a.y);
+        ctx.lineTo(line.b.x, line.b.y);
+        ctx.stroke();
+      }
+    }
+
+    ctx.setLineDash([]);
+
+    for (const d of snapInfo.distances) {
+      ctx.fillStyle = '#e53935';
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 3 / viewport.scale;
+      ctx.font = `700 ${12 / viewport.scale}px -apple-system, BlinkMacSystemFont, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      const label = d.value.toFixed(1);
+      let x, y;
+      if (d.type === 'vertical') {
+        x = (d.x1 + d.x2) / 2;
+        y = d.y - 10 / viewport.scale;
+      } else {
+        x = d.x + 10 / viewport.scale;
+        y = (d.y1 + d.y2) / 2;
+      }
+
+      const padX = 8 / viewport.scale;
+      const padY = 4 / viewport.scale;
+      const textW = ctx.measureText(label).width;
+      ctx.fillStyle = 'rgba(229, 57, 53, 0.9)';
+      ctx.fillRect(x - textW / 2 - padX, y - 8 / viewport.scale - padY, textW + padX * 2, 16 / viewport.scale + padY * 2);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(label, x, y - 8 / viewport.scale);
+    }
+
+    ctx.restore();
+  }
+
+  function constrainToAxis(start, current) {
+    if (!keys.shift) return current;
+    const dx = Math.abs(current.x - start.x);
+    const dy = Math.abs(current.y - start.y);
+    if (dx > dy) {
+      return { x: current.x, y: start.y };
+    } else {
+      return { x: start.x, y: current.y };
     }
   }
 
@@ -1530,6 +2028,7 @@
         const shape = getSelectedShapes()[0];
         transformStart = { world: { ...world }, shapeData: JSON.parse(JSON.stringify(shape)) };
         transformOriginalData = deepCloneState();
+        pushHistory();
         canvas.style.cursor = handleHit.type === 'rotate' ? 'grab' : (handleHit.type[0] + handleHit.type[handleHit.type.length - 1] + '-resize');
         return;
       }
@@ -1568,6 +2067,7 @@
           isDraggingShape = true;
           dragStart = { x: world.x, y: world.y };
           dragOriginalWorldPts = [];
+          pushHistory();
           for (const s of getSelectedShapes()) {
             dragOriginalWorldPts.push({
               shape: s,
@@ -1652,10 +2152,18 @@
       const v = selectedVertex;
       const pts = v.isHole ? v.shape.holes[v.holeIndex] : v.shape.points;
       if (pts && pts[v.pointIndex]) {
+        let targetPos = { x: world.x, y: world.y };
+
+        if (keys.shift) {
+          targetPos = constrainToAxis(dragStart, targetPos);
+        }
+
+        const snapped = computeSnap(targetPos, new Set([v.shape.id]), false);
+
         const vpid = getVertexPointId(v);
         const extraFixed = {};
-        extraFixed[vpid + '_x'] = world.x;
-        extraFixed[vpid + '_y'] = world.y;
+        extraFixed[vpid + '_x'] = snapped.x;
+        extraFixed[vpid + '_y'] = snapped.y;
         const fixedPoints = new Set();
         const res = runSolver(fixedPoints, extraFixed, 50);
       }
@@ -1665,8 +2173,29 @@
     }
 
     if (isDraggingShape && dragStart) {
-      const dx = world.x - dragStart.x;
-      const dy = world.y - dragStart.y;
+      let dx = world.x - dragStart.x;
+      let dy = world.y - dragStart.y;
+
+      const firstEntry = dragOriginalWorldPts[0];
+      if (firstEntry) {
+        const origBounds = getBounds(firstEntry.points);
+        const origCenter = {
+          x: (origBounds.minX + origBounds.maxX) / 2,
+          y: (origBounds.minY + origBounds.maxY) / 2
+        };
+        let targetCenter = { x: origCenter.x + dx, y: origCenter.y + dy };
+
+        if (keys.shift) {
+          targetCenter = constrainToAxis(origCenter, targetCenter);
+          dx = targetCenter.x - origCenter.x;
+          dy = targetCenter.y - origCenter.y;
+        }
+
+        const snapped = computeSnap(targetCenter, selectedIds, true);
+        dx = snapped.x - origCenter.x;
+        dy = snapped.y - origCenter.y;
+      }
+
       const fixedPoints = new Set();
       const extraFixed = {};
       for (const entry of dragOriginalWorldPts) {
@@ -1708,7 +2237,11 @@
       if (handle === 'rotate') {
         const ang1 = Math.atan2(transformStart.world.y - origCenter.y, transformStart.world.x - origCenter.x);
         const ang2 = Math.atan2(world.y - origCenter.y, world.x - origCenter.x);
-        const rot = ang2 - ang1;
+        let rot = ang2 - ang1;
+        if (keys.shift) {
+          const snapAngle = Math.PI / 12;
+          rot = Math.round(rot / snapAngle) * snapAngle;
+        }
         newPoints = origWp.map(p => {
           const rx = p.x - origCenter.x;
           const ry = p.y - origCenter.y;
@@ -1736,7 +2269,7 @@
           se: 'nw', s: 'n', sw: 'ne', w: 'e'
         };
         const oppCorner = mapCorner(opp[handle], origBounds);
-        const newCorner = { x: origCorner.x + dx, y: origCorner.y + dy };
+        let newCorner = { x: origCorner.x + dx, y: origCorner.y + dy };
         let sx = 1, sy = 1;
         const origW = origBounds.maxX - origBounds.minX;
         const origH = origBounds.maxY - origBounds.minY;
@@ -1759,6 +2292,13 @@
           return { x: anchor.x + rx * sx, y: anchor.y + ry * sy };
         });
       }
+
+      const newBounds = getBounds(newPoints);
+      const newCenter = boundsCenter(newBounds);
+      const snapped = computeSnap(newCenter, new Set([s.id]), true);
+      const snapDx = snapped.x - newCenter.x;
+      const snapDy = snapped.y - newCenter.y;
+      newPoints = newPoints.map(p => ({ x: p.x + snapDx, y: p.y + snapDy }));
 
       const localNewPts = applyTransformInverse(newPoints, orig.transform.tx, orig.transform.ty, orig.transform.rotation, orig.transform.scaleX, orig.transform.scaleY);
       const fixedPoints = new Set();
@@ -1816,6 +2356,8 @@
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
     const world = screenToWorld(sx, sy);
+
+    snapInfo = { active: false, lines: [], distances: [] };
 
     if (isPanning) {
       isPanning = false;
@@ -2014,6 +2556,9 @@
   window.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
 
+    if (e.key === 'Shift') keys.shift = true;
+    if (e.key === 'Alt' || e.key === 'Option') keys.alt = true;
+
     if (e.key === 'Escape') {
       if (constraintMode) {
         constraintMode = null;
@@ -2099,6 +2644,15 @@
     else if (key === 'p') { currentTool = 'polygon'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; polygonPoints = []; updateToolbar(); render(); }
     else if (key === 'n') { isNodeEditMode = !isNodeEditMode; if (!isNodeEditMode) selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); updateDOFDisplay(); render(); showToast(isNodeEditMode ? 'Node Edit Mode ON' : 'Node Edit Mode OFF'); }
     else if (key === 'a') { selectedIds.clear(); for (const s of shapes) { if (s.visible && !s.locked) selectedIds.add(s.id); } updateToolbar(); renderLayers(); render(); }
+    else if (key === ';') { snapEnabled = !snapEnabled; showToast(snapEnabled ? 'Snap ON' : 'Snap OFF'); render(); }
+  });
+
+  window.addEventListener('keyup', (e) => {
+    if (e.key === 'Shift') keys.shift = false;
+    if (e.key === 'Alt' || e.key === 'Option') keys.alt = false;
+    if (isDraggingShape || isDraggingVertex || isTransforming) {
+      render();
+    }
   });
 
   document.getElementById('tool-select').addEventListener('click', () => { currentTool = 'select'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); updateDOFDisplay(); render(); });
@@ -2245,6 +2799,15 @@
 
   document.getElementById('clear-constraints').addEventListener('click', clearAllConstraints);
   document.getElementById('add-param').addEventListener('click', addParam);
+
+  document.getElementById('align-left').addEventListener('click', () => alignShapes('left'));
+  document.getElementById('align-center').addEventListener('click', () => alignShapes('center'));
+  document.getElementById('align-right').addEventListener('click', () => alignShapes('right'));
+  document.getElementById('align-top').addEventListener('click', () => alignShapes('top'));
+  document.getElementById('align-middle').addEventListener('click', () => alignShapes('middle'));
+  document.getElementById('align-bottom').addEventListener('click', () => alignShapes('bottom'));
+  document.getElementById('distribute-h').addEventListener('click', () => distributeShapes('horizontal'));
+  document.getElementById('distribute-v').addEventListener('click', () => distributeShapes('vertical'));
 
   document.getElementById('constraint-edit-close').addEventListener('click', closeConstraintEditDialog);
   document.getElementById('constraint-edit-cancel').addEventListener('click', closeConstraintEditDialog);
