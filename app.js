@@ -573,6 +573,7 @@
   }
 
   function getPointStatusColor(pid) {
+    if (constraints.length === 0) return '#000';
     const hasConflict = constraintSolver.conflictConstraints.size > 0;
     if (hasConflict) {
       for (const ci of constraintSolver.conflictConstraints) {
@@ -1119,14 +1120,21 @@
   }
 
   function updateDOFDisplay() {
-    const dof = constraintSolver.calculateDOF();
-    dofValueEl.textContent = dof.toString();
-    dofValueEl.className = 'dof-value ' + (dof > 0 ? 'positive' : (dof < 0 ? 'negative' : 'zero'));
-    let hint = '';
-    if (dof > 0) hint = '(Under-constrained)';
-    else if (dof === 0) hint = '(Fully constrained)';
-    else hint = '(Over-constrained!)';
-    dofHintEl.textContent = hint;
+    const hasConstraints = constraints.length > 0;
+    if (!hasConstraints) {
+      dofValueEl.textContent = '-';
+      dofValueEl.className = 'dof-value';
+      dofHintEl.textContent = '(No constraints)';
+    } else {
+      const dof = constraintSolver.calculateDOF();
+      dofValueEl.textContent = dof.toString();
+      dofValueEl.className = 'dof-value ' + (dof > 0 ? 'positive' : (dof < 0 ? 'negative' : 'zero'));
+      let hint = '';
+      if (dof > 0) hint = '(Under-constrained)';
+      else if (dof === 0) hint = '(Fully constrained)';
+      else hint = '(Over-constrained!)';
+      dofHintEl.textContent = hint;
+    }
     if (constraintMode) {
       modeIndicatorEl.textContent = 'Adding: ' + constraintMode + ' (' + constraintSelection.length + ' sel)';
     } else {
@@ -1432,10 +1440,38 @@
       return;
     }
 
-    if (e.button === 2 && constraintSelection.length > 0) {
-      constraintMenuEl.style.left = e.clientX + 'px';
-      constraintMenuEl.style.top = e.clientY + 'px';
-      constraintMenuEl.classList.remove('hidden');
+    if (e.button === 2) {
+      if (isNodeEditMode) {
+        const vHit = hitTestVertex(world.x, world.y);
+        const eHit = hitTestEdge(world.x, world.y);
+        if (vHit) {
+          const idx = constraintSelection.findIndex(s =>
+            s.type === 'vertex' &&
+            s.data.shape.id === vHit.shape.id &&
+            s.data.isHole === vHit.isHole &&
+            s.data.holeIndex === vHit.holeIndex &&
+            s.data.pointIndex === vHit.pointIndex
+          );
+          if (idx < 0 && !e.shiftKey) constraintSelection = [];
+          if (idx < 0) constraintSelection.push({ type: 'vertex', data: vHit });
+        } else if (eHit) {
+          const idx = constraintSelection.findIndex(s =>
+            s.type === 'edge' &&
+            s.data.shape.id === eHit.shape.id &&
+            s.data.isHole === eHit.isHole &&
+            s.data.holeIndex === eHit.holeIndex &&
+            s.data.edgeIndex === eHit.edgeIndex
+          );
+          if (idx < 0 && !e.shiftKey) constraintSelection = [];
+          if (idx < 0) constraintSelection.push({ type: 'edge', data: eHit });
+        }
+      }
+      if (constraintSelection.length > 0) {
+        renderConstraintMenuAvailability();
+        constraintMenuEl.style.left = e.clientX + 'px';
+        constraintMenuEl.style.top = e.clientY + 'px';
+        constraintMenuEl.classList.remove('hidden');
+      }
       return;
     }
 
@@ -2093,9 +2129,64 @@
     URL.revokeObjectURL(url);
   });
 
-  document.getElementById('op-union').addEventListener('click', () => showToast('Boolean ops: basic demo only', 'warning'));
-  document.getElementById('op-subtract').addEventListener('click', () => showToast('Boolean ops: basic demo only', 'warning'));
-  document.getElementById('op-intersect').addEventListener('click', () => showToast('Boolean ops: basic demo only', 'warning'));
+  function runBooleanOp(operation) {
+    const sel = getSelectedShapes();
+    if (sel.length < 2) { showToast('Select 2 shapes first', 'warning'); return; }
+    const subject = sel[0];
+    const clip = sel[1];
+    const subjectPts = worldPointsOf(subject);
+    const clipPts = worldPointsOf(clip);
+    try {
+      const result = weilerAtherton(subjectPts, clipPts, operation);
+      if (!result.polygons || result.polygons.length === 0) {
+        showToast('No result for this operation', 'warning');
+        return;
+      }
+      pushHistory();
+      const newShapes = [];
+      const baseFill = subject.fill;
+      for (let i = 0; i < result.polygons.length; i++) {
+        const poly = result.polygons[i];
+        if (poly.length < 3) continue;
+        const holes = result.holes && result.holes[i] ? [result.holes[i]] : [];
+        const s = createShape(poly, baseFill, holes);
+        newShapes.push(s);
+      }
+      if (newShapes.length === 0) {
+        showToast('No valid result', 'warning');
+        return;
+      }
+      const removeIds = [subject.id, clip.id];
+      shapes = shapes.filter(s => !removeIds.includes(s.id));
+      constraints = constraints.filter(c => {
+        const rps = c.getReferencedPoints();
+        for (const rp of rps) {
+          const { shapeId } = parsePointId(rp);
+          if (removeIds.includes(shapeId)) return false;
+        }
+        return true;
+      });
+      for (const s of newShapes) shapes.push(s);
+      selectedIds.clear();
+      for (const s of newShapes) selectedIds.add(s.id);
+      rebuildSolverAndParams();
+      initialSolve();
+      updateToolbar();
+      updateDOFDisplay();
+      renderLayers();
+      renderConstraintList();
+      render();
+      const opName = { union: 'Union', subtract: 'Subtract', intersect: 'Intersect' }[operation];
+      showToast(opName + ': ' + newShapes.length + ' shape(s)', 'success');
+    } catch (e) {
+      console.error(e);
+      showToast('Boolean op failed: ' + e.message, 'error');
+    }
+  }
+
+  document.getElementById('op-union').addEventListener('click', () => runBooleanOp('union'));
+  document.getElementById('op-subtract').addEventListener('click', () => runBooleanOp('subtract'));
+  document.getElementById('op-intersect').addEventListener('click', () => runBooleanOp('intersect'));
 
   document.querySelectorAll('.constraint-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -2111,10 +2202,40 @@
       if (canAddConstraint(type)) {
         tryAddConstraint(type);
       } else {
-        showToast('Wrong selection for ' + type, 'error');
+        constraintMode = type;
+        isNodeEditMode = true;
+        updateToolbar();
+        updateDOFDisplay();
+        showToast('Select more elements for ' + type + ' (need ' + getConstraintSelectionHint(type));
       }
     });
   });
+
+  function getConstraintSelectionHint(type) {
+    switch (type) {
+      case CONSTRAINT_TYPES.COINCIDENT: return '2 points';
+      case CONSTRAINT_TYPES.POINT_ON_LINE: return '1 point + 1 edge';
+      case CONSTRAINT_TYPES.PARALLEL:
+      case CONSTRAINT_TYPES.PERPENDICULAR:
+      case CONSTRAINT_TYPES.EQUAL_LENGTH: return '2 edges';
+      case CONSTRAINT_TYPES.FIXED_ANGLE: return '1 edge';
+      case CONSTRAINT_TYPES.DISTANCE:
+      case CONSTRAINT_TYPES.HORIZONTAL:
+      case CONSTRAINT_TYPES.VERTICAL: return '2 points';
+      default: return '';
+    }
+  }
+
+  function renderConstraintMenuAvailability() {
+    document.querySelectorAll('#constraint-menu .menu-item').forEach(item => {
+      const type = item.dataset.type;
+      if (canAddConstraint(type)) {
+        item.classList.remove('disabled');
+      } else {
+        item.classList.add('disabled');
+      }
+    });
+  }
 
   document.addEventListener('click', (e) => {
     if (!constraintMenuEl.contains(e.target)) {
