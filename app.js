@@ -4,7 +4,10 @@
   const zoomEl = document.getElementById('zoom-level');
   const cursorEl = document.getElementById('cursor-pos');
   const layersListEl = document.getElementById('layers-list');
+  const componentsListEl = document.getElementById('components-list');
   const nodeEditIndicatorEl = document.getElementById('node-edit-indicator');
+  const componentEditIndicatorEl = document.getElementById('component-edit-indicator');
+  const componentEditNameEl = document.getElementById('component-edit-name');
   const constraintListEl = document.getElementById('constraint-list');
   const paramsListEl = document.getElementById('params-list');
   const dofValueEl = document.getElementById('dof-value');
@@ -16,7 +19,17 @@
   const paramSelectEl = document.getElementById('constraint-param-select');
   const valueInputEl = document.getElementById('constraint-value-input');
 
+  const createComponentDialogEl = document.getElementById('create-component-dialog');
+  const componentNameInputEl = document.getElementById('component-name-input');
+  const deleteComponentDialogEl = document.getElementById('delete-component-dialog');
+  const deleteComponentMessageEl = document.getElementById('delete-component-message');
+  const instanceOverrideDialogEl = document.getElementById('instance-override-dialog');
+  const overrideFillColorEl = document.getElementById('override-fill-color');
+  const overrideStrokeColorEl = document.getElementById('override-stroke-color');
+  const instanceChildListEl = document.getElementById('instance-child-list');
+
   const GRID_SIZE = 20;
+  const STORAGE_KEY = 'rtm-106-editor-state';
   const CS = window.ConstraintSystem;
   const {
     CONSTRAINT_TYPES,
@@ -39,7 +52,16 @@
   let shapes = [];
   let selectedIds = new Set();
   let nextId = 1;
+  let nextComponentId = 1;
   let currentTool = 'select';
+
+  let components = {};
+  let editingComponentId = null;
+  let savedViewportForComponentEdit = null;
+  let savedSelectionForComponentEdit = null;
+  let pendingComponentToDelete = null;
+  let editingInstanceId = null;
+  let tempOverrides = null;
 
   let undoStack = [];
   let redoStack = [];
@@ -128,14 +150,52 @@
   }
 
   function worldPointsOf(shape) {
+    if (isComponentInstance(shape)) {
+      const expanded = getInstanceExpandedShapes(shape);
+      if (expanded.length === 0) return [];
+      let allPts = [];
+      for (const es of expanded) allPts = allPts.concat(es.points);
+      return allPts;
+    }
     const t = shape.transform;
     return applyTransform(shape.points, t.tx, t.ty, t.rotation, t.scaleX, t.scaleY);
   }
 
   function worldHolesOf(shape) {
+    if (isComponentInstance(shape)) {
+      const expanded = getInstanceExpandedShapes(shape);
+      let allHoles = [];
+      for (const es of expanded) {
+        if (es.holes) allHoles = allHoles.concat(es.holes);
+      }
+      return allHoles;
+    }
     if (!shape.holes) return [];
     const t = shape.transform;
     return shape.holes.map(h => applyTransform(h, t.tx, t.ty, t.rotation, t.scaleX, t.scaleY));
+  }
+
+  function getInstanceExpandedSingleShapes(instance) {
+    const expanded = getInstanceExpandedShapes(instance);
+    return expanded;
+  }
+
+  function hitTestInstance(wx, wy, instance) {
+    if (!instance.visible || instance.locked) return null;
+    const pt = { x: wx, y: wy };
+    const expanded = getInstanceExpandedShapes(instance);
+    for (let i = expanded.length - 1; i >= 0; i--) {
+      const s = expanded[i];
+      if (!s.visible) continue;
+      if (!pointInPolygonOrOnEdge(pt, s.points)) continue;
+      let inHole = false;
+      const holes = s.holes || [];
+      for (const hole of holes) {
+        if (pointInPolygonOrOnEdge(pt, hole)) { inHole = true; break; }
+      }
+      if (!inHole) return instance;
+    }
+    return null;
   }
 
   function getShapeById(id) {
@@ -146,7 +206,9 @@
     return {
       shapes: JSON.parse(JSON.stringify(shapes)),
       constraints: JSON.parse(JSON.stringify(constraints.map(c => serializeConstraint(c)))),
-      paramsData: JSON.parse(JSON.stringify(paramsData))
+      paramsData: JSON.parse(JSON.stringify(paramsData)),
+      components: JSON.parse(JSON.stringify(components)),
+      nextComponentId: nextComponentId
     };
   }
 
@@ -154,6 +216,8 @@
     shapes = JSON.parse(JSON.stringify(state.shapes));
     constraints = state.constraints.map(d => deserializeConstraint(d));
     paramsData = JSON.parse(JSON.stringify(state.paramsData));
+    components = state.components ? JSON.parse(JSON.stringify(state.components)) : {};
+    nextComponentId = state.nextComponentId || 1;
     rebuildSolverAndParams();
   }
 
@@ -214,19 +278,177 @@
     };
   }
 
+  function isComponentInstance(shape) {
+    return shape && shape.type === 'component-instance';
+  }
+
+  function getComponentById(id) {
+    return components[id] || null;
+  }
+
+  function getInstancesOfComponent(componentId) {
+    return shapes.filter(s => isComponentInstance(s) && s.componentId === componentId);
+  }
+
+  function remapShapeIds(clonedShapes, idMap) {
+    for (const s of clonedShapes) {
+      const oldId = s.id;
+      s.id = nextId++;
+      idMap[oldId] = s.id;
+      if (s.type === 'component-instance') {
+        s.localShapeId = s.id;
+      }
+    }
+  }
+
+  function expandComponentShapes(component, baseTransform, overrides, parentIdMap) {
+    const result = [];
+    const idMap = parentIdMap || {};
+    const componentShapes = component.shapes.map(s => JSON.parse(JSON.stringify(s)));
+    remapShapeIds(componentShapes, idMap);
+
+    for (let i = 0; i < componentShapes.length; i++) {
+      const s = componentShapes[i];
+      const origShape = component.shapes[i];
+      const localOverrides = overrides && overrides.children && overrides.children[origShape.localShapeId || origShape.id];
+
+      if (localOverrides && localOverrides.hidden) continue;
+
+      const t = s.transform;
+      const combined = {
+        tx: baseTransform.tx + t.tx,
+        ty: baseTransform.ty + t.ty,
+        rotation: baseTransform.rotation + t.rotation,
+        scaleX: baseTransform.scaleX * t.scaleX,
+        scaleY: baseTransform.scaleY * t.scaleY
+      };
+
+      if (isComponentInstance(s)) {
+        const innerComp = getComponentById(s.componentId);
+        if (innerComp) {
+          const innerOverrides = localOverrides || {};
+          const innerExpanded = expandComponentShapes(innerComp, combined, innerOverrides, idMap);
+          result.push(...innerExpanded);
+        }
+      } else {
+        const clone = JSON.parse(JSON.stringify(s));
+        clone.transform = { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 };
+        clone.points = applyTransform(s.points, combined.tx, combined.ty, combined.rotation, combined.scaleX, combined.scaleY);
+        clone.holes = (s.holes || []).map(h => applyTransform(h, combined.tx, combined.ty, combined.rotation, combined.scaleX, combined.scaleY));
+        clone._originalId = origShape.localShapeId || origShape.id;
+        clone._isExpandedInstance = true;
+
+        if (overrides) {
+          if (overrides.fill) clone.fill = overrides.fill;
+          if (overrides.stroke) clone.stroke = overrides.stroke;
+          if (localOverrides) {
+            if (localOverrides.fill) clone.fill = localOverrides.fill;
+            if (localOverrides.stroke) clone.stroke = localOverrides.stroke;
+          }
+        }
+        result.push(clone);
+      }
+    }
+    return result;
+  }
+
+  function getInstanceExpandedShapes(instance) {
+    const comp = getComponentById(instance.componentId);
+    if (!comp) return [];
+    return expandComponentShapes(comp, instance.transform, instance.overrides);
+  }
+
+  function checkCircularReference(componentId, targetComponentId, visited) {
+    visited = visited || new Set();
+    if (visited.has(componentId)) return false;
+    visited.add(componentId);
+    const comp = getComponentById(componentId);
+    if (!comp) return false;
+    for (const s of comp.shapes) {
+      if (isComponentInstance(s)) {
+        if (s.componentId === targetComponentId) return true;
+        if (checkCircularReference(s.componentId, targetComponentId, visited)) return true;
+      }
+    }
+    return false;
+  }
+
+  function computeComponentBounds(component) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const expanded = expandComponentShapes(component, { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 });
+    for (const s of expanded) {
+      const pts = s.points;
+      for (const p of pts) {
+        minX = Math.min(minX, p.x);
+        minY = Math.min(minY, p.y);
+        maxX = Math.max(maxX, p.x);
+        maxY = Math.max(maxY, p.y);
+      }
+    }
+    if (minX === Infinity) return { minX: -50, minY: -50, maxX: 50, maxY: 50 };
+    return { minX, minY, maxX, maxY };
+  }
+
+  let saveStateTimer = null;
+  function saveStateToStorage() {
+    try {
+      const state = {
+        shapes,
+        constraints: constraints.map(c => serializeConstraint(c)),
+        paramsData,
+        components,
+        nextId,
+        nextComponentId,
+        viewport
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch (e) {
+      console.warn('Failed to save state:', e);
+    }
+  }
+
+  function scheduleSave() {
+    if (saveStateTimer) clearTimeout(saveStateTimer);
+    saveStateTimer = setTimeout(saveStateToStorage, 300);
+  }
+
+  function loadStateFromStorage() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return false;
+      const state = JSON.parse(raw);
+      if (state.shapes) shapes = state.shapes;
+      if (state.constraints) constraints = state.constraints.map(d => deserializeConstraint(d));
+      if (state.paramsData) paramsData = state.paramsData;
+      if (state.components) components = state.components;
+      if (state.nextId) nextId = state.nextId;
+      if (state.nextComponentId) nextComponentId = state.nextComponentId;
+      if (state.viewport) viewport = state.viewport;
+      return true;
+    } catch (e) {
+      console.warn('Failed to load state:', e);
+      return false;
+    }
+  }
+
   function hitTest(wx, wy) {
     const pt = { x: wx, y: wy };
     for (let i = shapes.length - 1; i >= 0; i--) {
       const s = shapes[i];
       if (!s.visible || s.locked) continue;
-      const wp = worldPointsOf(s);
-      if (!pointInPolygonOrOnEdge(pt, wp)) continue;
-      const holes = worldHolesOf(s);
-      let inHole = false;
-      for (const hole of holes) {
-        if (pointInPolygonOrOnEdge(pt, hole)) { inHole = true; break; }
+      if (isComponentInstance(s)) {
+        const hit = hitTestInstance(wx, wy, s);
+        if (hit) return hit;
+      } else {
+        const wp = worldPointsOf(s);
+        if (!pointInPolygonOrOnEdge(pt, wp)) continue;
+        const holes = worldHolesOf(s);
+        let inHole = false;
+        for (const hole of holes) {
+          if (pointInPolygonOrOnEdge(pt, hole)) { inHole = true; break; }
+        }
+        if (!inHole) return s;
       }
-      if (!inHole) return s;
     }
     return null;
   }
@@ -352,9 +574,13 @@
   }
 
   function buildPointMap() {
+    if (editingComponentId !== null) {
+      return buildComponentEditPointMap();
+    }
     const map = {};
     for (const s of shapes) {
       if (!s.visible) continue;
+      if (isComponentInstance(s)) continue;
       const pts = worldPointsOf(s);
       for (let i = 0; i < pts.length; i++) {
         map[makePointId(s.id, false, -1, i)] = { ...pts[i] };
@@ -371,8 +597,12 @@
   }
 
   function applyPointMap(pointMap) {
-    for (const s of shapes) {
+    const targetShapes = editingComponentId !== null
+      ? (getComponentById(editingComponentId)?.shapes || [])
+      : shapes;
+    for (const s of targetShapes) {
       if (!s.visible) continue;
+      if (isComponentInstance(s)) continue;
       const newPts = [];
       for (let i = 0; i < s.points.length; i++) {
         const id = makePointId(s.id, false, -1, i);
@@ -470,7 +700,11 @@
 
   function render() {
     const w = window.innerWidth, h = window.innerHeight;
-    ctx.fillStyle = '#f0f0f0';
+    if (editingComponentId !== null) {
+      ctx.fillStyle = '#faf6f2';
+    } else {
+      ctx.fillStyle = '#f0f0f0';
+    }
     ctx.fillRect(0, 0, w, h);
     ctx.save();
     ctx.translate(w / 2, h / 2);
@@ -478,11 +712,21 @@
     ctx.translate(-viewport.x, -viewport.y);
     drawGrid();
 
-    for (const s of shapes) {
-      if (s.visible) renderShape(s);
-    }
+    if (editingComponentId !== null) {
+      const comp = getComponentById(editingComponentId);
+      if (comp) {
+        for (const s of comp.shapes) {
+          if (s.visible) renderShape(s);
+        }
+        renderComponentEditConstraintIcons();
+      }
+    } else {
+      for (const s of shapes) {
+        if (s.visible) renderShape(s);
+      }
 
-    renderConstraintIcons();
+      renderConstraintIcons();
+    }
 
     if (isNodeEditMode) {
       renderNodeEditGlobal();
@@ -655,10 +899,78 @@
     ctx.restore();
   }
 
+  function buildComponentEditPointMap() {
+    const map = {};
+    if (editingComponentId === null) return map;
+    const comp = getComponentById(editingComponentId);
+    if (!comp) return map;
+    for (const s of comp.shapes) {
+      if (!s.visible) continue;
+      if (isComponentInstance(s)) continue;
+      const pts = worldPointsOf(s);
+      for (let i = 0; i < pts.length; i++) {
+        map[makePointId(s.id, false, -1, i)] = { ...pts[i] };
+      }
+      const holes = worldHolesOf(s);
+      for (let h = 0; h < holes.length; h++) {
+        const hole = holes[h];
+        for (let i = 0; i < hole.length; i++) {
+          map[makePointId(s.id, true, h, i)] = { ...hole[i] };
+        }
+      }
+    }
+    return map;
+  }
+
+  function renderComponentEditConstraintIcons() {
+    if (editingComponentId === null) return;
+    const comp = getComponentById(editingComponentId);
+    if (!comp || !comp.constraints || comp.constraints.length === 0) return;
+    const pointMap = buildComponentEditPointMap();
+    for (let i = 0; i < comp.constraints.length; i++) {
+      const c = comp.constraints[i];
+      const pos = c.getIconPosition(pointMap);
+      if (!pos) continue;
+      ctx.save();
+      const bgColor = '#e3f2fd';
+      const borderColor = '#1a73e8';
+      const textColor = '#0d47a1';
+      ctx.fillStyle = bgColor;
+      ctx.strokeStyle = borderColor;
+      ctx.lineWidth = 1.5 / viewport.scale;
+      const pad = 5 / viewport.scale;
+      const label = c.getLabel();
+      ctx.font = `700 ${11 / viewport.scale}px -apple-system, BlinkMacSystemFont, sans-serif`;
+      const textW = ctx.measureText(label).width;
+      const iconSize = 14 / viewport.scale;
+      const bw = Math.max(textW + pad * 2, iconSize * 2);
+      const bh = iconSize * 1.5;
+      const bx = pos.x - bw / 2, by = pos.y - bh / 2;
+      roundRect(ctx, bx, by, bw, bh, 4 / viewport.scale);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = textColor;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, pos.x, pos.y);
+      ctx.restore();
+    }
+  }
+
+  function getActiveShapes() {
+    if (editingComponentId !== null) {
+      const comp = getComponentById(editingComponentId);
+      return comp ? comp.shapes.filter(s => !isComponentInstance(s)) : [];
+    }
+    return shapes;
+  }
+
   function renderNodeEditGlobal() {
     const vertexSize = 8 / viewport.scale;
-    for (const s of shapes) {
+    const activeShapes = getActiveShapes();
+    for (const s of activeShapes) {
       if (!s.visible) continue;
+      if (isComponentInstance(s)) continue;
       const pts = worldPointsOf(s);
       const holes = worldHolesOf(s);
       renderPolyline(pts, '#1a73e8', 2);
@@ -752,16 +1064,37 @@
   }
 
   function renderShape(s) {
-    const pts = worldPointsOf(s);
-    const holes = worldHolesOf(s);
-    ctx.save();
-    drawPolygonPath(pts, holes);
-    ctx.fillStyle = s.fill;
-    ctx.fill('evenodd');
-    ctx.lineWidth = (s.strokeWidth || 2) / viewport.scale;
-    ctx.strokeStyle = s.stroke || '#000';
-    ctx.stroke();
-    ctx.restore();
+    if (isComponentInstance(s)) {
+      if (editingComponentId !== null) {
+        if (editingComponentId === s.componentId) {
+          return;
+        }
+      }
+      const expanded = getInstanceExpandedShapes(s);
+      for (const es of expanded) {
+        const pts = es.points;
+        const holes = es.holes || [];
+        ctx.save();
+        drawPolygonPath(pts, holes);
+        ctx.fillStyle = es.fill;
+        ctx.fill('evenodd');
+        ctx.lineWidth = (es.strokeWidth || 2) / viewport.scale;
+        ctx.strokeStyle = es.stroke || '#000';
+        ctx.stroke();
+        ctx.restore();
+      }
+    } else {
+      const pts = worldPointsOf(s);
+      const holes = worldHolesOf(s);
+      ctx.save();
+      drawPolygonPath(pts, holes);
+      ctx.fillStyle = s.fill;
+      ctx.fill('evenodd');
+      ctx.lineWidth = (s.strokeWidth || 2) / viewport.scale;
+      ctx.strokeStyle = s.stroke || '#000';
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   function renderSelection(s) {
@@ -852,6 +1185,7 @@
   }
 
   function renderLayers() {
+    if (editingComponentId !== null) return;
     layersListEl.innerHTML = '';
     if (shapes.length === 0) {
       const empty = document.createElement('div');
@@ -868,6 +1202,7 @@
       item.draggable = true;
       if (selectedIds.has(s.id)) item.classList.add('selected');
       if (s.locked) item.classList.add('locked');
+      if (isComponentInstance(s)) item.classList.add('is-instance');
 
       const visibilityBtn = document.createElement('button');
       visibilityBtn.className = 'layer-btn ' + (s.visible ? 'active' : 'inactive');
@@ -885,21 +1220,49 @@
         }
         updateToolbar();
         renderLayers();
+        renderComponentsList();
         render();
       });
 
       const colorSwatch = document.createElement('div');
       colorSwatch.className = 'layer-color';
-      colorSwatch.style.background = s.fill;
+      let displayFill = s.fill;
+      if (isComponentInstance(s) && s.overrides && s.overrides.fill) {
+        displayFill = s.overrides.fill;
+      }
+      colorSwatch.style.background = displayFill;
+
+      const nameWrapper = document.createElement('div');
+      nameWrapper.style.display = 'flex';
+      nameWrapper.style.alignItems = 'center';
+      nameWrapper.style.flex = '1';
+      nameWrapper.style.minWidth = '0';
 
       const nameEl = document.createElement('span');
       nameEl.className = 'layer-name';
-      nameEl.textContent = s.name;
-      nameEl.title = 'Double-click to rename';
+      if (isComponentInstance(s)) {
+        const comp = getComponentById(s.componentId);
+        nameEl.textContent = comp ? comp.name : s.name;
+      } else {
+        nameEl.textContent = s.name;
+      }
+      nameEl.title = isComponentInstance(s) ? 'Component Instance - Double-click to edit component' : 'Double-click to rename';
       nameEl.addEventListener('dblclick', (e) => {
         e.stopPropagation();
-        startRenameLayer(item, s, nameEl);
+        if (isComponentInstance(s)) {
+          enterComponentEditMode(s.componentId);
+        } else {
+          startRenameLayer(item, s, nameEl);
+        }
       });
+
+      if (isComponentInstance(s)) {
+        const badge = document.createElement('span');
+        badge.className = 'layer-badge';
+        badge.textContent = 'C';
+        nameWrapper.appendChild(badge);
+      }
+      nameWrapper.appendChild(nameEl);
 
       const lockBtn = document.createElement('button');
       lockBtn.className = 'layer-btn ' + (s.locked ? 'active' : 'inactive');
@@ -923,7 +1286,45 @@
 
       item.appendChild(visibilityBtn);
       item.appendChild(colorSwatch);
-      item.appendChild(nameEl);
+      item.appendChild(nameWrapper);
+
+      if (isComponentInstance(s)) {
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'instance-context-actions';
+
+        const overrideBtn = document.createElement('button');
+        overrideBtn.className = 'instance-action-btn';
+        overrideBtn.innerHTML = '🎨';
+        overrideBtn.title = 'Instance Overrides';
+        overrideBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openInstanceOverrideDialog(s.id);
+        });
+
+        const unlinkBtn = document.createElement('button');
+        unlinkBtn.className = 'instance-action-btn';
+        unlinkBtn.innerHTML = '⟳';
+        unlinkBtn.title = 'Unlink Instance';
+        unlinkBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          unlinkInstance(s.id);
+        });
+
+        const editBtn = document.createElement('button');
+        editBtn.className = 'instance-action-btn';
+        editBtn.innerHTML = '✎';
+        editBtn.title = 'Edit Source Component';
+        editBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          enterComponentEditMode(s.componentId);
+        });
+
+        actionsDiv.appendChild(overrideBtn);
+        actionsDiv.appendChild(unlinkBtn);
+        actionsDiv.appendChild(editBtn);
+        item.appendChild(actionsDiv);
+      }
+
       item.appendChild(lockBtn);
 
       item.addEventListener('click', (e) => {
@@ -975,6 +1376,572 @@
       });
       layersListEl.appendChild(item);
     }
+  }
+
+  function drawComponentIcon(canvas, component) {
+    const c = canvas.getContext('2d');
+    const w = canvas.width;
+    const h = canvas.height;
+    c.clearRect(0, 0, w, h);
+    const bounds = computeComponentBounds(component);
+    const bw = bounds.maxX - bounds.minX;
+    const bh = bounds.maxY - bounds.minY;
+    if (bw < 1 || bh < 1) return;
+    const padding = 4;
+    const scale = Math.min((w - padding * 2) / bw, (h - padding * 2) / bh);
+    const offsetX = (w - bw * scale) / 2 - bounds.minX * scale;
+    const offsetY = (h - bh * scale) / 2 - bounds.minY * scale;
+    c.save();
+    c.translate(offsetX, offsetY);
+    c.scale(scale, scale);
+    const expanded = expandComponentShapes(component, { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 });
+    for (const s of expanded) {
+      c.beginPath();
+      const pts = s.points;
+      if (pts.length > 0) {
+        c.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) c.lineTo(pts[i].x, pts[i].y);
+        c.closePath();
+      }
+      const holes = s.holes || [];
+      for (const hole of holes) {
+        if (hole.length > 0) {
+          c.moveTo(hole[0].x, hole[0].y);
+          for (let i = 1; i < hole.length; i++) c.lineTo(hole[i].x, hole[i].y);
+          c.closePath();
+        }
+      }
+      c.fillStyle = s.fill;
+      c.fill('evenodd');
+      c.lineWidth = 2 / scale;
+      c.strokeStyle = s.stroke || '#000';
+      c.stroke();
+    }
+    c.restore();
+  }
+
+  function renderComponentsList() {
+    componentsListEl.innerHTML = '';
+    const componentIds = Object.keys(components);
+    if (componentIds.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty-components';
+      empty.textContent = 'No components yet. Select shapes and press G to create.';
+      componentsListEl.appendChild(empty);
+      return;
+    }
+    for (const cid of componentIds) {
+      const comp = components[cid];
+      if (!comp) continue;
+      const item = document.createElement('div');
+      item.className = 'component-item';
+      item.draggable = true;
+      item.dataset.componentId = cid;
+
+      const iconDiv = document.createElement('div');
+      iconDiv.className = 'component-icon';
+      const iconCanvas = document.createElement('canvas');
+      iconCanvas.width = 56;
+      iconCanvas.height = 56;
+      iconDiv.appendChild(iconCanvas);
+
+      const infoDiv = document.createElement('div');
+      infoDiv.className = 'component-info';
+      const nameEl = document.createElement('div');
+      nameEl.className = 'component-name';
+      nameEl.textContent = comp.name;
+      const countEl = document.createElement('div');
+      countEl.className = 'component-count';
+      const instCount = getInstancesOfComponent(parseInt(cid, 10)).length;
+      countEl.textContent = instCount + ' instance' + (instCount !== 1 ? 's' : '');
+      infoDiv.appendChild(nameEl);
+      infoDiv.appendChild(countEl);
+
+      const actionsDiv = document.createElement('div');
+      actionsDiv.className = 'component-actions';
+      const delBtn = document.createElement('button');
+      delBtn.className = 'component-action-btn';
+      delBtn.textContent = '×';
+      delBtn.title = 'Delete Component';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        tryDeleteComponent(parseInt(cid, 10));
+      });
+      actionsDiv.appendChild(delBtn);
+
+      item.appendChild(iconDiv);
+      item.appendChild(infoDiv);
+      item.appendChild(actionsDiv);
+
+      item.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        enterComponentEditMode(parseInt(cid, 10));
+      });
+
+      item.addEventListener('dragstart', (e) => {
+        e.dataTransfer.effectAllowed = 'copy';
+        e.dataTransfer.setData('application/component', cid);
+      });
+
+      item.addEventListener('click', () => {
+        const rect = canvas.getBoundingClientRect();
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        const world = screenToWorld(centerX, centerY);
+        const cidNum = parseInt(cid, 10);
+        if (editingComponentId !== null) {
+          if (checkCircularReference(cidNum, editingComponentId)) {
+            showToast('Circular reference detected - cannot nest this component', 'error');
+            return;
+          }
+          addInstanceToEditingComponent(cidNum, world.x, world.y);
+        } else {
+          createInstanceAt(cidNum, world.x, world.y);
+        }
+      });
+
+      componentsListEl.appendChild(item);
+      requestAnimationFrame(() => {
+        drawComponentIcon(iconCanvas, comp);
+      });
+    }
+  }
+
+  function openCreateComponentDialog() {
+    if (selectedIds.size === 0) {
+      showToast('Select one or more shapes first', 'warning');
+      return;
+    }
+    const existingCount = Object.keys(components).length;
+    componentNameInputEl.value = 'Component ' + (existingCount + 1);
+    createComponentDialogEl.classList.remove('hidden');
+    setTimeout(() => componentNameInputEl.focus(), 50);
+  }
+
+  function closeCreateComponentDialog() {
+    createComponentDialogEl.classList.add('hidden');
+  }
+
+  function collectConstraintsForShapes(shapeIds) {
+    const result = [];
+    for (const c of constraints) {
+      const refs = c.getReferencedPoints();
+      let allMatch = true;
+      for (const pid of refs) {
+        const { shapeId } = parsePointId(pid);
+        if (!shapeIds.has(shapeId)) {
+          allMatch = false;
+          break;
+        }
+      }
+      if (allMatch) result.push(c);
+    }
+    return result;
+  }
+
+  function createComponentFromSelection(name) {
+    if (selectedIds.size === 0) {
+      showToast('Select shapes first', 'warning');
+      return;
+    }
+    const selIds = [...selectedIds];
+    const selectedShapes = selIds.map(id => getShapeById(id)).filter(Boolean);
+
+    pushHistory();
+
+    const bounds = getShapesBounds(selectedShapes);
+    const centerX = (bounds.minX + bounds.maxX) / 2;
+    const centerY = (bounds.minY + bounds.maxY) / 2;
+
+    const clonedShapes = selectedShapes.map(s => {
+      const clone = JSON.parse(JSON.stringify(s));
+      clone.localShapeId = clone.id;
+      const t = clone.transform;
+      clone.points = applyTransform(clone.points, t.tx - centerX, t.ty - centerY, t.rotation, t.scaleX, t.scaleY);
+      clone.holes = (clone.holes || []).map(h => applyTransform(h, t.tx - centerX, t.ty - centerY, t.rotation, t.scaleX, t.scaleY));
+      clone.transform = { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 };
+      return clone;
+    });
+
+    const idSet = new Set(selIds);
+    const relatedConstraints = collectConstraintsForShapes(idSet);
+    const idMap = {};
+    for (const s of clonedShapes) {
+      idMap[s.localShapeId] = s.localShapeId;
+    }
+    const remappedConstraints = relatedConstraints.map(c => {
+      const clone = JSON.parse(JSON.stringify(serializeConstraint(c)));
+      const remap = (pid) => {
+        if (!pid) return pid;
+        const parsed = parsePointId(pid);
+        return makePointId(parsed.shapeId, parsed.isHole, parsed.holeIndex, parsed.pointIndex);
+      };
+      clone.pointA = remap(clone.pointA);
+      clone.pointB = remap(clone.pointB);
+      clone.point = remap(clone.point);
+      clone.lineStart = remap(clone.lineStart);
+      clone.lineEnd = remap(clone.lineEnd);
+      clone.line1Start = remap(clone.line1Start);
+      clone.line1End = remap(clone.line1End);
+      clone.line2Start = remap(clone.line2Start);
+      clone.line2End = remap(clone.line2End);
+      return clone;
+    });
+
+    const componentId = nextComponentId++;
+    components[componentId] = {
+      id: componentId,
+      name: name || ('Component ' + componentId),
+      shapes: clonedShapes,
+      constraints: remappedConstraints,
+      offsetX: centerX,
+      offsetY: centerY
+    };
+
+    const instanceShape = {
+      id: nextId++,
+      name: 'Instance of ' + (name || 'Component'),
+      type: 'component-instance',
+      componentId: componentId,
+      visible: true,
+      locked: false,
+      fill: null,
+      stroke: null,
+      strokeWidth: 2,
+      transform: { tx: centerX, ty: centerY, rotation: 0, scaleX: 1, scaleY: 1 },
+      overrides: {}
+    };
+    shapes.push(instanceShape);
+
+    for (const id of selIds) {
+      const idx = shapes.findIndex(s => s.id === id);
+      if (idx >= 0) shapes.splice(idx, 1);
+    }
+    constraints = constraints.filter(c => {
+      const refs = c.getReferencedPoints();
+      for (const pid of refs) {
+        const { shapeId } = parsePointId(pid);
+        if (idSet.has(shapeId)) return false;
+      }
+      return true;
+    });
+
+    selectedIds.clear();
+    selectedIds.add(instanceShape.id);
+    rebuildSolverAndParams();
+    initialSolve();
+    updateToolbar();
+    updateDOFDisplay();
+    renderLayers();
+    renderConstraintList();
+    renderComponentsList();
+    render();
+    scheduleSave();
+    showToast('Component created: ' + (name || 'Component'), 'success');
+  }
+
+  function createInstanceAt(componentId, x, y) {
+    const comp = getComponentById(componentId);
+    if (!comp) {
+      showToast('Component not found', 'error');
+      return;
+    }
+    pushHistory();
+    const instanceShape = {
+      id: nextId++,
+      name: 'Instance of ' + comp.name,
+      type: 'component-instance',
+      componentId: componentId,
+      visible: true,
+      locked: false,
+      fill: null,
+      stroke: null,
+      strokeWidth: 2,
+      transform: { tx: x, ty: y, rotation: 0, scaleX: 1, scaleY: 1 },
+      overrides: {}
+    };
+    shapes.push(instanceShape);
+    selectedIds.clear();
+    selectedIds.add(instanceShape.id);
+    updateToolbar();
+    renderLayers();
+    renderComponentsList();
+    render();
+    scheduleSave();
+    showToast('Instance created', 'success');
+  }
+
+  function addInstanceToEditingComponent(componentId, x, y) {
+    const comp = getComponentById(componentId);
+    const editingComp = getComponentById(editingComponentId);
+    if (!comp || !editingComp) {
+      showToast('Component not found', 'error');
+      return;
+    }
+    pushHistory();
+    const instanceShape = {
+      id: nextId++,
+      localShapeId: 0,
+      name: 'Instance of ' + comp.name,
+      type: 'component-instance',
+      componentId: componentId,
+      visible: true,
+      locked: false,
+      fill: null,
+      stroke: null,
+      strokeWidth: 2,
+      transform: { tx: x, ty: y, rotation: 0, scaleX: 1, scaleY: 1 },
+      overrides: {}
+    };
+    instanceShape.localShapeId = instanceShape.id;
+    editingComp.shapes.push(instanceShape);
+    renderComponentsList();
+    render();
+    scheduleSave();
+    showToast('Nested instance added to component', 'success');
+  }
+
+  function enterComponentEditMode(componentId) {
+    const comp = getComponentById(componentId);
+    if (!comp) {
+      showToast('Component not found', 'error');
+      return;
+    }
+    if (checkCircularReference(componentId, componentId)) {
+      showToast('Circular reference detected', 'error');
+      return;
+    }
+    pushHistory();
+    savedViewportForComponentEdit = { ...viewport };
+    savedSelectionForComponentEdit = new Set(selectedIds);
+    editingComponentId = componentId;
+    selectedIds.clear();
+    selectedVertex = null;
+    constraintSelection = [];
+    constraintMode = null;
+    isNodeEditMode = false;
+    const bounds = computeComponentBounds(comp);
+    viewport.x = (bounds.minX + bounds.maxX) / 2;
+    viewport.y = (bounds.minY + bounds.maxY) / 2;
+    componentEditNameEl.textContent = 'Editing: ' + comp.name;
+    componentEditIndicatorEl.classList.remove('hidden');
+    updateToolbar();
+    renderLayers();
+    renderComponentsList();
+    renderConstraintList();
+    renderParams();
+    updateDOFDisplay();
+    render();
+  }
+
+  function exitComponentEditMode() {
+    if (editingComponentId === null) return;
+    pushHistory();
+    editingComponentId = null;
+    if (savedViewportForComponentEdit) {
+      viewport = savedViewportForComponentEdit;
+      savedViewportForComponentEdit = null;
+    }
+    if (savedSelectionForComponentEdit) {
+      selectedIds = new Set([...savedSelectionForComponentEdit].filter(id => getShapeById(id)));
+      savedSelectionForComponentEdit = null;
+    }
+    componentEditIndicatorEl.classList.add('hidden');
+    selectedVertex = null;
+    constraintSelection = [];
+    constraintMode = null;
+    isNodeEditMode = false;
+    rebuildSolverAndParams();
+    initialSolve();
+    updateToolbar();
+    renderLayers();
+    renderComponentsList();
+    renderConstraintList();
+    renderParams();
+    updateDOFDisplay();
+    render();
+    scheduleSave();
+  }
+
+  function unlinkInstance(instanceId) {
+    const instance = getShapeById(instanceId);
+    if (!instance || !isComponentInstance(instance)) return;
+    pushHistory();
+    const expanded = getInstanceExpandedShapes(instance);
+    if (expanded.length === 0) {
+      showToast('Nothing to unlink', 'warning');
+      return;
+    }
+    const newShapes = [];
+    for (const es of expanded) {
+      const s = createShape(es.points, es.fill, es.holes);
+      s.stroke = es.stroke || '#000';
+      s.strokeWidth = es.strokeWidth || 2;
+      s.name = instance.name + ' (unlinked)';
+      newShapes.push(s);
+    }
+    const idx = shapes.findIndex(s => s.id === instanceId);
+    if (idx >= 0) shapes.splice(idx, 1);
+    for (const s of newShapes) shapes.push(s);
+    selectedIds.clear();
+    for (const s of newShapes) selectedIds.add(s.id);
+    rebuildSolverAndParams();
+    initialSolve();
+    updateToolbar();
+    updateDOFDisplay();
+    renderLayers();
+    renderConstraintList();
+    renderComponentsList();
+    render();
+    scheduleSave();
+    showToast('Instance unlinked into ' + newShapes.length + ' shape(s)', 'success');
+  }
+
+  function tryDeleteComponent(componentId) {
+    const instances = getInstancesOfComponent(componentId);
+    if (instances.length > 0) {
+      pendingComponentToDelete = componentId;
+      const comp = getComponentById(componentId);
+      deleteComponentMessageEl.innerHTML =
+        `<span>Component "<b>${comp ? comp.name : componentId}</b>" has <b>${instances.length}</b> instance(s) on the canvas. Deleting it will also remove all instances. Continue?</span>`;
+      deleteComponentDialogEl.classList.remove('hidden');
+    } else {
+      deleteComponent(componentId);
+    }
+  }
+
+  function deleteComponent(componentId) {
+    pushHistory();
+    const instances = getInstancesOfComponent(componentId);
+    const instanceIds = instances.map(i => i.id);
+    for (const id of instanceIds) {
+      const idx = shapes.findIndex(s => s.id === id);
+      if (idx >= 0) shapes.splice(idx, 1);
+    }
+    constraints = constraints.filter(c => {
+      const refs = c.getReferencedPoints();
+      for (const pid of refs) {
+        const { shapeId } = parsePointId(pid);
+        if (instanceIds.includes(shapeId)) return false;
+      }
+      return true;
+    });
+    delete components[componentId];
+    if (editingComponentId === componentId) {
+      editingComponentId = null;
+      componentEditIndicatorEl.classList.add('hidden');
+    }
+    for (const id of instanceIds) {
+      if (selectedIds.has(id)) selectedIds.delete(id);
+    }
+    rebuildSolverAndParams();
+    initialSolve();
+    updateToolbar();
+    updateDOFDisplay();
+    renderLayers();
+    renderConstraintList();
+    renderComponentsList();
+    render();
+    scheduleSave();
+    showToast('Component deleted', 'success');
+  }
+
+  function closeDeleteComponentDialog() {
+    deleteComponentDialogEl.classList.add('hidden');
+    pendingComponentToDelete = null;
+  }
+
+  function openInstanceOverrideDialog(instanceId) {
+    const instance = getShapeById(instanceId);
+    if (!instance || !isComponentInstance(instance)) return;
+    editingInstanceId = instanceId;
+    tempOverrides = JSON.parse(JSON.stringify(instance.overrides || {}));
+    if (!tempOverrides.children) tempOverrides.children = {};
+
+    overrideFillColorEl.value = tempOverrides.fill || '#808080';
+    overrideStrokeColorEl.value = tempOverrides.stroke || '#000000';
+
+    while (instanceChildListEl.children.length > 1) {
+      instanceChildListEl.removeChild(instanceChildListEl.lastChild);
+    }
+
+    const comp = getComponentById(instance.componentId);
+    if (comp) {
+      for (const child of comp.shapes) {
+        if (isComponentInstance(child)) continue;
+        const childId = child.localShapeId || child.id;
+        const row = document.createElement('div');
+        row.className = 'child-visibility-item';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = !(tempOverrides.children[childId] && tempOverrides.children[childId].hidden);
+        checkbox.dataset.childId = childId;
+        checkbox.addEventListener('change', () => {
+          const cid = parseInt(checkbox.dataset.childId, 10);
+          if (!tempOverrides.children) tempOverrides.children = {};
+          if (!checkbox.checked) {
+            tempOverrides.children[cid] = tempOverrides.children[cid] || {};
+            tempOverrides.children[cid].hidden = true;
+          } else {
+            if (tempOverrides.children[cid]) {
+              delete tempOverrides.children[cid].hidden;
+              if (Object.keys(tempOverrides.children[cid]).length === 0) {
+                delete tempOverrides.children[cid];
+              }
+            }
+          }
+        });
+        const label = document.createElement('span');
+        label.textContent = child.name || ('Shape ' + childId);
+        row.appendChild(checkbox);
+        row.appendChild(label);
+        instanceChildListEl.appendChild(row);
+      }
+    }
+
+    instanceOverrideDialogEl.classList.remove('hidden');
+  }
+
+  function closeInstanceOverrideDialog() {
+    instanceOverrideDialogEl.classList.add('hidden');
+    editingInstanceId = null;
+    tempOverrides = null;
+  }
+
+  function applyInstanceOverrides() {
+    if (editingInstanceId === null) return;
+    const instance = getShapeById(editingInstanceId);
+    if (!instance) return;
+    pushHistory();
+    const overrides = tempOverrides || {};
+    overrides.children = overrides.children || {};
+
+    const checkboxes = instanceChildListEl.querySelectorAll('input[type="checkbox"]');
+    for (const cb of checkboxes) {
+      const childId = parseInt(cb.dataset.childId, 10);
+      if (!cb.checked) {
+        overrides.children[childId] = overrides.children[childId] || {};
+        overrides.children[childId].hidden = true;
+      } else {
+        if (overrides.children[childId]) {
+          delete overrides.children[childId].hidden;
+          if (Object.keys(overrides.children[childId]).length === 0) {
+            delete overrides.children[childId];
+          }
+        }
+      }
+    }
+
+    if (!overrides.fill) delete overrides.fill;
+    if (!overrides.stroke) delete overrides.stroke;
+    if (overrides.children && Object.keys(overrides.children).length === 0) delete overrides.children;
+
+    instance.overrides = overrides;
+    closeInstanceOverrideDialog();
+    renderLayers();
+    render();
+    scheduleSave();
+    showToast('Overrides applied', 'success');
   }
 
   function startRenameLayer(item, shape, nameEl) {
@@ -2517,6 +3484,14 @@
       return;
     }
 
+    if (!isNodeEditMode && editingComponentId === null && currentTool === 'select') {
+      const shapeHit = hitTest(world.x, world.y);
+      if (shapeHit && isComponentInstance(shapeHit)) {
+        enterComponentEditMode(shapeHit.componentId);
+        return;
+      }
+    }
+
     if (currentTool === 'polygon' && polygonPoints.length >= 3) {
       pushHistory();
       const pts = polygonPoints.slice(0, -1);
@@ -2574,6 +3549,10 @@
     if (e.key === 'Alt' || e.key === 'Option') keys.alt = true;
 
     if (e.key === 'Escape') {
+      if (editingComponentId !== null) {
+        exitComponentEditMode();
+        return;
+      }
       if (constraintMode) {
         constraintMode = null;
         constraintSelection = [];
@@ -2659,6 +3638,7 @@
     else if (key === 'n') { isNodeEditMode = !isNodeEditMode; if (!isNodeEditMode) selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); updateDOFDisplay(); render(); showToast(isNodeEditMode ? 'Node Edit Mode ON' : 'Node Edit Mode OFF'); }
     else if (key === 'a') { selectedIds.clear(); for (const s of shapes) { if (s.visible && !s.locked) selectedIds.add(s.id); } updateToolbar(); renderLayers(); render(); }
     else if (key === ';') { snapEnabled = !snapEnabled; showToast(snapEnabled ? 'Snap ON' : 'Snap OFF'); render(); }
+    else if (key === 'g') { if (editingComponentId === null) openCreateComponentDialog(); }
   });
 
   window.addEventListener('keyup', (e) => {
@@ -2674,16 +3654,103 @@
   document.getElementById('tool-circle').addEventListener('click', () => { currentTool = 'circle'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); render(); });
   document.getElementById('tool-polygon').addEventListener('click', () => { currentTool = 'polygon'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; polygonPoints = []; updateToolbar(); render(); });
 
+  document.getElementById('create-component').addEventListener('click', () => {
+    if (editingComponentId === null) openCreateComponentDialog();
+  });
+
+  document.getElementById('create-component-close').addEventListener('click', closeCreateComponentDialog);
+  document.getElementById('create-component-cancel').addEventListener('click', closeCreateComponentDialog);
+  document.getElementById('create-component-ok').addEventListener('click', () => {
+    const name = componentNameInputEl.value.trim() || ('Component ' + (Object.keys(components).length + 1));
+    createComponentFromSelection(name);
+    closeCreateComponentDialog();
+  });
+  componentNameInputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') document.getElementById('create-component-ok').click();
+    else if (e.key === 'Escape') closeCreateComponentDialog();
+  });
+
+  document.getElementById('exit-component-edit').addEventListener('click', exitComponentEditMode);
+
+  document.getElementById('delete-component-close').addEventListener('click', closeDeleteComponentDialog);
+  document.getElementById('delete-component-cancel').addEventListener('click', closeDeleteComponentDialog);
+  document.getElementById('delete-component-ok').addEventListener('click', () => {
+    if (pendingComponentToDelete !== null) {
+      deleteComponent(pendingComponentToDelete);
+      pendingComponentToDelete = null;
+    }
+    closeDeleteComponentDialog();
+  });
+
+  document.getElementById('instance-override-close').addEventListener('click', closeInstanceOverrideDialog);
+  document.getElementById('instance-override-cancel').addEventListener('click', closeInstanceOverrideDialog);
+  document.getElementById('instance-override-ok').addEventListener('click', applyInstanceOverrides);
+
+  document.getElementById('reset-override-fill').addEventListener('click', () => {
+    overrideFillColorEl.value = '#808080';
+    if (tempOverrides) delete tempOverrides.fill;
+  });
+  document.getElementById('reset-override-stroke').addEventListener('click', () => {
+    overrideStrokeColorEl.value = '#000000';
+    if (tempOverrides) delete tempOverrides.stroke;
+  });
+  overrideFillColorEl.addEventListener('input', () => {
+    if (tempOverrides) tempOverrides.fill = overrideFillColorEl.value;
+  });
+  overrideStrokeColorEl.addEventListener('input', () => {
+    if (tempOverrides) tempOverrides.stroke = overrideStrokeColorEl.value;
+  });
+
+  canvas.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  });
+  canvas.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const cidStr = e.dataTransfer.getData('application/component');
+    if (cidStr) {
+      const rect = canvas.getBoundingClientRect();
+      const sx = e.clientX - rect.left;
+      const sy = e.clientY - rect.top;
+      const world = screenToWorld(sx, sy);
+      if (editingComponentId !== null) {
+        if (checkCircularReference(parseInt(cidStr, 10), editingComponentId)) {
+          showToast('Circular reference detected - cannot nest this component', 'error');
+          return;
+        }
+        addInstanceToEditingComponent(parseInt(cidStr, 10), world.x, world.y);
+      } else {
+        createInstanceAt(parseInt(cidStr, 10), world.x, world.y);
+      }
+    }
+  });
+
   document.getElementById('export-svg').addEventListener('click', () => {
     const allX = [];
     const allY = [];
+    const exportShapes = [];
+
     for (const s of shapes) {
       if (!s.visible) continue;
-      const pts = worldPointsOf(s);
-      for (const p of pts) { allX.push(p.x); allY.push(p.y); }
-      const holes = worldHolesOf(s);
-      for (const hole of holes) {
-        for (const p of hole) { allX.push(p.x); allY.push(p.y); }
+      if (isComponentInstance(s)) {
+        const expanded = getInstanceExpandedShapes(s);
+        for (const es of expanded) {
+          exportShapes.push(es);
+          const pts = es.points;
+          for (const p of pts) { allX.push(p.x); allY.push(p.y); }
+          const holes = es.holes || [];
+          for (const hole of holes) {
+            for (const p of hole) { allX.push(p.x); allY.push(p.y); }
+          }
+        }
+      } else {
+        exportShapes.push(s);
+        const pts = worldPointsOf(s);
+        for (const p of pts) { allX.push(p.x); allY.push(p.y); }
+        const holes = worldHolesOf(s);
+        for (const hole of holes) {
+          for (const p of hole) { allX.push(p.x); allY.push(p.y); }
+        }
       }
     }
     if (allX.length === 0) { showToast('No shapes to export'); return; }
@@ -2693,11 +3760,10 @@
     const maxY = Math.max(...allY);
     const pad = 20;
     let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${minX - pad} ${minY - pad} ${maxX - minX + pad * 2} ${maxY - minY + pad * 2}">`;
-    for (const s of shapes) {
-      if (!s.visible) continue;
-      const pts = worldPointsOf(s);
+    for (const s of exportShapes) {
+      const pts = s._isExpandedInstance ? s.points : worldPointsOf(s);
+      const holes = s._isExpandedInstance ? (s.holes || []) : worldHolesOf(s);
       let d = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ') + 'Z';
-      const holes = worldHolesOf(s);
       for (const hole of holes) {
         d += ' ' + hole.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ') + 'Z';
       }
@@ -2930,9 +3996,25 @@
     renderLayers();
     renderConstraintList();
     renderParams();
+    renderComponentsList();
     render();
   }
 
+  window.addEventListener('beforeunload', saveStateToStorage);
+
   resize();
-  initDemo();
+  const loaded = loadStateFromStorage();
+  if (loaded) {
+    rebuildSolverAndParams();
+    initialSolve();
+    updateToolbar();
+    updateDOFDisplay();
+    renderLayers();
+    renderConstraintList();
+    renderParams();
+    renderComponentsList();
+    render();
+  } else {
+    initDemo();
+  }
 })();
