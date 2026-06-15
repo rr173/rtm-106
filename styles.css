@@ -983,3 +983,382 @@ input[type="color"]:focus {
   from { opacity: 0; transform: translate(-50%, 10px); }
   to { opacity: 1; transform: translate(-50%, 0); }
 }
+
+#timeline-panel {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: #fff;
+  border-top: 1px solid #e0e0e0;
+  box-shadow: 0 -2px 12px rgba(0,0,0,0.08);
+  z-index: 15;
+  display: flex;
+  flex-direction: column;
+  transition: transform 0.2s ease;
+}
+
+#timeline-panel.collapsed {
+  transform: translateY(calc(100% - 36px));
+}
+
+#timeline-panel.collapsed .timeline-body {
+  display: none;
+}
+
+.timeline-header {
+  padding: 8px 12px;
+  background: #fafafa;
+  border-bottom: 1px solid #e8e8e8;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  user-select: none;
+}
+
+.timeline-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #333;
+}
+
+.timeline-title svg {
+  color: #1a73e8;
+}
+
+.timeline-controls {
+  display: flex;
+  gap: 4px;
+}
+
+.timeline-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: #f5f5f5;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  color: #333;
+  font-size: 12px;
+  transition: all 0.12s;
+}
+
+.timeline-btn:hover:not(:disabled) {
+  background: #e3f0ff;
+  border-color: #4d9fff;
+  color: #1a73e8;
+}
+
+.timeline-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.timeline-btn.play-btn {
+  background: #1a73e8;
+  color: #fff;
+  min-width: 36px;
+  justify-content: center;
+}
+
+.timeline-btn.play-btn:hover {
+  background: #1557b0;
+  border-color: #1557b0;
+  color: #fff;
+}
+
+.timeline-btn .hidden {
+  display: none;
+}
+
+.timeline-body {
+  display: flex;
+  flex-direction: column;
+  max-height: 300px;
+}
+
+.timeline-toolbar {
+  padding: 6px 12px;
+  background: #f8f9fa;
+  border-bottom: 1px solid #e8e8e8;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.playback-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.timeline-spacer {
+  flex: 1;
+}
+
+.timeline-sep {
+  width: 1px;
+  height: 24px;
+  background: #e0e0e0;
+  margin: 0 4px;
+}
+
+.timeline-settings {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #555;
+}
+
+.setting-label {
+  font-size: 11px;
+  color: #666;
+  font-weight: 500;
+}
+
+.timeline-select {
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 12px;
+  background: #fff;
+  outline: none;
+  cursor: pointer;
+}
+
+.timeline-select:focus {
+  border-color: #4d9fff;
+}
+
+.timeline-input {
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 12px;
+  width: 50px;
+  outline: none;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+}
+
+.timeline-input:focus {
+  border-color: #4d9fff;
+}
+
+.setting-unit {
+  font-size: 11px;
+  color: #888;
+}
+
+.timeline-ruler {
+  position: relative;
+  height: 28px;
+  background: #fafafa;
+  border-bottom: 1px solid #e8e8e8;
+  cursor: pointer;
+}
+
+#ruler-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #e53935;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.playhead::before {
+  content: '';
+  position: absolute;
+  top: -1px;
+  left: -5px;
+  width: 0;
+  height: 0;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 8px solid #e53935;
+}
+
+.timeline-tracks {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 120px;
+}
+
+.timeline-tracks-header {
+  display: flex;
+  position: sticky;
+  top: 0;
+  background: #f5f5f5;
+  border-bottom: 1px solid #e0e0e0;
+  z-index: 1;
+}
+
+.track-label-col {
+  width: 140px;
+  min-width: 140px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #666;
+  background: #f5f5f5;
+  border-right: 1px solid #e0e0e0;
+}
+
+.track-track-col {
+  flex: 1;
+  position: relative;
+}
+
+.timeline-tracks-content {
+  position: relative;
+}
+
+.empty-tracks {
+  padding: 40px 20px;
+  text-align: center;
+  color: #999;
+  font-size: 12px;
+}
+
+.track-row {
+  display: flex;
+  border-bottom: 1px solid #f0f0f0;
+  align-items: center;
+}
+
+.track-row:hover {
+  background: #fafafa;
+}
+
+.track-label {
+  width: 140px;
+  min-width: 140px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: #555;
+  border-right: 1px solid #eee;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.track-label.color-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.track-canvas {
+  flex: 1;
+  position: relative;
+  height: 28px;
+  cursor: pointer;
+}
+
+.track-canvas canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.keyframe-dot {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: #ffb300;
+  border: 2px solid #fff;
+  border-radius: 2px;
+  top: 50%;
+  transform: translate(-50%, -50%) rotate(45deg);
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  z-index: 2;
+}
+
+.keyframe-dot:hover {
+  background: #ff8f00;
+  transform: translate(-50%, -50%) rotate(45deg) scale(1.2);
+}
+
+.keyframe-dot.selected {
+  background: #e53935;
+}
+
+.shape-track-group {
+  border-bottom: 2px solid #e0e0e0;
+}
+
+.shape-track-header {
+  display: flex;
+  align-items: center;
+  padding: 4px 10px;
+  background: #f0f4f8;
+  font-weight: 600;
+  font-size: 12px;
+  color: #333;
+  gap: 6px;
+}
+
+.shape-track-header .shape-color {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  border: 1px solid rgba(0,0,0,0.1);
+}
+
+.timeline-footer {
+  padding: 6px 12px;
+  background: #f8f9fa;
+  border-top: 1px solid #e8e8e8;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #555;
+}
+
+#timeline-frame-info {
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+  font-size: 11px;
+  color: #666;
+}
+
+#timeline-easing-label {
+  font-size: 11px;
+  color: #666;
+  font-weight: 500;
+}
+
+@media (max-width: 800px) {
+  .timeline-toolbar {
+    gap: 4px;
+  }
+
+  .timeline-settings {
+    gap: 4px;
+  }
+
+  .setting-label {
+    display: none;
+  }
+}

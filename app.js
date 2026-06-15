@@ -98,6 +98,13 @@
   let hoveredEdge = null;
 
   let constraintSolver = new ConstraintSolver();
+
+  let animationController = new window.AnimationController();
+  let selectedKeyframeShapeId = null;
+  let selectedKeyframeProp = null;
+  let selectedKeyframeFrame = null;
+  let timelineCollapsed = false;
+  let originalShapeData = null;
   let paramManager = new ParamManager();
   let constraints = [];
   let paramsData = {};
@@ -275,6 +282,7 @@
       fill: fill || randomFillColor(),
       stroke: '#000',
       strokeWidth: 2,
+      opacity: 1,
       transform: { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }
     };
   }
@@ -432,6 +440,7 @@
   let saveStateTimer = null;
   function saveStateToStorage() {
     try {
+      const animationData = animationController.serialize();
       const state = {
         shapes,
         constraints: constraints.map(c => serializeConstraint(c)),
@@ -439,7 +448,8 @@
         components,
         nextId,
         nextComponentId,
-        viewport
+        viewport,
+        animationData
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch (e) {
@@ -464,6 +474,12 @@
       if (state.nextId) nextId = state.nextId;
       if (state.nextComponentId) nextComponentId = state.nextComponentId;
       if (state.viewport) viewport = state.viewport;
+      if (state.animationData) {
+        animationController.deserialize(state.animationData);
+      }
+      for (const s of shapes) {
+        if (s.opacity === undefined) s.opacity = 1;
+      }
       return true;
     } catch (e) {
       console.warn('Failed to load state:', e);
@@ -1103,7 +1119,57 @@
     }
   }
 
+  function getAnimatedShapeProps(shape, frame) {
+    const baseTransform = shape.transform;
+    const baseFill = shape.fill;
+    const baseOpacity = shape.opacity !== undefined ? shape.opacity : 1;
+
+    const animProps = animationController.getShapePropertiesAtFrame(shape.id, frame, {
+      tx: baseTransform.tx,
+      ty: baseTransform.ty,
+      rotation: baseTransform.rotation,
+      scaleX: baseTransform.scaleX,
+      scaleY: baseTransform.scaleY,
+      fill: baseFill,
+      opacity: baseOpacity
+    });
+
+    return animProps;
+  }
+
+  function getAnimatedWorldPoints(shape, frame) {
+    if (isComponentInstance(shape)) {
+      const expanded = getInstanceExpandedShapes(shape);
+      if (expanded.length === 0) return [];
+      let allPts = [];
+      for (const es of expanded) {
+        if (es.points) allPts = allPts.concat(es.points);
+      }
+      return allPts;
+    }
+    const props = getAnimatedShapeProps(shape, frame);
+    const pts = applyTransform(shape.points, props.tx, props.ty, props.rotation, props.scaleX, props.scaleY);
+    return pts;
+  }
+
+  function getAnimatedWorldHoles(shape, frame) {
+    if (isComponentInstance(shape)) {
+      const expanded = getInstanceExpandedShapes(shape);
+      let allHoles = [];
+      for (const es of expanded) {
+        if (es.holes) allHoles = allHoles.concat(es.holes);
+      }
+      return allHoles;
+    }
+    if (!shape.holes) return [];
+    const props = getAnimatedShapeProps(shape, frame);
+    return shape.holes.map(h => applyTransform(h, props.tx, props.ty, props.rotation, props.scaleX, props.scaleY));
+  }
+
   function renderShape(s) {
+    const currentFrame = animationController.currentFrame;
+    const useAnimation = animationController.isPlaying || animationController.currentFrame > 0;
+
     if (isComponentInstance(s)) {
       if (editingComponentId !== null) {
         if (editingComponentId === s.componentId) {
@@ -1115,8 +1181,17 @@
         const pts = es.points;
         const holes = es.holes || [];
         ctx.save();
+        if (useAnimation) {
+          const animProps = animationController.getShapePropertiesAtFrame(s.id, currentFrame, { opacity: 1 });
+          ctx.globalAlpha = animProps.opacity;
+        }
         drawPolygonPath(pts, holes);
-        ctx.fillStyle = es.fill;
+        let fillColor = es.fill;
+        if (useAnimation) {
+          const animProps = animationController.getShapePropertiesAtFrame(s.id, currentFrame, { fill: es.fill });
+          fillColor = animProps.fill;
+        }
+        ctx.fillStyle = fillColor;
         ctx.fill('evenodd');
         ctx.lineWidth = (es.strokeWidth || 2) / viewport.scale;
         ctx.strokeStyle = es.stroke || '#000';
@@ -1124,11 +1199,21 @@
         ctx.restore();
       }
     } else {
-      const pts = worldPointsOf(s);
-      const holes = worldHolesOf(s);
+      let pts = worldPointsOf(s);
+      let holes = worldHolesOf(s);
+      let fillColor = s.fill;
+      let opacity = s.opacity !== undefined ? s.opacity : 1;
+
+      if (useAnimation && isNodeEditMode) {
+        const animProps = getAnimatedShapeProps(s, currentFrame);
+        fillColor = animProps.fill;
+        opacity = animProps.opacity;
+      }
+
       ctx.save();
+      ctx.globalAlpha = opacity;
       drawPolygonPath(pts, holes);
-      ctx.fillStyle = s.fill;
+      ctx.fillStyle = fillColor;
       ctx.fill('evenodd');
       ctx.lineWidth = (s.strokeWidth || 2) / viewport.scale;
       ctx.strokeStyle = s.stroke || '#000';
@@ -3682,6 +3767,7 @@
         for (const id of ids) {
           const idx = shapes.findIndex(s => s.id === id);
           if (idx >= 0) shapes.splice(idx, 1);
+          animationController.removeShapeAnimation(id);
         }
         constraints = constraints.filter(c => {
           const rps = c.getReferencedPoints();
@@ -4073,6 +4159,868 @@
     render();
   }
 
+  function saveOriginalShapes() {
+    originalShapeData = shapes.map(s => ({
+      id: s.id,
+      points: s.points.map(p => ({ ...p })),
+      holes: s.holes.map(h => h.map(p => ({ ...p }))),
+      transform: { ...s.transform },
+      fill: s.fill,
+      opacity: s.opacity
+    }));
+  }
+
+  function restoreOriginalShapes() {
+    if (!originalShapeData) return;
+    for (const data of originalShapeData) {
+      const shape = getShapeById(data.id);
+      if (shape) {
+        shape.points = data.points.map(p => ({ ...p }));
+        shape.holes = data.holes.map(h => h.map(p => ({ ...p })));
+        shape.transform = { ...data.transform };
+        shape.fill = data.fill;
+        if (shape.opacity !== undefined) {
+          shape.opacity = data.opacity;
+        }
+      }
+    }
+  }
+
+  function applyAnimationToShapes(frame) {
+    for (const s of shapes) {
+      if (!s.visible) continue;
+      if (isComponentInstance(s)) continue;
+
+      const baseProps = {
+        tx: s.transform.tx,
+        ty: s.transform.ty,
+        rotation: s.transform.rotation,
+        scaleX: s.transform.scaleX,
+        scaleY: s.transform.scaleY,
+        fill: s.fill,
+        opacity: s.opacity !== undefined ? s.opacity : 1
+      };
+
+      const animProps = animationController.getShapePropertiesAtFrame(s.id, frame, baseProps);
+
+      s.transform.tx = animProps.tx;
+      s.transform.ty = animProps.ty;
+      s.transform.rotation = animProps.rotation;
+      s.transform.scaleX = animProps.scaleX;
+      s.transform.scaleY = animProps.scaleY;
+      s.fill = animProps.fill;
+      s.opacity = animProps.opacity;
+    }
+  }
+
+  function solveWithAnimation() {
+    if (constraints.length === 0) return;
+
+    const fixedPoints = new Set();
+    for (const s of shapes) {
+      if (!s.visible || s.locked) continue;
+      if (isComponentInstance(s)) continue;
+      const pts = s.points;
+      for (let i = 0; i < pts.length; i++) {
+        fixedPoints.add(makePointId(s.id, false, -1, i) + '_x');
+        fixedPoints.add(makePointId(s.id, false, -1, i) + '_y');
+      }
+      if (s.holes) {
+        for (let h = 0; h < s.holes.length; h++) {
+          const hole = s.holes[h];
+          for (let i = 0; i < hole.length; i++) {
+            fixedPoints.add(makePointId(s.id, true, h, i) + '_x');
+            fixedPoints.add(makePointId(s.id, true, h, i) + '_y');
+          }
+        }
+      }
+    }
+
+    const wasLocked = {};
+    for (const s of shapes) {
+      wasLocked[s.id] = s.locked;
+      s.locked = true;
+    }
+
+    runSolver(fixedPoints, null, 20);
+
+    for (const s of shapes) {
+      s.locked = wasLocked[s.id] || false;
+    }
+  }
+
+  function updateAnimationFrame(frame) {
+    const isPreviewing = frame > 0 || animationController.isPlaying;
+
+    if (isPreviewing && originalShapeData === null) {
+      saveOriginalShapes();
+    }
+
+    if (originalShapeData !== null) {
+      restoreOriginalShapes();
+    }
+
+    if (frame > 0 || animationController.isPlaying) {
+      applyAnimationToShapes(frame);
+
+      if (constraints.length > 0) {
+        const fixedPoints = new Set();
+        for (const s of shapes) {
+          if (!s.visible) continue;
+          if (isComponentInstance(s)) continue;
+          if (animationController.shapeHasKeyframes(s.id)) {
+            const pts = s.points;
+            for (let i = 0; i < pts.length; i++) {
+              fixedPoints.add(makePointId(s.id, false, -1, i) + '_x');
+              fixedPoints.add(makePointId(s.id, false, -1, i) + '_y');
+            }
+            if (s.holes) {
+              for (let h = 0; h < s.holes.length; h++) {
+                const hole = s.holes[h];
+                for (let i = 0; i < hole.length; i++) {
+                  fixedPoints.add(makePointId(s.id, true, h, i) + '_x');
+                  fixedPoints.add(makePointId(s.id, true, h, i) + '_y');
+                }
+              }
+            }
+          }
+        }
+
+        const pointMap = buildPointMap();
+        constraintSolver.solve(pointMap, fixedPoints, null, 20);
+        applyPointMap(pointMap);
+      }
+    }
+
+    updatePlayheadPosition();
+    updateFrameInfo();
+    render();
+
+    if (!isPreviewing && originalShapeData !== null) {
+      originalShapeData = null;
+    }
+  }
+
+  function initTimeline() {
+    animationController.onFrameChange((frame) => {
+      updateAnimationFrame(frame);
+      scheduleSave();
+    });
+
+    animationController.onPlayStateChange((isPlaying) => {
+      updatePlayPauseButton();
+      if (isPlaying && originalShapeData === null && animationController.currentFrame > 0) {
+        saveOriginalShapes();
+      }
+    });
+
+    const timelinePanel = document.getElementById('timeline-panel');
+    const toggleBtn = document.getElementById('timeline-toggle');
+    const header = document.querySelector('.timeline-header');
+
+    header.addEventListener('click', (e) => {
+      if (e.target.closest('.timeline-controls')) return;
+      toggleTimeline();
+    });
+    toggleBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleTimeline();
+    });
+
+    document.getElementById('btn-play-pause').addEventListener('click', togglePlayPause);
+    document.getElementById('btn-go-start').addEventListener('click', goToStart);
+    document.getElementById('btn-go-end').addEventListener('click', goToEnd);
+    document.getElementById('btn-prev-frame').addEventListener('click', prevFrame);
+    document.getElementById('btn-next-frame').addEventListener('click', nextFrame);
+
+    document.getElementById('chk-loop').addEventListener('change', (e) => {
+      animationController.setLoop(e.target.checked);
+    });
+
+    document.getElementById('sel-speed').addEventListener('change', (e) => {
+      animationController.setSpeed(parseFloat(e.target.value));
+    });
+
+    document.getElementById('sel-fps').addEventListener('change', (e) => {
+      const fps = parseInt(e.target.value, 10);
+      animationController.setFPS(fps);
+      renderTimelineRuler();
+      renderTimelineTracks();
+      updatePlayheadPosition();
+      updateFrameInfo();
+    });
+
+    document.getElementById('input-duration').addEventListener('change', (e) => {
+      const duration = parseFloat(e.target.value);
+      if (duration > 0) {
+        animationController.setDuration(duration);
+        renderTimelineRuler();
+        renderTimelineTracks();
+        updatePlayheadPosition();
+        updateFrameInfo();
+      }
+    });
+
+    document.getElementById('btn-add-keyframe').addEventListener('click', addKeyframeFromUI);
+
+    const ruler = document.getElementById('timeline-ruler');
+    let isDraggingPlayhead = false;
+
+    ruler.addEventListener('mousedown', (e) => {
+      isDraggingPlayhead = true;
+      scrubPlayhead(e);
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (isDraggingPlayhead) {
+        scrubPlayhead(e);
+      }
+    });
+
+    document.addEventListener('mouseup', () => {
+      isDraggingPlayhead = false;
+    });
+
+    document.getElementById('btn-export-png').addEventListener('click', exportPNGSequence);
+    document.getElementById('btn-export-gif').addEventListener('click', exportGIF);
+
+    renderTimelineRuler();
+    renderTimelineTracks();
+    updatePlayheadPosition();
+    updateFrameInfo();
+    updatePlayPauseButton();
+
+    setTimeout(() => {
+      renderTimelineRuler();
+      renderTimelineTracks();
+      updatePlayheadPosition();
+    }, 100);
+  }
+
+  function toggleTimeline() {
+    const panel = document.getElementById('timeline-panel');
+    timelineCollapsed = !timelineCollapsed;
+    if (timelineCollapsed) {
+      panel.classList.add('collapsed');
+    } else {
+      panel.classList.remove('collapsed');
+      setTimeout(() => {
+        renderTimelineRuler();
+        renderTimelineTracks();
+        updatePlayheadPosition();
+      }, 200);
+    }
+    setTimeout(resize, 250);
+  }
+
+  function scrubPlayhead(e) {
+    const ruler = document.getElementById('timeline-ruler');
+    const rect = ruler.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const ratio = Math.max(0, Math.min(1, x / rect.width));
+    const frame = Math.round(ratio * animationController.getTotalFrames());
+    animationController.goToFrame(frame);
+  }
+
+  function togglePlayPause() {
+    if (animationController.isPlaying) {
+      animationController.pause();
+    } else {
+      animationController.play();
+    }
+  }
+
+  function goToStart() {
+    animationController.goToFrame(0);
+  }
+
+  function goToEnd() {
+    animationController.goToFrame(animationController.getTotalFrames());
+  }
+
+  function prevFrame() {
+    animationController.prevFrame();
+  }
+
+  function nextFrame() {
+    animationController.nextFrame();
+  }
+
+  function updatePlayPauseButton() {
+    const playIcon = document.getElementById('icon-play');
+    const pauseIcon = document.getElementById('icon-pause');
+    if (animationController.isPlaying) {
+      playIcon.classList.add('hidden');
+      pauseIcon.classList.remove('hidden');
+    } else {
+      playIcon.classList.remove('hidden');
+      pauseIcon.classList.add('hidden');
+    }
+  }
+
+  function updatePlayheadPosition() {
+    const playhead = document.getElementById('playhead');
+    const ruler = document.getElementById('timeline-ruler');
+    if (!ruler || ruler.offsetWidth === 0) return;
+    const totalFrames = animationController.getTotalFrames();
+    const ratio = totalFrames > 0 ? animationController.currentFrame / totalFrames : 0;
+    playhead.style.left = (ratio * ruler.offsetWidth) + 'px';
+  }
+
+  function updateFrameInfo() {
+    const frame = animationController.currentFrame;
+    const total = animationController.getTotalFrames();
+    const time = animationController.getCurrentTime();
+    document.getElementById('timeline-frame-info').textContent =
+      `Frame: ${frame} / ${total} (${time.toFixed(2)}s)`;
+  }
+
+  function renderTimelineRuler() {
+    const canvas = document.getElementById('ruler-canvas');
+    const container = document.getElementById('timeline-ruler');
+    if (!canvas || !container) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const width = container.offsetWidth;
+    const height = container.offsetHeight;
+
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    canvas.style.width = width + 'px';
+    canvas.style.height = height + 'px';
+
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+
+    const totalFrames = animationController.getTotalFrames();
+    const fps = animationController.fps;
+
+    ctx.fillStyle = '#fafafa';
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.strokeStyle = '#e0e0e0';
+    ctx.lineWidth = 1;
+    ctx.fillStyle = '#999';
+    ctx.font = '10px sans-serif';
+
+    const majorInterval = fps;
+    const minorInterval = fps / 6;
+
+    for (let i = 0; i <= totalFrames; i++) {
+      const x = (i / totalFrames) * width;
+      if (i % majorInterval === 0) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, 18);
+        ctx.stroke();
+        const seconds = (i / fps).toFixed(0);
+        const text = seconds + 's';
+        ctx.fillText(text, x + 3, 10);
+      } else if (i % minorInterval === 0) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, 10);
+        ctx.stroke();
+      }
+    }
+  }
+
+  function renderTimelineTracks() {
+    const container = document.getElementById('timeline-tracks-content');
+    if (!container) return;
+
+    container.innerHTML = '';
+
+    const animatedShapes = animationController.getAnimatedShapes();
+
+    if (animatedShapes.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty-tracks';
+      empty.textContent = 'Select a shape and add keyframes to start animating';
+      container.appendChild(empty);
+      return;
+    }
+
+    for (const shapeIdStr of animatedShapes) {
+      const shapeId = parseInt(shapeIdStr, 10);
+      const shape = getShapeById(shapeId);
+      if (!shape) continue;
+
+      const shapeAnim = animationController.shapeAnimations[shapeIdStr];
+      if (!shapeAnim) continue;
+
+      const group = document.createElement('div');
+      group.className = 'shape-track-group';
+
+      const header = document.createElement('div');
+      header.className = 'shape-track-header';
+      header.innerHTML = `
+        <span class="shape-color" style="background:${shape.fill}"></span>
+        <span>${shape.name}</span>
+      `;
+      group.appendChild(header);
+
+      const props = ['tx', 'ty', 'rotation', 'scaleX', 'opacity', 'fill'];
+      const propLabels = {
+        tx: 'Position X',
+        ty: 'Position Y',
+        rotation: 'Rotation',
+        scaleX: 'Scale',
+        opacity: 'Opacity',
+        fill: 'Fill Color'
+      };
+
+      for (const prop of props) {
+        const track = shapeAnim.getPropertyTrack(prop);
+        if (!track || track.keyframes.length === 0) continue;
+
+        const row = document.createElement('div');
+        row.className = 'track-row';
+        row.dataset.shapeId = shapeId;
+        row.dataset.prop = prop;
+
+        const label = document.createElement('div');
+        label.className = 'track-label';
+        label.textContent = propLabels[prop] || prop;
+        row.appendChild(label);
+
+        const trackCanvas = document.createElement('div');
+        trackCanvas.className = 'track-canvas';
+        trackCanvas.dataset.shapeId = shapeId;
+        trackCanvas.dataset.prop = prop;
+
+        const canvasEl = document.createElement('canvas');
+        trackCanvas.appendChild(canvasEl);
+
+        for (const kf of track.keyframes) {
+          const dot = document.createElement('div');
+          dot.className = 'keyframe-dot';
+          dot.dataset.shapeId = shapeId;
+          dot.dataset.prop = prop;
+          dot.dataset.frame = kf.frame;
+          const totalFrames = animationController.getTotalFrames();
+          dot.style.left = ((kf.frame / totalFrames) * 100) + '%';
+
+          if (selectedKeyframeShapeId === shapeId &&
+              selectedKeyframeProp === prop &&
+              selectedKeyframeFrame === kf.frame) {
+            dot.classList.add('selected');
+          }
+
+          dot.addEventListener('click', (e) => {
+            e.stopPropagation();
+            selectKeyframe(shapeId, prop, kf.frame);
+          });
+
+          dot.addEventListener('dblclick', (e) => {
+            e.stopPropagation();
+            if (confirm('Delete this keyframe?')) {
+              animationController.removeKeyframe(shapeId, prop, kf.frame);
+              selectedKeyframeShapeId = null;
+              selectedKeyframeProp = null;
+              selectedKeyframeFrame = null;
+              renderTimelineTracks();
+              scheduleSave();
+            }
+          });
+
+          trackCanvas.appendChild(dot);
+        }
+
+        trackCanvas.addEventListener('click', (e) => {
+          const rect = trackCanvas.getBoundingClientRect();
+          const x = e.clientX - rect.left;
+          const ratio = x / rect.width;
+          const frame = Math.round(ratio * animationController.getTotalFrames());
+          animationController.goToFrame(frame);
+        });
+
+        row.appendChild(trackCanvas);
+        group.appendChild(row);
+      }
+
+      container.appendChild(group);
+    }
+  }
+
+  function selectKeyframe(shapeId, prop, frame) {
+    selectedKeyframeShapeId = shapeId;
+    selectedKeyframeProp = prop;
+    selectedKeyframeFrame = frame;
+    renderTimelineTracks();
+
+    const easing = animationController.getKeyframeEasing(shapeId, prop, frame);
+    if (easing) {
+      document.getElementById('sel-easing').value = easing;
+    }
+  }
+
+  function addKeyframeFromUI() {
+    if (selectedIds.size === 0) {
+      showToast('Select a shape to add keyframe', 'warning');
+      return;
+    }
+
+    const frame = animationController.currentFrame;
+    const easing = document.getElementById('sel-easing').value;
+
+    for (const id of selectedIds) {
+      const shape = getShapeById(id);
+      if (!shape) continue;
+
+      const props = [
+        { name: 'tx', value: shape.transform.tx },
+        { name: 'ty', value: shape.transform.ty },
+        { name: 'rotation', value: shape.transform.rotation },
+        { name: 'scaleX', value: shape.transform.scaleX },
+        { name: 'opacity', value: shape.opacity !== undefined ? shape.opacity : 1 },
+        { name: 'fill', value: shape.fill }
+      ];
+
+      for (const p of props) {
+        animationController.addKeyframe(id, p.name, frame, p.value, easing);
+      }
+    }
+
+    renderTimelineTracks();
+    scheduleSave();
+    showToast('Keyframe added', 'success');
+  }
+
+  document.getElementById('sel-easing').addEventListener('change', (e) => {
+    if (selectedKeyframeShapeId !== null && selectedKeyframeProp !== null && selectedKeyframeFrame !== null) {
+      animationController.setKeyframeEasing(
+        selectedKeyframeShapeId,
+        selectedKeyframeProp,
+        selectedKeyframeFrame,
+        e.target.value
+      );
+      scheduleSave();
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+
+    if (e.code === 'Space' && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
+      togglePlayPause();
+    }
+
+    if (e.key === '.' || e.key === '>') {
+      e.preventDefault();
+      nextFrame();
+    }
+    if (e.key === ',' || e.key === '<') {
+      e.preventDefault();
+      prevFrame();
+    }
+
+    if (e.key === 'Delete' && selectedKeyframeShapeId !== null) {
+      e.preventDefault();
+      animationController.removeKeyframe(
+        selectedKeyframeShapeId,
+        selectedKeyframeProp,
+        selectedKeyframeFrame
+      );
+      selectedKeyframeShapeId = null;
+      selectedKeyframeProp = null;
+      selectedKeyframeFrame = null;
+      renderTimelineTracks();
+      scheduleSave();
+    }
+  });
+
+  function getAnimationBounds() {
+    const totalFrames = animationController.getTotalFrames();
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+    const originalFrame = animationController.currentFrame;
+    const originalPlaying = animationController.isPlaying;
+    animationController.pause();
+
+    for (let i = 0; i <= totalFrames; i++) {
+      animationController.goToFrame(i);
+      for (const s of shapes) {
+        if (!s.visible) continue;
+        let pts;
+        if (isComponentInstance(s)) {
+          pts = getAnimatedWorldPoints(s, i);
+        } else {
+          pts = worldPointsOf(s);
+        }
+        for (const p of pts) {
+          minX = Math.min(minX, p.x);
+          minY = Math.min(minY, p.y);
+          maxX = Math.max(maxX, p.x);
+          maxY = Math.max(maxY, p.y);
+        }
+      }
+    }
+
+    animationController.goToFrame(originalFrame);
+    if (originalPlaying) animationController.play();
+
+    if (minX === Infinity) {
+      return { minX: -100, minY: -100, maxX: 100, maxY: 100 };
+    }
+
+    return { minX, minY, maxX, maxY };
+  }
+
+  function drawFrameToContext(ctx, frame, bounds, padding) {
+    ctx.save();
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    ctx.translate(padding - bounds.minX, padding - bounds.minY);
+
+    for (const s of shapes) {
+      if (!s.visible) continue;
+
+      let pts, holes, fillColor, opacity;
+
+      if (isComponentInstance(s)) {
+        const expanded = getInstanceExpandedShapes(s);
+        const animProps = animationController.getShapePropertiesAtFrame(s.id, frame, { fill: '#ccc', opacity: 1 });
+        for (const es of expanded) {
+          const ePts = es.points;
+          const eHoles = es.holes || [];
+          ctx.save();
+          ctx.globalAlpha = animProps.opacity;
+          ctx.fillStyle = animProps.fill;
+          ctx.strokeStyle = es.stroke || '#000';
+          ctx.lineWidth = es.strokeWidth || 2;
+
+          ctx.beginPath();
+          if (ePts.length > 0) {
+            ctx.moveTo(ePts[0].x, ePts[0].y);
+            for (let j = 1; j < ePts.length; j++) {
+              ctx.lineTo(ePts[j].x, ePts[j].y);
+            }
+            ctx.closePath();
+          }
+          ctx.fill('evenodd');
+          ctx.stroke();
+          ctx.restore();
+        }
+        continue;
+      }
+
+      pts = worldPointsOf(s);
+      holes = worldHolesOf(s);
+      fillColor = s.fill;
+      opacity = s.opacity !== undefined ? s.opacity : 1;
+
+      ctx.save();
+      ctx.globalAlpha = opacity;
+      ctx.fillStyle = fillColor;
+      ctx.strokeStyle = s.stroke || '#000';
+      ctx.lineWidth = s.strokeWidth || 2;
+
+      ctx.beginPath();
+      if (pts.length > 0) {
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let j = 1; j < pts.length; j++) {
+          ctx.lineTo(pts[j].x, pts[j].y);
+        }
+        ctx.closePath();
+      }
+      if (holes.length > 0) {
+        for (const hole of holes) {
+          if (hole.length > 0) {
+            ctx.moveTo(hole[0].x, hole[0].y);
+            for (let j = 1; j < hole.length; j++) {
+              ctx.lineTo(hole[j].x, hole[j].y);
+            }
+            ctx.closePath();
+          }
+        }
+      }
+      ctx.fill('evenodd');
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
+
+  async function exportPNGSequence() {
+    showToast('Rendering PNG sequence...', 'info');
+
+    try {
+      const totalFrames = animationController.getTotalFrames();
+      const pngData = [];
+
+      const tempCanvas = document.createElement('canvas');
+      const tempCtx = tempCanvas.getContext('2d');
+
+      const wasPlaying = animationController.isPlaying;
+      const originalFrame = animationController.currentFrame;
+      animationController.pause();
+
+      showToast('Calculating bounds...', 'info');
+      const bounds = getAnimationBounds();
+      const padding = 20;
+
+      const exportW = Math.ceil((bounds.maxX - bounds.minX + padding * 2));
+      const exportH = Math.ceil((bounds.maxY - bounds.minY + padding * 2));
+
+      tempCanvas.width = exportW;
+      tempCanvas.height = exportH;
+
+      for (let i = 0; i <= totalFrames; i++) {
+        animationController.goToFrame(i);
+        drawFrameToContext(tempCtx, i, bounds, padding);
+
+        const dataUrl = tempCanvas.toDataURL('image/png');
+        const base64 = dataUrl.split(',')[1];
+        const frameNum = String(i).padStart(String(totalFrames).length, '0');
+        pngData.push({
+          filename: `frame_${frameNum}.png`,
+          data: base64
+        });
+
+        if (i % 10 === 0) {
+          showToast(`Rendering frame ${i}/${totalFrames}...`, 'info');
+          await new Promise(r => setTimeout(r, 10));
+        }
+      }
+
+      animationController.goToFrame(originalFrame);
+      if (wasPlaying) animationController.play();
+
+      const zip = new window.ZIPWriter();
+      for (const item of pngData) {
+        const binaryStr = atob(item.data);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) {
+          bytes[i] = binaryStr.charCodeAt(i);
+        }
+        zip.addFile(item.filename, bytes);
+      }
+      const zipData = zip.generate();
+      const blob = new Blob([zipData], { type: 'application/zip' });
+      downloadBlob(blob, 'animation_frames.zip');
+
+      showToast('PNG sequence exported', 'success');
+    } catch (err) {
+      console.error('Export failed:', err);
+      showToast('Export failed: ' + err.message, 'error');
+    }
+  }
+
+  function getCanvasContentBounds() {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+    for (const s of shapes) {
+      if (!s.visible) continue;
+      const pts = worldPointsOf(s);
+      for (const p of pts) {
+        minX = Math.min(minX, p.x);
+        minY = Math.min(minY, p.y);
+        maxX = Math.max(maxX, p.x);
+        maxY = Math.max(maxY, p.y);
+      }
+    }
+
+    if (minX === Infinity) {
+      return { minX: -100, minY: -100, maxX: 100, maxY: 100 };
+    }
+
+    return { minX, minY, maxX, maxY };
+  }
+
+  async function exportGIF() {
+    showToast('Rendering GIF...', 'info');
+
+    try {
+      const totalFrames = animationController.getTotalFrames();
+      const fps = animationController.fps;
+      const delay = Math.round(100 / fps);
+
+      const wasPlaying = animationController.isPlaying;
+      const originalFrame = animationController.currentFrame;
+      animationController.pause();
+
+      showToast('Calculating bounds...', 'info');
+      const bounds = getAnimationBounds();
+      const padding = 20;
+      const exportW = Math.ceil((bounds.maxX - bounds.minX + padding * 2));
+      const exportH = Math.ceil((bounds.maxY - bounds.minY + padding * 2));
+
+      const tempCanvas = document.createElement('canvas');
+      const tempCtx = tempCanvas.getContext('2d');
+      tempCanvas.width = exportW;
+      tempCanvas.height = exportH;
+
+      const gifEncoder = new window.GIFEncoder(exportW, exportH);
+      gifEncoder.start();
+      gifEncoder.setRepeat(0);
+      gifEncoder.setDelay(delay);
+
+      for (let i = 0; i <= totalFrames; i++) {
+        animationController.goToFrame(i);
+        drawFrameToContext(tempCtx, i, bounds, padding);
+
+        const imageData = tempCtx.getImageData(0, 0, exportW, exportH);
+        gifEncoder.addFrame(imageData);
+
+        if (i % 5 === 0) {
+          showToast(`Encoding GIF frame ${i}/${totalFrames}...`, 'info');
+          await new Promise(r => setTimeout(r, 10));
+        }
+      }
+
+      gifEncoder.finish();
+
+      animationController.goToFrame(originalFrame);
+      if (wasPlaying) animationController.play();
+
+      const gifData = gifEncoder.out.getData();
+      const byteArray = new Uint8Array(gifData.length);
+      for (let i = 0; i < gifData.length; i++) {
+        byteArray[i] = gifData.charCodeAt(i) & 0xff;
+      }
+      const blob = new Blob([byteArray], { type: 'image/gif' });
+      downloadBlob(blob, 'animation.gif');
+
+      showToast('GIF exported successfully', 'success');
+    } catch (err) {
+      console.error('GIF export failed:', err);
+      showToast('GIF export failed: ' + err.message, 'error');
+    }
+  }
+
+  function base64ToBlob(base64, type) {
+    const binaryString = atob(base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return new Blob([bytes], { type: type });
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  window.addEventListener('resize', () => {
+    if (!timelineCollapsed) {
+      setTimeout(() => {
+        renderTimelineRuler();
+        renderTimelineTracks();
+        updatePlayheadPosition();
+      }, 50);
+    }
+  });
+
   window.addEventListener('beforeunload', saveStateToStorage);
 
   resize();
@@ -4090,4 +5038,6 @@
   } else {
     initDemo();
   }
+
+  initTimeline();
 })();

@@ -205,6 +205,107 @@
 
 <div id="toast" class="toast hidden"></div>
 
+<div id="timeline-panel">
+  <div class="timeline-header">
+    <div class="timeline-title">
+      <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>
+      <span>Timeline</span>
+    </div>
+    <div class="timeline-controls">
+      <button id="timeline-toggle" class="timeline-btn" title="Toggle Timeline">
+        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
+      </button>
+    </div>
+  </div>
+  <div class="timeline-body" id="timeline-body">
+    <div class="timeline-toolbar">
+      <div class="playback-controls">
+        <button id="btn-go-start" class="timeline-btn" title="Go to Start">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+        </button>
+        <button id="btn-prev-frame" class="timeline-btn" title="Previous Frame">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M15.41 16.09l-4.58-4.09 4.58-4.09L14 7l-6 5 6 5zM8 7h2v10H8z"/></svg>
+        </button>
+        <button id="btn-play-pause" class="timeline-btn play-btn" title="Play/Pause (Space)">
+          <svg id="icon-play" viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+          <svg id="icon-pause" viewBox="0 0 24 24" width="18" height="18" class="hidden"><path fill="currentColor" d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+        </button>
+        <button id="btn-next-frame" class="timeline-btn" title="Next Frame">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6zM16 7h2v10h-2z"/></svg>
+        </button>
+        <button id="btn-go-end" class="timeline-btn" title="Go to End">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+        </button>
+      </div>
+      <div class="timeline-spacer"></div>
+      <div class="timeline-settings">
+        <label class="setting-label">Loop</label>
+        <input type="checkbox" id="chk-loop" checked />
+      </div>
+      <div class="timeline-settings">
+        <label class="setting-label">Speed</label>
+        <select id="sel-speed" class="timeline-select">
+          <option value="0.25">0.25x</option>
+          <option value="0.5">0.5x</option>
+          <option value="1" selected>1x</option>
+          <option value="2">2x</option>
+          <option value="4">4x</option>
+        </select>
+      </div>
+      <div class="timeline-settings">
+        <label class="setting-label">FPS</label>
+        <select id="sel-fps" class="timeline-select">
+          <option value="12">12</option>
+          <option value="24">24</option>
+          <option value="30" selected>30</option>
+          <option value="60">60</option>
+        </select>
+      </div>
+      <div class="timeline-settings">
+        <label class="setting-label">Duration</label>
+        <input type="number" id="input-duration" class="timeline-input" value="5" min="1" max="60" step="1" />
+        <span class="setting-unit">s</span>
+      </div>
+      <div class="timeline-sep"></div>
+      <button id="btn-add-keyframe" class="timeline-btn" title="Add Keyframe">
+        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+      </button>
+      <button id="btn-export-png" class="timeline-btn" title="Export PNG Sequence">
+        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
+        <span>PNG</span>
+      </button>
+      <button id="btn-export-gif" class="timeline-btn" title="Export GIF">
+        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-3.5-7h2v2h-2zm0-3.5h2v.5h-2zm5 3.5h2v-2h-1v1h-1v1zm-1-2.5v-1h2v.5h-1.5v.5h-.5zm-4.5-2h3v4h-1v-1.5h-1.5v-2.5z"/></svg>
+        <span>GIF</span>
+      </button>
+    </div>
+    <div class="timeline-ruler" id="timeline-ruler">
+      <canvas id="ruler-canvas"></canvas>
+      <div class="playhead" id="playhead"></div>
+    </div>
+    <div class="timeline-tracks" id="timeline-tracks">
+      <div class="timeline-tracks-header">
+        <div class="track-label-col">Property</div>
+        <div class="track-track-col" id="track-header-track"></div>
+      </div>
+      <div class="timeline-tracks-content" id="timeline-tracks-content">
+        <div class="empty-tracks">
+          Select a shape and add keyframes to start animating
+        </div>
+      </div>
+    </div>
+    <div class="timeline-footer">
+      <span id="timeline-frame-info">Frame: 0 / 150 (0.00s)</span>
+      <div class="timeline-spacer"></div>
+      <span id="timeline-easing-label">Easing:</span>
+      <select id="sel-easing" class="timeline-select">
+        <option value="linear">Linear</option>
+        <option value="ease-in-out">Ease In Out</option>
+      </select>
+    </div>
+  </div>
+</div>
+
 <div id="create-component-dialog" class="modal hidden">
   <div class="modal-content">
     <div class="modal-header">
@@ -270,6 +371,7 @@
 
 <script src="geometry.js"></script>
 <script src="constraint-solver.js"></script>
+<script src="animation.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
