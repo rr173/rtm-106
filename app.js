@@ -59,6 +59,7 @@
   let editingComponentId = null;
   let savedViewportForComponentEdit = null;
   let savedSelectionForComponentEdit = null;
+  let savedConstraintsForComponentEdit = null;
   let pendingComponentToDelete = null;
   let editingInstanceId = null;
   let tempOverrides = null;
@@ -288,6 +289,45 @@
 
   function getInstancesOfComponent(componentId) {
     return shapes.filter(s => isComponentInstance(s) && s.componentId === componentId);
+  }
+
+  function getComponentsReferencing(componentId) {
+    const result = [];
+    for (const cid in components) {
+      if (parseInt(cid, 10) === componentId) continue;
+      const comp = components[cid];
+      const hasRef = comp.shapes.some(s => isComponentInstance(s) && s.componentId === componentId);
+      if (hasRef) result.push(parseInt(cid, 10));
+    }
+    return result;
+  }
+
+  function unlinkInstanceInComponent(hostComponentId, instanceShape) {
+    const hostComp = getComponentById(hostComponentId);
+    if (!hostComp) return;
+    const comp = getComponentById(instanceShape.componentId);
+    if (!comp) return;
+    const expanded = expandComponentShapes(comp, instanceShape.transform, instanceShape.overrides || {});
+    const insertIdx = hostComp.shapes.findIndex(s => s.id === instanceShape.id);
+    if (insertIdx < 0) return;
+    for (const s of expanded) {
+      if (s.localShapeId === undefined) s.localShapeId = s.id;
+      if (s.name === undefined) s.name = 'Shape ' + s.id;
+      if (s.visible === undefined) s.visible = true;
+      if (s.locked === undefined) s.locked = false;
+      if (s.type === undefined) s.type = 'polygon';
+    }
+    hostComp.shapes.splice(insertIdx, 1, ...expanded);
+    if (hostComp.constraints) {
+      hostComp.constraints = hostComp.constraints.filter(c => {
+        const refs = [c.pointA, c.pointB, c.point, c.lineStart, c.lineEnd, c.line1Start, c.line1End, c.line2Start, c.line2End].filter(Boolean);
+        for (const pid of refs) {
+          const { shapeId } = parsePointId(pid);
+          if (shapeId === instanceShape.id) return false;
+        }
+        return true;
+      });
+    }
   }
 
   function remapShapeIds(clonedShapes, idMap) {
@@ -718,7 +758,7 @@
         for (const s of comp.shapes) {
           if (s.visible) renderShape(s);
         }
-        renderComponentEditConstraintIcons();
+        renderConstraintIcons();
       }
     } else {
       for (const s of shapes) {
@@ -1714,17 +1754,22 @@
     pushHistory();
     savedViewportForComponentEdit = { ...viewport };
     savedSelectionForComponentEdit = new Set(selectedIds);
+    savedConstraintsForComponentEdit = constraints.slice();
     editingComponentId = componentId;
     selectedIds.clear();
     selectedVertex = null;
     constraintSelection = [];
     constraintMode = null;
+    selectedConstraintIdx = -1;
     isNodeEditMode = false;
+    constraints = (comp.constraints || []).map(d => deserializeConstraint(d)).filter(Boolean);
     const bounds = computeComponentBounds(comp);
     viewport.x = (bounds.minX + bounds.maxX) / 2;
     viewport.y = (bounds.minY + bounds.maxY) / 2;
     componentEditNameEl.textContent = 'Editing: ' + comp.name;
     componentEditIndicatorEl.classList.remove('hidden');
+    rebuildSolverAndParams();
+    initialSolve();
     updateToolbar();
     renderLayers();
     renderComponentsList();
@@ -1737,6 +1782,14 @@
   function exitComponentEditMode() {
     if (editingComponentId === null) return;
     pushHistory();
+    const comp = getComponentById(editingComponentId);
+    if (comp) {
+      comp.constraints = constraints.map(c => serializeConstraint(c));
+    }
+    if (savedConstraintsForComponentEdit !== null) {
+      constraints = savedConstraintsForComponentEdit;
+      savedConstraintsForComponentEdit = null;
+    }
     editingComponentId = null;
     if (savedViewportForComponentEdit) {
       viewport = savedViewportForComponentEdit;
@@ -1750,6 +1803,7 @@
     selectedVertex = null;
     constraintSelection = [];
     constraintMode = null;
+    selectedConstraintIdx = -1;
     isNodeEditMode = false;
     rebuildSolverAndParams();
     initialSolve();
@@ -1798,12 +1852,17 @@
   }
 
   function tryDeleteComponent(componentId) {
-    const instances = getInstancesOfComponent(componentId);
-    if (instances.length > 0) {
+    const canvasInstances = getInstancesOfComponent(componentId);
+    const referencingComps = getComponentsReferencing(componentId);
+    if (canvasInstances.length > 0 || referencingComps.length > 0) {
       pendingComponentToDelete = componentId;
       const comp = getComponentById(componentId);
-      deleteComponentMessageEl.innerHTML =
-        `<span>Component "<b>${comp ? comp.name : componentId}</b>" has <b>${instances.length}</b> instance(s) on the canvas. Deleting it will also remove all instances. Continue?</span>`;
+      let msg = `Component "<b>${comp ? comp.name : componentId}</b>" is in use. `;
+      const parts = [];
+      if (canvasInstances.length > 0) parts.push(`<b>${canvasInstances.length}</b> instance(s) on canvas`);
+      if (referencingComps.length > 0) parts.push(`used by <b>${referencingComps.length}</b> other component(s)`);
+      msg += parts.join(' and ') + '. Deleting it will unlink all nested references and remove canvas instances. Continue?';
+      deleteComponentMessageEl.innerHTML = `<span>${msg}</span>`;
       deleteComponentDialogEl.classList.remove('hidden');
     } else {
       deleteComponent(componentId);
@@ -1812,6 +1871,15 @@
 
   function deleteComponent(componentId) {
     pushHistory();
+    const referencingComps = getComponentsReferencing(componentId);
+    for (const hostId of referencingComps) {
+      const hostComp = getComponentById(hostId);
+      if (!hostComp) continue;
+      const instances = hostComp.shapes.filter(s => isComponentInstance(s) && s.componentId === componentId);
+      for (const inst of instances) {
+        unlinkInstanceInComponent(hostId, inst);
+      }
+    }
     const instances = getInstancesOfComponent(componentId);
     const instanceIds = instances.map(i => i.id);
     for (const id of instanceIds) {
@@ -1830,6 +1898,11 @@
     if (editingComponentId === componentId) {
       editingComponentId = null;
       componentEditIndicatorEl.classList.add('hidden');
+    } else if (editingComponentId !== null && referencingComps.includes(editingComponentId)) {
+      const comp = getComponentById(editingComponentId);
+      if (comp) {
+        constraints = (comp.constraints || []).map(d => deserializeConstraint(d)).filter(Boolean);
+      }
     }
     for (const id of instanceIds) {
       if (selectedIds.has(id)) selectedIds.delete(id);
