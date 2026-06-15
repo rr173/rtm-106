@@ -28,6 +28,23 @@
     <span>Path</span>
   </button>
   <div class="sep"></div>
+  <button id="tool-dim-distance" class="tool-btn" title="Distance Dimension (D)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="currentColor" stroke-width="2" d="M4 8h16M4 16h16M6 8v3M18 8v3M6 16v-3M18 16v-3M12 10.5v3"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>
+    <span>Dist</span>
+  </button>
+  <button id="tool-dim-angle" class="tool-btn" title="Angle Dimension (A)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="currentColor" stroke-width="2" d="M4 20L4 8M4 20L16 20"/><path fill="none" stroke="currentColor" stroke-width="2" d="M8 20 A12 12 0 0 1 18 10"/></svg>
+    <span>Angle</span>
+  </button>
+  <button id="tool-dim-radius" class="tool-btn" title="Radius Dimension (Shift+R)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" d="M12 12L20 12"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>
+    <span>Rad</span>
+  </button>
+  <button id="tool-measure" class="tool-btn" title="Measure Mode (Q)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="currentColor" stroke-width="2" d="M3 17L7 13L11 17L14 14L17 17L21 13"/><path fill="currentColor" d="M7 7H9V12H7zM15 7H17V12H15z"/></svg>
+    <span>Measure</span>
+  </button>
+  <div class="sep"></div>
   <button id="op-union" class="op-btn" disabled title="Union">
     <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="9" cy="12" r="6" fill="currentColor" opacity="0.5"/><circle cx="15" cy="12" r="6" fill="currentColor" opacity="0.5"/></svg>
     <span>Union</span>
@@ -226,6 +243,70 @@
         <input type="color" id="pattern-bg-color" value="#ffffff" />
       </div>
     </div>
+  </div>
+</div>
+
+<div id="dimension-panel">
+  <div class="panel-header">
+    <span>Dimensions</span>
+    <button id="clear-dimensions" class="mini-btn" title="Clear all dimensions">×</button>
+  </div>
+  <div class="dimension-settings">
+    <div class="form-row">
+      <label>Unit:</label>
+      <select id="dim-unit">
+        <option value="px">Pixels (px)</option>
+        <option value="mm">Millimeters (mm)</option>
+        <option value="cm">Centimeters (cm)</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>Scale Factor:</label>
+      <input type="number" id="dim-scale" min="0.01" max="1000" step="0.01" value="1" />
+    </div>
+    <div class="form-row">
+      <label>Precision:</label>
+      <input type="number" id="dim-precision" min="0" max="6" step="1" value="2" />
+    </div>
+    <div class="form-row">
+      <label>Text Size:</label>
+      <input type="number" id="dim-textsize" min="6" max="72" step="1" value="12" />
+      <span class="unit">px</span>
+    </div>
+    <div class="form-row">
+      <label>Text Color:</label>
+      <input type="color" id="dim-textcolor" value="#1a73e8" />
+    </div>
+    <div class="form-row">
+      <label>Line Color:</label>
+      <input type="color" id="dim-linecolor" value="#1a73e8" />
+    </div>
+    <div class="form-row">
+      <label>Line Width:</label>
+      <input type="number" id="dim-linewidth" min="0.5" max="10" step="0.5" value="1.5" />
+      <span class="unit">px</span>
+    </div>
+    <div class="form-row">
+      <label>Offset:</label>
+      <input type="number" id="dim-offset" min="5" max="200" step="1" value="20" />
+      <span class="unit">px</span>
+    </div>
+    <div class="form-row">
+      <label>Arrow Size:</label>
+      <input type="number" id="dim-arrowsize" min="2" max="30" step="1" value="8" />
+      <span class="unit">px</span>
+    </div>
+    <div class="form-row">
+      <label>Show Units:</label>
+      <input type="checkbox" id="dim-showunits" checked />
+    </div>
+    <div class="dimension-hint">
+      <strong>Distance:</strong> Click 2 points or 1 edge<br/>
+      <strong>Angle:</strong> Click 2 edges (shared vertex)<br/>
+      <strong>Radius:</strong> Click circle/arc edge<br/>
+      <strong>Measure:</strong> Hover edges, click 2 pts/edges
+    </div>
+    <div id="dimension-list"></div>
   </div>
 </div>
 
@@ -545,6 +626,7 @@
 <script src="path-motion.js"></script>
 <script src="animation.js"></script>
 <script src="glyphs.js"></script>
+<script src="dimension.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

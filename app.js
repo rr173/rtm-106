@@ -136,6 +136,34 @@
   };
   let keys = { shift: false, alt: false };
 
+  const DS = window.DimensionSystem;
+  const DIM_TYPES = window.DIMENSION_TYPES;
+  const UNIT_TYPES = window.UNIT_TYPES;
+  let dimensionSystem = new DS();
+  let selectedDimensionId = null;
+  let dimToolSelection = [];
+  let dimToolType = null;
+
+  function getShapePointsForDim(shapeId) {
+    const shape = shapes.find(s => s.id === shapeId);
+    if (!shape) return [];
+    if (isComponentInstance(shape)) {
+      const expanded = getInstanceExpandedShapes(shape);
+      if (expanded.length > 0) return expanded[0].points;
+    }
+    return worldPointsOf(shape);
+  }
+
+  function getShapeHolesForDim(shapeId) {
+    const shape = shapes.find(s => s.id === shapeId);
+    if (!shape) return [];
+    if (isComponentInstance(shape)) {
+      const expanded = getInstanceExpandedShapes(shape);
+      if (expanded.length > 0) return expanded[0].holes || [];
+    }
+    return worldHolesOf(shape);
+  }
+
   function isSameVertex(a, b) {
     if (!a || !b) return false;
     return a.isHole === b.isHole && a.holeIndex === b.holeIndex && a.pointIndex === b.pointIndex;
@@ -270,7 +298,8 @@
       paramsData: JSON.parse(JSON.stringify(paramsData)),
       components: JSON.parse(JSON.stringify(components)),
       nextComponentId: nextComponentId,
-      motionPathData: JSON.parse(JSON.stringify(motionPathManager.serialize()))
+      motionPathData: JSON.parse(JSON.stringify(motionPathManager.serialize())),
+      dimensionData: JSON.parse(JSON.stringify(dimensionSystem.serialize()))
     };
   }
 
@@ -284,6 +313,11 @@
       motionPathManager.deserialize(JSON.parse(JSON.stringify(state.motionPathData)));
     } else {
       motionPathManager = new PM.MotionPathManager();
+    }
+    if (state.dimensionData) {
+      dimensionSystem.deserialize(JSON.parse(JSON.stringify(state.dimensionData)));
+    } else {
+      dimensionSystem = new DS();
     }
     for (const s of shapes) {
       if (s.type === 'motion-path') {
@@ -308,8 +342,12 @@
     selectedConstraintIdx = -1;
     constraintSelection = [];
     constraintMode = null;
+    selectedDimensionId = null;
+    dimToolSelection = [];
+    dimToolType = null;
     updateToolbar();
     updateTextPanel();
+    updateDimensionPanel();
     renderLayers();
     renderConstraintList();
     renderParams();
@@ -326,8 +364,12 @@
     selectedConstraintIdx = -1;
     constraintSelection = [];
     constraintMode = null;
+    selectedDimensionId = null;
+    dimToolSelection = [];
+    dimToolType = null;
     updateToolbar();
     updateTextPanel();
+    updateDimensionPanel();
     renderLayers();
     renderConstraintList();
     renderParams();
@@ -788,6 +830,7 @@
     try {
       const animationData = animationController.serialize();
       const motionPathData = motionPathManager.serialize();
+      const dimensionData = dimensionSystem.serialize();
       const state = {
         shapes,
         constraints: constraints.map(c => serializeConstraint(c)),
@@ -797,7 +840,8 @@
         nextComponentId,
         viewport,
         animationData,
-        motionPathData
+        motionPathData,
+        dimensionData
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch (e) {
@@ -827,6 +871,9 @@
       }
       if (state.motionPathData) {
         motionPathManager.deserialize(state.motionPathData);
+      }
+      if (state.dimensionData) {
+        dimensionSystem.deserialize(state.dimensionData);
       }
       for (const s of shapes) {
         if (s.opacity === undefined) s.opacity = 1;
@@ -1136,6 +1183,11 @@
       }
 
       renderConstraintIcons();
+      dimensionSystem.updateFromShapes(
+        (id) => { const s = getShapeById(id); return s ? worldPointsOf(s) : null; },
+        (id) => { const s = getShapeById(id); return s ? worldHolesOf(s) : null; }
+      );
+      dimensionSystem.render(ctx, viewport.scale);
     }
 
     if (isNodeEditMode) {
@@ -1145,6 +1197,16 @@
         const s = getShapeById(id);
         if (s && s.visible && !s.locked) renderSelection(s);
       }
+    }
+
+    if (dimensionSystem.measureMode && editingComponentId === null) {
+      dimensionSystem.renderMeasureOverlay(ctx, viewport.scale, null,
+        (id, isHole) => {
+          const s = getShapeById(id);
+          if (!s) return null;
+          return isHole ? worldHolesOf(s) : [worldPointsOf(s)];
+        }
+      );
     }
 
     if (isDrawing && currentTool === 'rect' && drawStart && drawEnd) {
@@ -3029,10 +3091,25 @@
   }
 
   function updateToolbar() {
-    document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
-    const btnId = 'tool-' + currentTool;
-    const btn = document.getElementById(btnId);
-    if (btn) btn.classList.add('active');
+    document.querySelectorAll('.tool-btn').forEach(b => {
+      b.classList.remove('active');
+      b.classList.remove('measure-active');
+    });
+    if (currentTool && currentTool.startsWith('dim-') || currentTool === 'measure') {
+    } else {
+      const btnId = 'tool-' + currentTool;
+      const btn = document.getElementById(btnId);
+      if (btn) btn.classList.add('active');
+    }
+    const dimTools = ['dim-distance', 'dim-angle', 'dim-radius'];
+    if (dimTools.includes(currentTool)) {
+      const btn = document.getElementById('tool-' + currentTool);
+      if (btn) btn.classList.add('active');
+    }
+    if (currentTool === 'measure' || dimensionSystem.measureMode) {
+      const btn = document.getElementById('tool-measure');
+      if (btn) btn.classList.add('measure-active');
+    }
     document.querySelectorAll('.op-btn').forEach(b => {
       b.disabled = selectedIds.size < 2;
     });
@@ -3046,6 +3123,25 @@
       nodeEditIndicatorEl.classList.remove('hidden');
     } else {
       nodeEditIndicatorEl.classList.add('hidden');
+    }
+
+    if (dimensionSystem.measureMode) {
+      modeIndicatorEl.classList.add('measure-mode');
+      modeIndicatorEl.textContent = 'MEASURE MODE';
+    } else if (currentTool.startsWith('dim-')) {
+      const dimNames = {
+        'dim-distance': 'DISTANCE DIM',
+        'dim-angle': 'ANGLE DIM',
+        'dim-radius': 'RADIUS DIM'
+      };
+      modeIndicatorEl.textContent = dimNames[currentTool] || 'DIM MODE';
+      modeIndicatorEl.style.background = '#e3f2fd';
+      modeIndicatorEl.style.color = '#1565c0';
+    } else {
+      modeIndicatorEl.classList.remove('measure-mode');
+      modeIndicatorEl.textContent = '';
+      modeIndicatorEl.style.background = '';
+      modeIndicatorEl.style.color = '';
     }
   }
 
@@ -3078,6 +3174,277 @@
       document.getElementById('text-weight-value').textContent = textSettings.fontWeight;
       document.getElementById('text-spacing').value = textSettings.letterSpacing;
     }
+  }
+
+  function updateDimensionPanel() {
+    const panel = document.getElementById('dimension-panel');
+    if (!panel) return;
+
+    const s = dimensionSystem.settings;
+    document.getElementById('dim-unit').value = s.unit;
+    document.getElementById('dim-scale').value = s.scaleFactor;
+    document.getElementById('dim-precision').value = s.precision;
+    document.getElementById('dim-textsize').value = s.textSize;
+    document.getElementById('dim-textcolor').value = s.textColor;
+    document.getElementById('dim-linecolor').value = s.lineColor;
+    document.getElementById('dim-linewidth').value = s.lineWidth;
+    document.getElementById('dim-offset').value = s.offset;
+    document.getElementById('dim-arrowsize').value = s.arrowSize;
+    document.getElementById('dim-showunits').checked = s.showUnits;
+
+    renderDimensionList();
+  }
+
+  function renderDimensionList() {
+    const listEl = document.getElementById('dimension-list');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+
+    if (dimensionSystem.dimensions.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty-dimensions';
+      empty.textContent = 'No dimensions yet';
+      listEl.appendChild(empty);
+      return;
+    }
+
+    const dimIcons = {
+      [DIM_TYPES.DISTANCE_TWO_POINTS]: 'D',
+      [DIM_TYPES.DISTANCE_EDGE]: 'D',
+      [DIM_TYPES.ANGLE_TWO_EDGES]: '∠',
+      [DIM_TYPES.RADIUS_ARC]: 'R'
+    };
+
+    for (const dim of dimensionSystem.dimensions) {
+      const item = document.createElement('div');
+      item.className = 'dimension-item';
+      if (selectedDimensionId === dim.id) item.classList.add('selected');
+      item.dataset.id = dim.id;
+
+      const icon = document.createElement('div');
+      icon.className = 'dimension-type-icon';
+      icon.textContent = dimIcons[dim.type] || '?';
+      item.appendChild(icon);
+
+      const info = document.createElement('div');
+      info.className = 'dimension-info';
+      let label = '';
+      if (dim.type === DIM_TYPES.DISTANCE_TWO_POINTS || dim.type === DIM_TYPES.DISTANCE_EDGE) {
+        const len = Math.hypot(dim.pointB.x - dim.pointA.x, dim.pointB.y - dim.pointA.y);
+        label = dimensionSystem.formatValue(len);
+      } else if (dim.type === DIM_TYPES.ANGLE_TWO_EDGES) {
+        const deg = (dim.angle * 180 / Math.PI);
+        const display = deg > 180 ? 360 - deg : deg;
+        label = Number(display.toFixed(dimensionSystem.settings.precision)) + '°';
+      } else if (dim.type === DIM_TYPES.RADIUS_ARC) {
+        label = 'R' + dimensionSystem.formatValue(dim.radius);
+      }
+      info.textContent = label;
+      info.title = 'Type: ' + dim.type + ', ID: ' + dim.id;
+      item.appendChild(info);
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'dimension-delete';
+      delBtn.textContent = '×';
+      delBtn.title = 'Delete dimension';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        pushHistory();
+        dimensionSystem.removeDimension(dim.id);
+        if (selectedDimensionId === dim.id) selectedDimensionId = null;
+        updateDimensionPanel();
+        render();
+        scheduleSave();
+        showToast('Dimension deleted', 'success');
+      });
+      item.appendChild(delBtn);
+
+      item.addEventListener('click', () => {
+        selectedDimensionId = (selectedDimensionId === dim.id) ? null : dim.id;
+        renderDimensionList();
+        render();
+      });
+
+      listEl.appendChild(item);
+    }
+  }
+
+  function getShapePointsById(shapeId, isHole, holeIndex) {
+    const s = getShapeById(shapeId);
+    if (!s) return null;
+    if (isHole) {
+      const holes = worldHolesOf(s);
+      return holes[holeIndex] || null;
+    }
+    return worldPointsOf(s);
+  }
+
+  function handleDimToolClick(wx, wy) {
+    const vertex = hitTestVertex(wx, wy);
+    const edge = hitTestEdge(wx, wy);
+
+    if (dimToolType === 'dim-distance') {
+      if (vertex) {
+        dimToolSelection.push({ type: 'vertex', data: vertex });
+        showToast('Point ' + dimToolSelection.length + '/2 selected');
+        if (dimToolSelection.length >= 2) {
+          createDistanceFromVertices(dimToolSelection[0].data, dimToolSelection[1].data);
+          dimToolSelection = [];
+        }
+      } else if (edge) {
+        createDistanceFromEdge(edge);
+        dimToolSelection = [];
+      } else {
+        showToast('Click a point or edge', 'warning');
+      }
+    } else if (dimToolType === 'dim-angle') {
+      if (edge) {
+        dimToolSelection.push({ type: 'edge', data: edge });
+        showToast('Edge ' + dimToolSelection.length + '/2 selected');
+        if (dimToolSelection.length >= 2) {
+          createAngleFromEdges(dimToolSelection[0].data, dimToolSelection[1].data);
+          dimToolSelection = [];
+        }
+      } else if (vertex) {
+        showToast('For angle, click two edges sharing a vertex', 'warning');
+      } else {
+        showToast('Click two edges that share a vertex', 'warning');
+      }
+    } else if (dimToolType === 'dim-radius') {
+      if (edge && edge.shape) {
+        createRadiusFromShape(edge);
+        dimToolSelection = [];
+      } else {
+        showToast('Click on a circle or arc edge', 'warning');
+      }
+    }
+    render();
+  }
+
+  function createDistanceFromVertices(v1, v2) {
+    pushHistory();
+    const pts1 = getShapePointsById(v1.shape.id, v1.isHole, v1.holeIndex);
+    const pts2 = getShapePointsById(v2.shape.id, v2.isHole, v2.holeIndex);
+    if (!pts1 || !pts2) { showToast('Invalid points', 'error'); return; }
+    const p1 = pts1[v1.pointIndex];
+    const p2 = pts2[v2.pointIndex];
+    if (!p1 || !p2) { showToast('Invalid points', 'error'); return; }
+    const shapeIds = [v1.shape.id, v2.shape.id].filter((v, i, a) => a.indexOf(v) === i);
+    dimensionSystem.addDistanceTwoPoints(p1, p2, shapeIds, 0);
+    updateDimensionPanel();
+    render();
+    scheduleSave();
+    showToast('Distance dimension added', 'success');
+  }
+
+  function createDistanceFromEdge(edgeInfo) {
+    pushHistory();
+    const pts = getShapePointsById(edgeInfo.shape.id, edgeInfo.isHole, edgeInfo.holeIndex);
+    if (!pts) { showToast('Invalid edge', 'error'); return; }
+    dimensionSystem.addDistanceEdge(
+      edgeInfo.shape.id,
+      edgeInfo.isHole,
+      edgeInfo.holeIndex,
+      edgeInfo.edgeIndex,
+      pts
+    );
+    updateDimensionPanel();
+    render();
+    scheduleSave();
+    showToast('Edge dimension added', 'success');
+  }
+
+  function createAngleFromEdges(e1, e2) {
+    pushHistory();
+    const pts1 = getShapePointsById(e1.shape.id, e1.isHole, e1.holeIndex);
+    const pts2 = getShapePointsById(e2.shape.id, e2.isHole, e2.holeIndex);
+    if (!pts1 || !pts2) { showToast('Invalid edges', 'error'); return; }
+    const n1 = pts1.length, n2 = pts2.length;
+    const a1 = pts1[e1.edgeIndex], b1 = pts1[(e1.edgeIndex + 1) % n1];
+    const a2 = pts2[e2.edgeIndex], b2 = pts2[(e2.edgeIndex + 1) % n2];
+
+    function pEq(p, q) { return Math.abs(p.x - q.x) < 0.5 && Math.abs(p.y - q.y) < 0.5; }
+    let vertex = null;
+    if (pEq(a1, a2) || pEq(a1, b2)) vertex = a1;
+    else if (pEq(b1, a2) || pEq(b1, b2)) vertex = b1;
+
+    if (!vertex) {
+      showToast('Edges must share a vertex', 'error');
+      return;
+    }
+    const edgeInfo1 = {
+      shapeId: e1.shape.id, isHole: e1.isHole, holeIndex: e1.holeIndex, edgeIndex: e1.edgeIndex
+    };
+    const edgeInfo2 = {
+      shapeId: e2.shape.id, isHole: e2.isHole, holeIndex: e2.holeIndex, edgeIndex: e2.edgeIndex
+    };
+    dimensionSystem.addAngleTwoEdges(edgeInfo1, edgeInfo2, vertex, pts1, pts2);
+    updateDimensionPanel();
+    render();
+    scheduleSave();
+    showToast('Angle dimension added', 'success');
+  }
+
+  function createRadiusFromShape(edgeInfo) {
+    pushHistory();
+    const s = edgeInfo.shape;
+    const pts = getShapePointsById(s.id, edgeInfo.isHole, edgeInfo.holeIndex);
+    if (!pts || pts.length < 3) { showToast('Need at least 3 points', 'error'); return; }
+
+    const startIdx = Math.max(0, edgeInfo.edgeIndex - 1);
+    const arcPoints = [];
+    for (let i = 0; i < Math.min(pts.length, 8); i++) {
+      arcPoints.push(pts[(startIdx + i) % pts.length]);
+    }
+    if (arcPoints.length < 3) { showToast('Arc too small', 'error'); return; }
+
+    const result = dimensionSystem.addRadiusArc(
+      s.id, edgeInfo.isHole, edgeInfo.holeIndex,
+      startIdx, arcPoints
+    );
+    if (!result) {
+      showToast('Could not fit circle to points', 'error');
+      return;
+    }
+    updateDimensionPanel();
+    render();
+    scheduleSave();
+    showToast('Radius dimension added', 'success');
+  }
+
+  function handleMeasureClick(wx, wy) {
+    const vertex = hitTestVertex(wx, wy);
+    const edge = hitTestEdge(wx, wy);
+
+    if (keys.shift && edge) {
+      dimensionSystem.measureSelectedEdges.push({
+        shapeId: edge.shape.id,
+        isHole: edge.isHole,
+        holeIndex: edge.holeIndex,
+        edgeIndex: edge.edgeIndex
+      });
+      if (dimensionSystem.measureSelectedEdges.length >= 2) {
+        setTimeout(() => {
+          dimensionSystem.measureSelectedEdges = [];
+          render();
+        }, 3000);
+      }
+      showToast('Edge ' + dimensionSystem.measureSelectedEdges.length + '/2 selected');
+    } else if (vertex) {
+      dimensionSystem.measureSelectedPoints.push({ x: wx, y: wy });
+      if (dimensionSystem.measureSelectedPoints.length >= 2) {
+        setTimeout(() => {
+          dimensionSystem.measureSelectedPoints = [];
+          render();
+        }, 3000);
+      }
+      showToast('Point ' + dimensionSystem.measureSelectedPoints.length + '/2 selected');
+    } else {
+      dimensionSystem.measureSelectedPoints = [];
+      dimensionSystem.measureSelectedEdges = [];
+      showToast('Measure cleared');
+    }
+    render();
   }
 
   function updateMotionPathPanel() {
@@ -3750,6 +4117,15 @@
     }
 
     if (e.button === 0) {
+      if (currentTool === 'dim-distance' || currentTool === 'dim-angle' || currentTool === 'dim-radius') {
+        dimToolType = currentTool;
+        handleDimToolClick(world.x, world.y);
+        return;
+      }
+      if (dimensionSystem.measureMode) {
+        handleMeasureClick(world.x, world.y);
+        return;
+      }
       const handleHit = hitTestHandle(world.x, world.y);
       if (handleHit && selectedIds.size === 1) {
         isTransforming = true;
@@ -3900,6 +4276,23 @@
     }
 
     if (constraintMode) {
+      render();
+      return;
+    }
+
+    if (dimensionSystem.measureMode && editingComponentId === null) {
+      const eHit = hitTestEdge(world.x, world.y);
+      if (eHit) {
+        dimensionSystem.measureHoverEdge = {
+          shapeId: eHit.shape.id,
+          isHole: eHit.isHole,
+          holeIndex: eHit.holeIndex,
+          edgeIndex: eHit.edgeIndex
+        };
+      } else {
+        dimensionSystem.measureHoverEdge = null;
+      }
+      canvas.style.cursor = 'crosshair';
       render();
       return;
     }
@@ -4445,10 +4838,21 @@
         showToast('Constraint deleted');
         return;
       }
+      if (selectedDimensionId !== null) {
+        pushHistory();
+        dimensionSystem.removeDimension(selectedDimensionId);
+        selectedDimensionId = null;
+        updateDimensionPanel();
+        render();
+        scheduleSave();
+        showToast('Dimension deleted');
+        return;
+      }
       if (selectedIds.size > 0) {
         pushHistory();
         const ids = [...selectedIds];
         for (const id of ids) {
+          dimensionSystem.removeDimensionsForShape(id);
           const idx = shapes.findIndex(s => s.id === id);
           if (idx >= 0) shapes.splice(idx, 1);
           animationController.removeShapeAnimation(id);
@@ -4469,25 +4873,46 @@
         updateToolbar();
         updateTextPanel();
         updateMotionPathPanel();
+        updateDimensionPanel();
         updateDOFDisplay();
         renderLayers();
         renderConstraintList();
         render();
+        scheduleSave();
         return;
       }
     }
 
     const key = e.key.toLowerCase();
-    if (key === 'v') { currentTool = 'select'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); updateDOFDisplay(); render(); }
-    else if (key === 'r') { currentTool = 'rect'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); render(); }
-    else if (key === 'c') { currentTool = 'circle'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); render(); }
-    else if (key === 'p') { currentTool = 'polygon'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; polygonPoints = []; updateToolbar(); render(); }
-    else if (key === 'm') { currentTool = 'motionpath'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; polygonPoints = []; updateToolbar(); render(); }
-    else if (key === 't') { currentTool = 'text'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); updateTextPanel(); render(); }
+    if (key === 'v') { currentTool = 'select'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; updateToolbar(); updateDOFDisplay(); render(); }
+    else if (key === 'r' && !e.shiftKey) { currentTool = 'rect'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; updateToolbar(); render(); }
+    else if (key === 'r' && e.shiftKey) { currentTool = 'dim-radius'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; updateToolbar(); render(); }
+    else if (key === 'c') { currentTool = 'circle'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; updateToolbar(); render(); }
+    else if (key === 'p') { currentTool = 'polygon'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; polygonPoints = []; updateToolbar(); render(); }
+    else if (key === 'm') { currentTool = 'motionpath'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; polygonPoints = []; updateToolbar(); render(); }
+    else if (key === 't') { currentTool = 'text'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; updateToolbar(); updateTextPanel(); render(); }
+    else if (key === 'd') { currentTool = 'dim-distance'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; updateToolbar(); render(); }
+    else if (key === 'a') { if (e.shiftKey) { selectedIds.clear(); for (const s of shapes) { if (s.visible && !s.locked) selectedIds.add(s.id); } updateToolbar(); updateTextPanel(); updateMotionPathPanel(); renderLayers(); render(); } else { currentTool = 'dim-angle'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; updateToolbar(); render(); } }
+    else if (key === 'q') { dimensionSystem.measureMode = !dimensionSystem.measureMode; currentTool = dimensionSystem.measureMode ? 'measure' : 'select'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureSelectedPoints = []; dimensionSystem.measureSelectedEdges = []; dimensionSystem.measureHoverEdge = null; updateToolbar(); render(); showToast(dimensionSystem.measureMode ? 'Measure Mode ON (Shift+click for angle)' : 'Measure Mode OFF'); }
     else if (key === 'n') { isNodeEditMode = !isNodeEditMode; if (!isNodeEditMode) selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); updateDOFDisplay(); render(); showToast(isNodeEditMode ? 'Node Edit Mode ON' : 'Node Edit Mode OFF'); }
-    else if (key === 'a') { selectedIds.clear(); for (const s of shapes) { if (s.visible && !s.locked) selectedIds.add(s.id); } updateToolbar(); updateTextPanel(); updateMotionPathPanel(); renderLayers(); render(); }
     else if (key === ';') { snapEnabled = !snapEnabled; showToast(snapEnabled ? 'Snap ON' : 'Snap OFF'); render(); }
     else if (key === 'g') { if (editingComponentId === null) openCreateComponentDialog(); }
+    else if (key === 'escape') {
+      dimToolSelection = [];
+      dimensionSystem.measureSelectedPoints = [];
+      dimensionSystem.measureSelectedEdges = [];
+      dimensionSystem.measureHoverEdge = null;
+      if (dimensionSystem.measureMode) {
+        dimensionSystem.measureMode = false;
+      }
+      currentTool = 'select';
+      selectedIds.clear();
+      selectedVertex = null;
+      constraintMode = null;
+      constraintSelection = [];
+      updateToolbar();
+      render();
+    }
   });
 
   window.addEventListener('keyup', (e) => {
@@ -4498,12 +4923,30 @@
     }
   });
 
-  document.getElementById('tool-select').addEventListener('click', () => { currentTool = 'select'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); updateDOFDisplay(); render(); });
-  document.getElementById('tool-rect').addEventListener('click', () => { currentTool = 'rect'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); render(); });
-  document.getElementById('tool-circle').addEventListener('click', () => { currentTool = 'circle'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); render(); });
-  document.getElementById('tool-polygon').addEventListener('click', () => { currentTool = 'polygon'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; polygonPoints = []; updateToolbar(); render(); });
-  document.getElementById('tool-motionpath').addEventListener('click', () => { currentTool = 'motionpath'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; polygonPoints = []; updateToolbar(); render(); });
-  document.getElementById('tool-text').addEventListener('click', () => { currentTool = 'text'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); updateTextPanel(); render(); });
+  document.getElementById('tool-select').addEventListener('click', () => { currentTool = 'select'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; updateToolbar(); updateDOFDisplay(); render(); });
+  document.getElementById('tool-rect').addEventListener('click', () => { currentTool = 'rect'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; updateToolbar(); render(); });
+  document.getElementById('tool-circle').addEventListener('click', () => { currentTool = 'circle'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; updateToolbar(); render(); });
+  document.getElementById('tool-polygon').addEventListener('click', () => { currentTool = 'polygon'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; polygonPoints = []; updateToolbar(); render(); });
+  document.getElementById('tool-motionpath').addEventListener('click', () => { currentTool = 'motionpath'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; polygonPoints = []; updateToolbar(); render(); });
+  document.getElementById('tool-text').addEventListener('click', () => { currentTool = 'text'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; updateToolbar(); updateTextPanel(); render(); });
+  document.getElementById('tool-dim-distance').addEventListener('click', () => { currentTool = 'dim-distance'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; updateToolbar(); render(); });
+  document.getElementById('tool-dim-angle').addEventListener('click', () => { currentTool = 'dim-angle'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; updateToolbar(); render(); });
+  document.getElementById('tool-dim-radius').addEventListener('click', () => { currentTool = 'dim-radius'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; updateToolbar(); render(); });
+  document.getElementById('tool-measure').addEventListener('click', () => {
+    dimensionSystem.measureMode = !dimensionSystem.measureMode;
+    currentTool = dimensionSystem.measureMode ? 'measure' : 'select';
+    isNodeEditMode = false;
+    selectedVertex = null;
+    constraintMode = null;
+    constraintSelection = [];
+    dimToolSelection = [];
+    dimensionSystem.measureSelectedPoints = [];
+    dimensionSystem.measureSelectedEdges = [];
+    dimensionSystem.measureHoverEdge = null;
+    updateToolbar();
+    render();
+    showToast(dimensionSystem.measureMode ? 'Measure Mode ON (Shift+click for angle)' : 'Measure Mode OFF');
+  });
 
   document.getElementById('text-input').addEventListener('input', (e) => {
     const value = e.target.value.toUpperCase();
@@ -4869,6 +5312,25 @@
       }
       svg += `<path d="${d}" fill="${s.fill}" stroke="${s.stroke || '#000'}" stroke-width="${s.strokeWidth || 2}" fill-rule="evenodd"/>`;
     }
+    const getShapePointsFn = (shapeId) => {
+      const shape = shapes.find(s => s.id === shapeId);
+      if (!shape) return [];
+      if (isComponentInstance(shape)) {
+        const expanded = getInstanceExpandedShapes(shape);
+        if (expanded.length > 0) return expanded[0].points;
+      }
+      return worldPointsOf(shape);
+    };
+    const getShapeHolesFn = (shapeId) => {
+      const shape = shapes.find(s => s.id === shapeId);
+      if (!shape) return [];
+      if (isComponentInstance(shape)) {
+        const expanded = getInstanceExpandedShapes(shape);
+        if (expanded.length > 0) return expanded[0].holes || [];
+      }
+      return worldHolesOf(shape);
+    };
+    svg = dimensionSystem.exportToSVG(svg, getShapePointsFn, getShapeHolesFn, pad, minX, minY);
     svg += '</svg>';
     const blob = new Blob([svg], { type: 'image/svg+xml' });
     const url = URL.createObjectURL(blob);
@@ -4907,6 +5369,9 @@
         return;
       }
       const removeIds = [subject.id, clip.id];
+      for (const rid of removeIds) {
+        dimensionSystem.removeDimensionsForShape(rid);
+      }
       shapes = shapes.filter(s => !removeIds.includes(s.id));
       constraints = constraints.filter(c => {
         const rps = c.getReferencedPoints();
@@ -4922,6 +5387,7 @@
       rebuildSolverAndParams();
       initialSolve();
       updateToolbar();
+      updateDimensionPanel();
       updateDOFDisplay();
       renderLayers();
       renderConstraintList();
@@ -4991,6 +5457,81 @@
     if (!constraintMenuEl.contains(e.target)) {
       constraintMenuEl.classList.add('hidden');
     }
+  });
+
+  document.getElementById('dim-unit').addEventListener('change', (e) => {
+    dimensionSystem.settings.unit = e.target.value;
+    dimensionSystem.updateFromShapes(getShapePointsForDim, getShapeHolesForDim);
+    updateDimensionPanel();
+    render();
+    scheduleSave();
+  });
+  document.getElementById('dim-scale').addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value) || 1;
+    dimensionSystem.settings.scaleFactor = v;
+    dimensionSystem.updateFromShapes(getShapePointsForDim, getShapeHolesForDim);
+    render();
+    scheduleSave();
+  });
+  document.getElementById('dim-precision').addEventListener('input', (e) => {
+    const v = parseInt(e.target.value) || 2;
+    dimensionSystem.settings.precision = v;
+    dimensionSystem.updateFromShapes(getShapePointsForDim, getShapeHolesForDim);
+    render();
+    scheduleSave();
+  });
+  document.getElementById('dim-textsize').addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value) || 14;
+    dimensionSystem.settings.textSize = v;
+    dimensionSystem.updateFromShapes(getShapePointsForDim, getShapeHolesForDim);
+    render();
+    scheduleSave();
+  });
+  document.getElementById('dim-linecolor').addEventListener('input', (e) => {
+    dimensionSystem.settings.lineColor = e.target.value;
+    render();
+    scheduleSave();
+  });
+  document.getElementById('dim-textcolor').addEventListener('input', (e) => {
+    dimensionSystem.settings.textColor = e.target.value;
+    render();
+    scheduleSave();
+  });
+  document.getElementById('dim-linewidth').addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value) || 1.5;
+    dimensionSystem.settings.lineWidth = v;
+    render();
+    scheduleSave();
+  });
+  document.getElementById('dim-arrowsize').addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value) || 8;
+    dimensionSystem.settings.arrowSize = v;
+    render();
+    scheduleSave();
+  });
+  document.getElementById('dim-offset').addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value) || 20;
+    dimensionSystem.settings.offset = v;
+    dimensionSystem.updateFromShapes(getShapePointsForDim, getShapeHolesForDim);
+    render();
+    scheduleSave();
+  });
+  document.getElementById('dim-showunits').addEventListener('change', (e) => {
+    dimensionSystem.settings.showUnits = e.target.checked;
+    dimensionSystem.updateFromShapes(getShapePointsForDim, getShapeHolesForDim);
+    render();
+    scheduleSave();
+  });
+  document.getElementById('clear-dimensions').addEventListener('click', () => {
+    if (dimensionSystem.dimensions.length === 0) return;
+    if (!confirm('Clear all dimensions?')) return;
+    pushHistory();
+    dimensionSystem.clearAll();
+    selectedDimensionId = null;
+    updateDimensionPanel();
+    render();
+    scheduleSave();
+    showToast('All dimensions cleared');
   });
 
   document.getElementById('clear-constraints').addEventListener('click', clearAllConstraints);
@@ -7330,7 +7871,9 @@
   if (loaded) {
     rebuildSolverAndParams();
     initialSolve();
+    dimensionSystem.updateFromShapes(getShapePointsForDim, getShapeHolesForDim);
     updateToolbar();
+    updateDimensionPanel();
     updateFillPanel();
     updateMotionPathPanel();
     updateDOFDisplay();
@@ -7341,6 +7884,7 @@
     render();
   } else {
     initDemo();
+    updateDimensionPanel();
     updateFillPanel();
     updateMotionPathPanel();
   }
