@@ -4698,91 +4698,108 @@
   const mpCloseBtn = document.getElementById('motion-path-close');
   if (mpCloseBtn) {
     mpCloseBtn.addEventListener('click', () => {
-      document.getElementById('motion-path-panel').classList.add('hidden');
+      const panel = document.getElementById('motion-path-panel');
+      if (panel) panel.classList.add('hidden');
     });
   }
 
-  document.getElementById('mp-path-select').addEventListener('change', (e) => {
-    const selectedShapes = getSelectedShapes();
-    const targets = selectedShapes.filter(s => s.type !== 'motion-path' && !isComponentInstance(s));
-    if (targets.length === 0) return;
-    pushHistory();
-    const pathId = e.target.value ? parseInt(e.target.value, 10) : null;
-    for (const target of targets) {
-      if (pathId) {
-        const existing = motionPathManager.getBinding(target.id);
-        motionPathManager.setBinding(target.id, {
-          pathShapeId: pathId,
-          startOffset: existing ? existing.startOffset : 0,
-          autoOrient: existing ? existing.autoOrient : false,
-          loopMode: existing ? existing.loopMode : 'loop'
-        });
-      } else {
-        motionPathManager.removeBinding(target.id);
+  const mpPathSelect = document.getElementById('mp-path-select');
+  if (mpPathSelect) {
+    mpPathSelect.addEventListener('change', (e) => {
+      const selectedShapes = getSelectedShapes();
+      const targets = selectedShapes.filter(s => s.type !== 'motion-path' && !isComponentInstance(s));
+      if (targets.length === 0) return;
+      pushHistory();
+      const pathId = e.target.value ? parseInt(e.target.value, 10) : null;
+      for (const target of targets) {
+        if (pathId) {
+          const existing = motionPathManager.getBinding(target.id);
+          motionPathManager.setBinding(target.id, {
+            pathShapeId: pathId,
+            startOffset: existing ? existing.startOffset : 0,
+            autoOrient: existing ? existing.autoOrient : false,
+            loopMode: existing ? existing.loopMode : 'loop'
+          });
+        } else {
+          motionPathManager.removeBinding(target.id);
+        }
       }
-    }
-    scheduleSave();
-    render();
-  });
+      scheduleSave();
+      render();
+    });
+  }
 
-  document.getElementById('mp-offset').addEventListener('input', (e) => {
-    const selectedShapes = getSelectedShapes();
-    const targets = selectedShapes.filter(s => s.type !== 'motion-path' && !isComponentInstance(s));
-    document.getElementById('mp-offset-value').textContent = e.target.value + '%';
-    if (targets.length === 0) return;
-    const offsetVal = (parseFloat(e.target.value) || 0) / 100;
-    for (const target of targets) {
-      const b = motionPathManager.getBinding(target.id);
-      if (b) b.startOffset = offsetVal;
-    }
-    scheduleSave();
-    render();
-  });
+  const mpOffset = document.getElementById('mp-offset');
+  const mpOffsetValue = document.getElementById('mp-offset-value');
+  if (mpOffset) {
+    mpOffset.addEventListener('input', (e) => {
+      const selectedShapes = getSelectedShapes();
+      const targets = selectedShapes.filter(s => s.type !== 'motion-path' && !isComponentInstance(s));
+      if (mpOffsetValue) mpOffsetValue.textContent = e.target.value + '%';
+      if (targets.length === 0) return;
+      const offsetVal = (parseFloat(e.target.value) || 0) / 100;
+      for (const target of targets) {
+        const b = motionPathManager.getBinding(target.id);
+        if (b) b.startOffset = offsetVal;
+      }
+      scheduleSave();
+      render();
+    });
+  }
 
-  document.getElementById('mp-orient').addEventListener('change', (e) => {
-    const selectedShapes = getSelectedShapes();
-    const targets = selectedShapes.filter(s => s.type !== 'motion-path' && !isComponentInstance(s));
-    if (targets.length === 0) return;
-    pushHistory();
-    for (const target of targets) {
-      const b = motionPathManager.getBinding(target.id);
-      if (b) b.autoOrient = e.target.checked;
-    }
-    scheduleSave();
-    render();
-  });
+  const mpOrient = document.getElementById('mp-orient');
+  if (mpOrient) {
+    mpOrient.addEventListener('change', (e) => {
+      const selectedShapes = getSelectedShapes();
+      const targets = selectedShapes.filter(s => s.type !== 'motion-path' && !isComponentInstance(s));
+      if (targets.length === 0) return;
+      pushHistory();
+      for (const target of targets) {
+        const b = motionPathManager.getBinding(target.id);
+        if (b) b.autoOrient = e.target.checked;
+      }
+      scheduleSave();
+      render();
+    });
+  }
 
-  document.getElementById('mp-loop').addEventListener('change', (e) => {
-    const selectedShapes = getSelectedShapes();
-    const targets = selectedShapes.filter(s => s.type !== 'motion-path' && !isComponentInstance(s));
-    if (targets.length === 0) return;
-    pushHistory();
-    for (const target of targets) {
-      const b = motionPathManager.getBinding(target.id);
-      if (b) b.loopMode = e.target.value;
-    }
-    scheduleSave();
-    render();
-  });
+  const mpLoop = document.getElementById('mp-loop');
+  if (mpLoop) {
+    mpLoop.addEventListener('change', (e) => {
+      const selectedShapes = getSelectedShapes();
+      const targets = selectedShapes.filter(s => s.type !== 'motion-path' && !isComponentInstance(s));
+      if (targets.length === 0) return;
+      pushHistory();
+      for (const target of targets) {
+        const b = motionPathManager.getBinding(target.id);
+        if (b) b.loopMode = e.target.value;
+      }
+      scheduleSave();
+      render();
+    });
+  }
 
-  document.getElementById('mp-add-kf').addEventListener('click', () => {
-    const selectedShapes = getSelectedShapes();
-    const pathShapes = selectedShapes.filter(s => s.type === 'motion-path');
-    if (pathShapes.length === 0) return;
-    pushHistory();
-    const ps = pathShapes[0];
-    if (!ps.motionPathData) ps.motionPathData = {};
-    if (!ps.motionPathData.speedKeyframes) ps.motionPathData.speedKeyframes = [{pathT:0,speedFactor:1},{pathT:1,speedFactor:1}];
-    let newT = 0.5;
-    if (ps.motionPathData.speedKeyframes.length >= 2) {
-      const sorted = [...ps.motionPathData.speedKeyframes].sort((a,b)=>a.pathT-b.pathT);
-      newT = (sorted[0].pathT + sorted[sorted.length-1].pathT) / 2;
-    }
-    ps.motionPathData.speedKeyframes.push({ pathT: newT, speedFactor: 1 });
-    motionPathManager.invalidatePathCache(ps.id);
-    updateMotionPathPanel();
-    render();
-  });
+  const mpAddKf = document.getElementById('mp-add-kf');
+  if (mpAddKf) {
+    mpAddKf.addEventListener('click', () => {
+      const selectedShapes = getSelectedShapes();
+      const pathShapes = selectedShapes.filter(s => s.type === 'motion-path');
+      if (pathShapes.length === 0) return;
+      pushHistory();
+      const ps = pathShapes[0];
+      if (!ps.motionPathData) ps.motionPathData = {};
+      if (!ps.motionPathData.speedKeyframes) ps.motionPathData.speedKeyframes = [{pathT:0,speedFactor:1},{pathT:1,speedFactor:1}];
+      let newT = 0.5;
+      if (ps.motionPathData.speedKeyframes.length >= 2) {
+        const sorted = [...ps.motionPathData.speedKeyframes].sort((a,b)=>a.pathT-b.pathT);
+        newT = (sorted[0].pathT + sorted[sorted.length-1].pathT) / 2;
+      }
+      ps.motionPathData.speedKeyframes.push({ pathT: newT, speedFactor: 1 });
+      motionPathManager.invalidatePathCache(ps.id);
+      updateMotionPathPanel();
+      render();
+    });
+  }
 
   canvas.addEventListener('dragover', (e) => {
     e.preventDefault();
@@ -5696,9 +5713,6 @@
 
     for (const s of shapes) {
       if (!s.visible) continue;
-
-      let pts, holes, fillColor, opacity;
-
       if (s.type === 'motion-path') continue;
 
       if (isComponentInstance(s)) {
@@ -5709,7 +5723,12 @@
           const eHoles = es.holes || [];
           ctx.save();
           ctx.globalAlpha = animProps.opacity;
-          ctx.fillStyle = animProps.fill;
+          const rawFill = ensureFillStructure(animProps.fill);
+          if (typeof rawFill === 'string') {
+            ctx.fillStyle = rawFill;
+          } else {
+            ctx.fillStyle = getCanvasFillStyle(ctx, rawFill, { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }, ePts);
+          }
           ctx.strokeStyle = es.stroke || '#000';
           ctx.lineWidth = es.strokeWidth || 2;
 
@@ -5728,15 +5747,23 @@
         continue;
       }
 
-      pts = getAnimatedWorldPoints(s, frame);
-      holes = getAnimatedWorldHoles(s, frame);
+      const pts = getAnimatedWorldPoints(s, frame);
+      const holes = getAnimatedWorldHoles(s, frame);
       const animProps = getAnimatedShapeProps(s, frame);
-      fillColor = animProps.fill;
-      opacity = animProps.opacity;
+      const rawFill = ensureFillStructure(animProps.fill);
+      const fillTransform = {
+        tx: animProps.tx, ty: animProps.ty,
+        rotation: animProps.rotation,
+        scaleX: animProps.scaleX, scaleY: animProps.scaleY
+      };
 
       ctx.save();
-      ctx.globalAlpha = opacity;
-      ctx.fillStyle = fillColor;
+      ctx.globalAlpha = animProps.opacity;
+      if (typeof rawFill === 'string') {
+        ctx.fillStyle = rawFill;
+      } else {
+        ctx.fillStyle = getCanvasFillStyle(ctx, rawFill, fillTransform, pts);
+      }
       ctx.strokeStyle = s.stroke || '#000';
       ctx.lineWidth = s.strokeWidth || 2;
 
@@ -5983,9 +6010,9 @@
     }
   }
 
-  function createPatternCanvas(patternType, scale, fgColor, bgColor) {
+  function createPatternCanvas(patternType, fgColor, bgColor) {
     const baseSize = 20;
-    const size = Math.max(4, Math.floor(baseSize * scale));
+    const size = Math.max(4, baseSize);
     const patternCanvas = document.createElement('canvas');
     patternCanvas.width = size;
     patternCanvas.height = size;
@@ -6030,7 +6057,6 @@
     if (fill.type === 'pattern') {
       const patternCanvas = createPatternCanvas(
         fill.pattern || 'diagonal',
-        fill.scale || 1,
         fill.fgColor || '#000',
         fill.bgColor || '#fff'
       );
@@ -6324,7 +6350,7 @@
       if (!shape) return;
       pushHistory();
 
-      const pts = worldPointsOf(shape);
+      const pts = shape.points;
       const bounds = getBounds(pts);
       const newType = e.target.value;
 
@@ -6492,22 +6518,23 @@
         defs += '</radialGradient>';
       } else if (fill.type === 'pattern') {
         const baseSize = 20;
-        const size = Math.max(4, Math.floor(baseSize * (fill.scale || 1)));
         const patternRot = fill.rotation || 0;
         let patternTransform = '';
         if (patternRot) {
           patternTransform = `rotate(${patternRot}) `;
         }
+        const fillScale = fill.scale || 1;
+        patternTransform += `scale(${fillScale}) `;
         patternTransform += transformStr;
-        defs += `<pattern id="${id}" width="${size}" height="${size}" patternUnits="userSpaceOnUse" patternTransform="${patternTransform.trim()}">`;
+        defs += `<pattern id="${id}" width="${baseSize}" height="${baseSize}" patternUnits="userSpaceOnUse" patternTransform="${patternTransform.trim()}">`;
         const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = size;
-        tempCanvas.height = size;
+        tempCanvas.width = baseSize;
+        tempCanvas.height = baseSize;
         const tctx = tempCanvas.getContext('2d');
-        drawPatternTile(tctx, fill.pattern || 'diagonal', size, fill.fgColor || '#000', fill.bgColor || '#fff');
+        drawPatternTile(tctx, fill.pattern || 'diagonal', baseSize, fill.fgColor || '#000', fill.bgColor || '#fff');
         const dataUrl = tempCanvas.toDataURL('image/png');
-        defs += `<rect width="${size}" height="${size}" fill="${fill.bgColor || '#fff'}"/>`;
-        defs += `<image width="${size}" height="${size}" href="${dataUrl}"/>`;
+        defs += `<rect width="${baseSize}" height="${baseSize}" fill="${fill.bgColor || '#fff'}"/>`;
+        defs += `<image width="${baseSize}" height="${baseSize}" href="${dataUrl}"/>`;
         defs += '</pattern>';
       }
     }
@@ -6521,6 +6548,34 @@
       const currentFrame = animationController.currentFrame;
       const useAnimation = animationController.isPlaying || animationController.currentFrame > 0;
 
+      if (s.type === 'motion-path') {
+        const pts = worldPointsOf(s);
+        const opacity = s.opacity !== undefined ? s.opacity : 1;
+        ctx.save();
+        ctx.globalAlpha = opacity;
+        drawOpenPath(pts);
+        ctx.lineWidth = (s.strokeWidth || 2) / viewport.scale;
+        ctx.strokeStyle = s.stroke || '#8e24aa';
+        ctx.setLineDash([6 / viewport.scale, 4 / viewport.scale]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        if (s.fill) {
+          ctx.fillStyle = s.fill;
+          drawOpenPath(pts);
+          ctx.globalAlpha = opacity * 0.08;
+          ctx.fill();
+        }
+        for (let i = 0; i < pts.length; i++) {
+          ctx.beginPath();
+          ctx.arc(pts[i].x, pts[i].y, 3 / viewport.scale, 0, Math.PI * 2);
+          ctx.fillStyle = '#8e24aa';
+          ctx.globalAlpha = opacity;
+          ctx.fill();
+        }
+        ctx.restore();
+        return;
+      }
+
       if (isComponentInstance(s)) {
         if (editingComponentId !== null) {
           if (editingComponentId === s.componentId) {
@@ -6532,13 +6587,21 @@
           const pts = es.points;
           const holes = es.holes || [];
           ctx.save();
+          let fillColor = es.fill;
+          let opacity = 1;
           if (useAnimation) {
-            const animProps = animationController.getShapePropertiesAtFrame(s.id, currentFrame, { opacity: 1 });
-            ctx.globalAlpha = animProps.opacity;
+            const animProps = getAnimatedShapeProps(s, currentFrame);
+            fillColor = animProps.fill;
+            opacity = animProps.opacity;
           }
+          ctx.globalAlpha = opacity;
           drawPolygonPath(pts, holes);
-          const esFill = ensureFillStructure(es.fill);
-          ctx.fillStyle = getCanvasFillStyle(ctx, esFill, { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }, pts);
+          const esFill = ensureFillStructure(fillColor);
+          if (typeof esFill === 'string') {
+            ctx.fillStyle = esFill;
+          } else {
+            ctx.fillStyle = getCanvasFillStyle(ctx, esFill, { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }, pts);
+          }
           ctx.fill('evenodd');
           ctx.lineWidth = (es.strokeWidth || 2) / viewport.scale;
           ctx.strokeStyle = es.stroke || '#000';
@@ -6546,20 +6609,27 @@
           ctx.restore();
         }
       } else {
-        let pts = worldPointsOf(s);
-        let holes = worldHolesOf(s);
-        let opacity = s.opacity !== undefined ? s.opacity : 1;
-
-        if (useAnimation && isNodeEditMode) {
-          const animProps = getAnimatedShapeProps(s, currentFrame);
-          opacity = animProps.opacity;
+        let animProps = null;
+        if (useAnimation) {
+          animProps = getAnimatedShapeProps(s, currentFrame);
         }
+        let pts = useAnimation ? getAnimatedWorldPoints(s, currentFrame) : worldPointsOf(s);
+        let holes = useAnimation ? getAnimatedWorldHoles(s, currentFrame) : worldHolesOf(s);
+        let fillColor = useAnimation && animProps ? animProps.fill : s.fill;
+        let opacity = useAnimation && animProps ? animProps.opacity : (s.opacity !== undefined ? s.opacity : 1);
+        const fillTransform = useAnimation && animProps
+          ? { tx: animProps.tx, ty: animProps.ty, rotation: animProps.rotation, scaleX: animProps.scaleX, scaleY: animProps.scaleY }
+          : s.transform;
 
         ctx.save();
         ctx.globalAlpha = opacity;
         drawPolygonPath(pts, holes);
-        const shapeFill = ensureFillStructure(s.fill);
-        ctx.fillStyle = getCanvasFillStyle(ctx, shapeFill, s.transform, pts);
+        const shapeFill = ensureFillStructure(fillColor);
+        if (typeof shapeFill === 'string') {
+          ctx.fillStyle = shapeFill;
+        } else {
+          ctx.fillStyle = getCanvasFillStyle(ctx, shapeFill, fillTransform, pts);
+        }
         ctx.fill('evenodd');
         ctx.lineWidth = (s.strokeWidth || 2) / viewport.scale;
         ctx.strokeStyle = s.stroke || '#000';
