@@ -278,6 +278,82 @@
     render();
   }
 
+  function createDefaultFill(baseColor) {
+    return {
+      type: 'solid',
+      color: baseColor || randomFillColor()
+    };
+  }
+
+  function createDefaultLinearGradient(bounds) {
+    const cx = (bounds.minX + bounds.maxX) / 2;
+    const cy = (bounds.minY + bounds.maxY) / 2;
+    const w = bounds.maxX - bounds.minX;
+    return {
+      type: 'linear',
+      x1: cx - w / 2,
+      y1: cy,
+      x2: cx + w / 2,
+      y2: cy,
+      stops: [
+        { offset: 0, color: '#4d9fff' },
+        { offset: 1, color: '#e53935' }
+      ]
+    };
+  }
+
+  function createDefaultRadialGradient(bounds) {
+    const cx = (bounds.minX + bounds.maxX) / 2;
+    const cy = (bounds.minY + bounds.maxY) / 2;
+    const r = Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY) / 2;
+    return {
+      type: 'radial',
+      cx: cx,
+      cy: cy,
+      r: r,
+      stops: [
+        { offset: 0, color: '#4d9fff' },
+        { offset: 1, color: '#e53935' }
+      ]
+    };
+  }
+
+  function createDefaultPattern() {
+    return {
+      type: 'pattern',
+      pattern: 'diagonal',
+      scale: 1,
+      rotation: 0,
+      fgColor: '#000000',
+      bgColor: '#ffffff'
+    };
+  }
+
+  function ensureFillStructure(fill) {
+    if (!fill) return createDefaultFill();
+    if (typeof fill === 'string') {
+      return { type: 'solid', color: fill };
+    }
+    if (fill && fill.type) return fill;
+    return createDefaultFill();
+  }
+
+  function getFillDisplayColor(fill) {
+    if (!fill) return '#ccc';
+    if (typeof fill === 'string') return fill;
+    if (fill.type === 'solid') return fill.color;
+    if (fill.type === 'linear' && fill.stops && fill.stops.length > 0) return fill.stops[0].color;
+    if (fill.type === 'radial' && fill.stops && fill.stops.length > 0) return fill.stops[0].color;
+    if (fill.type === 'pattern') return fill.bgColor || '#fff';
+    return '#ccc';
+  }
+
+  let isDraggingGradientHandle = false;
+  let gradientDragType = null;
+  let gradientDragShapeId = null;
+  let selectedGradientStopIdx = -1;
+  let currentGradientType = null;
+
   function createShape(points, fill, holes) {
     shapeCounter++;
     return {
@@ -288,7 +364,7 @@
       locked: false,
       points: points,
       holes: holes || [],
-      fill: fill || randomFillColor(),
+      fill: ensureFillStructure(fill),
       stroke: '#000',
       strokeWidth: 2,
       opacity: 1,
@@ -5415,6 +5491,1315 @@
     }
   });
 
+  function drawPatternTile(ctx, patternType, size, fgColor, bgColor) {
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(0, 0, size, size);
+    ctx.strokeStyle = fgColor;
+    ctx.fillStyle = fgColor;
+    ctx.lineWidth = Math.max(1, size / 10);
+
+    switch (patternType) {
+      case 'diagonal':
+        ctx.beginPath();
+        ctx.moveTo(-size * 0.5, size * 0.5);
+        ctx.lineTo(size * 0.5, -size * 0.5);
+        ctx.moveTo(0, size);
+        ctx.lineTo(size, 0);
+        ctx.moveTo(size * 0.5, size * 1.5);
+        ctx.lineTo(size * 1.5, size * 0.5);
+        ctx.stroke();
+        break;
+      case 'grid':
+        ctx.beginPath();
+        ctx.moveTo(0, size / 2);
+        ctx.lineTo(size, size / 2);
+        ctx.moveTo(size / 2, 0);
+        ctx.lineTo(size / 2, size);
+        ctx.stroke();
+        ctx.strokeRect(0.5, 0.5, size - 1, size - 1);
+        break;
+      case 'dots':
+        ctx.beginPath();
+        ctx.arc(size / 2, size / 2, size / 4, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+      case 'checkerboard':
+        ctx.fillRect(0, 0, size / 2, size / 2);
+        ctx.fillRect(size / 2, size / 2, size / 2, size / 2);
+        break;
+    }
+  }
+
+  function createPatternCanvas(patternType, scale, fgColor, bgColor) {
+    const baseSize = 20;
+    const size = Math.max(4, Math.floor(baseSize * scale));
+    const patternCanvas = document.createElement('canvas');
+    patternCanvas.width = size;
+    patternCanvas.height = size;
+    const pctx = patternCanvas.getContext('2d');
+    drawPatternTile(pctx, patternType, size, fgColor, bgColor);
+    return patternCanvas;
+  }
+
+  function getCanvasFillStyle(ctx, fill, shapeTransform, shapePoints) {
+    if (!fill) return '#ccc';
+    if (typeof fill === 'string') return fill;
+
+    if (fill.type === 'solid') {
+      return fill.color || '#ccc';
+    }
+
+    if (fill.type === 'linear') {
+      const t = shapeTransform;
+      const p1 = applyTransform([{ x: fill.x1, y: fill.y1 }], t.tx, t.ty, t.rotation, t.scaleX, t.scaleY)[0];
+      const p2 = applyTransform([{ x: fill.x2, y: fill.y2 }], t.tx, t.ty, t.rotation, t.scaleX, t.scaleY)[0];
+      const gradient = ctx.createLinearGradient(p1.x, p1.y, p2.x, p2.y);
+      const stops = fill.stops || [{ offset: 0, color: '#000' }, { offset: 1, color: '#fff' }];
+      for (const stop of stops) {
+        gradient.addColorStop(Math.max(0, Math.min(1, stop.offset)), stop.color);
+      }
+      return gradient;
+    }
+
+    if (fill.type === 'radial') {
+      const t = shapeTransform;
+      const center = applyTransform([{ x: fill.cx, y: fill.cy }], t.tx, t.ty, t.rotation, t.scaleX, t.scaleY)[0];
+      const scaleFactor = Math.max(Math.abs(t.scaleX), Math.abs(t.scaleY));
+      const radius = (fill.r || 50) * scaleFactor;
+      const gradient = ctx.createRadialGradient(center.x, center.y, 0, center.x, center.y, Math.max(1, radius));
+      const stops = fill.stops || [{ offset: 0, color: '#000' }, { offset: 1, color: '#fff' }];
+      for (const stop of stops) {
+        gradient.addColorStop(Math.max(0, Math.min(1, stop.offset)), stop.color);
+      }
+      return gradient;
+    }
+
+    if (fill.type === 'pattern') {
+      const patternCanvas = createPatternCanvas(
+        fill.pattern || 'diagonal',
+        fill.scale || 1,
+        fill.fgColor || '#000',
+        fill.bgColor || '#fff'
+      );
+      const pattern = ctx.createPattern(patternCanvas, 'repeat');
+      if (pattern) {
+        const t = shapeTransform;
+        const patternRot = (fill.rotation || 0) * Math.PI / 180;
+        const totalRot = t.rotation + patternRot;
+        const cos = Math.cos(totalRot);
+        const sin = Math.sin(totalRot);
+        const patternScale = fill.scale || 1;
+        pattern.setTransform(new DOMMatrix([
+          cos * t.scaleX * patternScale, sin * t.scaleX * patternScale,
+          -sin * t.scaleY * patternScale, cos * t.scaleY * patternScale,
+          t.tx, t.ty
+        ]));
+      }
+      return pattern;
+    }
+
+    return '#ccc';
+  }
+
+  function renderGradientHandles() {
+    if (selectedIds.size !== 1) return;
+    const shape = getShapeById([...selectedIds][0]);
+    if (!shape || !shape.fill || typeof shape.fill === 'string') return;
+
+    const t = shape.transform;
+    const hitRadius = 10 / viewport.scale;
+
+    if (shape.fill.type === 'linear') {
+      const p1 = applyTransform([{ x: shape.fill.x1, y: shape.fill.y1 }], t.tx, t.ty, t.rotation, t.scaleX, t.scaleY)[0];
+      const p2 = applyTransform([{ x: shape.fill.x2, y: shape.fill.y2 }], t.tx, t.ty, t.rotation, t.scaleX, t.scaleY)[0];
+
+      ctx.save();
+      ctx.strokeStyle = '#1a73e8';
+      ctx.lineWidth = 2 / viewport.scale;
+      ctx.setLineDash([6 / viewport.scale, 4 / viewport.scale]);
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.fillStyle = '#fff';
+      ctx.strokeStyle = '#1a73e8';
+      ctx.lineWidth = 2 / viewport.scale;
+      ctx.beginPath();
+      ctx.arc(p1.x, p1.y, hitRadius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = '#e53935';
+      ctx.strokeStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(p2.x, p2.y, hitRadius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    } else if (shape.fill.type === 'radial') {
+      const center = applyTransform([{ x: shape.fill.cx, y: shape.fill.cy }], t.tx, t.ty, t.rotation, t.scaleX, t.scaleY)[0];
+      const scaleFactor = Math.max(Math.abs(t.scaleX), Math.abs(t.scaleY));
+      const radius = (shape.fill.r || 50) * scaleFactor;
+      const edgePoint = { x: center.x + radius, y: center.y };
+
+      ctx.save();
+      ctx.strokeStyle = '#1a73e8';
+      ctx.lineWidth = 2 / viewport.scale;
+      ctx.setLineDash([6 / viewport.scale, 4 / viewport.scale]);
+      ctx.beginPath();
+      ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.beginPath();
+      ctx.moveTo(center.x, center.y);
+      ctx.lineTo(edgePoint.x, edgePoint.y);
+      ctx.stroke();
+
+      ctx.fillStyle = '#1a73e8';
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 2 / viewport.scale;
+      ctx.beginPath();
+      ctx.arc(center.x, center.y, hitRadius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = '#e53935';
+      ctx.strokeStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(edgePoint.x, edgePoint.y, hitRadius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function hitTestGradientHandle(wx, wy) {
+    if (selectedIds.size !== 1) return null;
+    const shape = getShapeById([...selectedIds][0]);
+    if (!shape || !shape.fill || typeof shape.fill === 'string') return null;
+
+    const t = shape.transform;
+    const hitRadius = 12 / viewport.scale;
+
+    if (shape.fill.type === 'linear') {
+      const p1 = applyTransform([{ x: shape.fill.x1, y: shape.fill.y1 }], t.tx, t.ty, t.rotation, t.scaleX, t.scaleY)[0];
+      const p2 = applyTransform([{ x: shape.fill.x2, y: shape.fill.y2 }], t.tx, t.ty, t.rotation, t.scaleX, t.scaleY)[0];
+      if (dist({ x: wx, y: wy }, p1) < hitRadius) return { type: 'linear-p1', shapeId: shape.id };
+      if (dist({ x: wx, y: wy }, p2) < hitRadius) return { type: 'linear-p2', shapeId: shape.id };
+    } else if (shape.fill.type === 'radial') {
+      const center = applyTransform([{ x: shape.fill.cx, y: shape.fill.cy }], t.tx, t.ty, t.rotation, t.scaleX, t.scaleY)[0];
+      const scaleFactor = Math.max(Math.abs(t.scaleX), Math.abs(t.scaleY));
+      const radius = (shape.fill.r || 50) * scaleFactor;
+      const edgePoint = { x: center.x + radius, y: center.y };
+      if (dist({ x: wx, y: wy }, center) < hitRadius) return { type: 'radial-center', shapeId: shape.id };
+      if (dist({ x: wx, y: wy }, edgePoint) < hitRadius) return { type: 'radial-radius', shapeId: shape.id };
+    }
+    return null;
+  }
+
+  function updateRenderShape() {
+    const originalRenderShape = renderShape;
+    window._originalRenderShape = originalRenderShape;
+  }
+
+  function renderPatternPreviews() {
+    document.querySelectorAll('.pattern-preview').forEach(canvas => {
+      const patternType = canvas.dataset.pattern;
+      if (!patternType) return;
+      const pctx = canvas.getContext('2d');
+      pctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawPatternTile(pctx, patternType, canvas.width, '#333', '#fff');
+    });
+  }
+
+  function renderStopsBar(barEl, stops) {
+    if (!stops || stops.length === 0) return;
+    const sorted = [...stops].sort((a, b) => a.offset - b.offset);
+    const gradientParts = sorted.map(s => `${s.color} ${(s.offset * 100).toFixed(1)}%`);
+    barEl.style.background = `linear-gradient(90deg, ${gradientParts.join(', ')})`;
+  }
+
+  function renderStopsList(listEl, stops, onStopChange, onStopDelete) {
+    listEl.innerHTML = '';
+    if (!stops) return;
+    stops.forEach((stop, idx) => {
+      const row = document.createElement('div');
+      row.className = 'stop-item';
+
+      const colorInput = document.createElement('input');
+      colorInput.type = 'color';
+      colorInput.value = stop.color;
+      colorInput.addEventListener('input', () => {
+        stop.color = colorInput.value;
+        onStopChange();
+      });
+
+      const offsetInput = document.createElement('input');
+      offsetInput.type = 'number';
+      offsetInput.min = '0';
+      offsetInput.max = '1';
+      offsetInput.step = '0.01';
+      offsetInput.value = stop.offset.toFixed(2);
+      offsetInput.addEventListener('input', () => {
+        let val = parseFloat(offsetInput.value);
+        if (isNaN(val)) val = 0;
+        val = Math.max(0, Math.min(1, val));
+        stop.offset = val;
+        onStopChange();
+      });
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'stop-delete';
+      delBtn.textContent = '×';
+      delBtn.title = 'Delete stop';
+      delBtn.disabled = stops.length <= 2;
+      delBtn.style.opacity = stops.length <= 2 ? '0.3' : '1';
+      delBtn.style.cursor = stops.length <= 2 ? 'not-allowed' : 'pointer';
+      delBtn.addEventListener('click', () => {
+        if (stops.length > 2) {
+          onStopDelete(idx);
+        }
+      });
+
+      row.appendChild(colorInput);
+      row.appendChild(offsetInput);
+      row.appendChild(delBtn);
+      listEl.appendChild(row);
+    });
+  }
+
+  function updateFillPanel() {
+    const fillTypeEl = document.getElementById('fill-type');
+    const solidSection = document.getElementById('fill-solid-section');
+    const linearSection = document.getElementById('fill-linear-section');
+    const radialSection = document.getElementById('fill-radial-section');
+    const patternSection = document.getElementById('fill-pattern-section');
+
+    if (selectedIds.size !== 1) {
+      fillTypeEl.disabled = true;
+      solidSection.classList.add('hidden');
+      linearSection.classList.add('hidden');
+      radialSection.classList.add('hidden');
+      patternSection.classList.add('hidden');
+      return;
+    }
+
+    const shape = getShapeById([...selectedIds][0]);
+    if (!shape) {
+      fillTypeEl.disabled = true;
+      return;
+    }
+
+    shape.fill = ensureFillStructure(shape.fill);
+    fillTypeEl.disabled = false;
+    fillTypeEl.value = shape.fill.type;
+
+    solidSection.classList.add('hidden');
+    linearSection.classList.add('hidden');
+    radialSection.classList.add('hidden');
+    patternSection.classList.add('hidden');
+
+    if (shape.fill.type === 'solid') {
+      solidSection.classList.remove('hidden');
+      document.getElementById('fill-solid-color').value = shape.fill.color || '#4d9fff';
+    } else if (shape.fill.type === 'linear') {
+      linearSection.classList.remove('hidden');
+      const barEl = document.getElementById('linear-stops-bar');
+      const listEl = document.getElementById('linear-stops-list');
+      renderStopsBar(barEl, shape.fill.stops);
+      renderStopsList(listEl, shape.fill.stops,
+        () => {
+          renderStopsBar(barEl, shape.fill.stops);
+          render();
+          scheduleSave();
+        },
+        (idx) => {
+          shape.fill.stops.splice(idx, 1);
+          renderStopsBar(barEl, shape.fill.stops);
+          renderStopsList(listEl, shape.fill.stops,
+            () => { renderStopsBar(barEl, shape.fill.stops); render(); scheduleSave(); },
+            (i) => { shape.fill.stops.splice(i, 1); renderStopsBar(barEl, shape.fill.stops); render(); scheduleSave(); }
+          );
+          render();
+          scheduleSave();
+        }
+      );
+    } else if (shape.fill.type === 'radial') {
+      radialSection.classList.remove('hidden');
+      const barEl = document.getElementById('radial-stops-bar');
+      const listEl = document.getElementById('radial-stops-list');
+      renderStopsBar(barEl, shape.fill.stops);
+      renderStopsList(listEl, shape.fill.stops,
+        () => {
+          renderStopsBar(barEl, shape.fill.stops);
+          render();
+          scheduleSave();
+        },
+        (idx) => {
+          shape.fill.stops.splice(idx, 1);
+          renderStopsBar(barEl, shape.fill.stops);
+          renderStopsList(listEl, shape.fill.stops,
+            () => { renderStopsBar(barEl, shape.fill.stops); render(); scheduleSave(); },
+            (i) => { shape.fill.stops.splice(i, 1); renderStopsBar(barEl, shape.fill.stops); render(); scheduleSave(); }
+          );
+          render();
+          scheduleSave();
+        }
+      );
+    } else if (shape.fill.type === 'pattern') {
+      patternSection.classList.remove('hidden');
+      document.querySelectorAll('.pattern-item').forEach(item => {
+        item.classList.toggle('selected', item.dataset.pattern === shape.fill.pattern);
+      });
+      document.getElementById('pattern-scale').value = shape.fill.scale || 1;
+      document.getElementById('pattern-scale-value').textContent = (shape.fill.scale || 1).toFixed(1) + 'x';
+      document.getElementById('pattern-rotation').value = shape.fill.rotation || 0;
+      document.getElementById('pattern-fg-color').value = shape.fill.fgColor || '#000000';
+      document.getElementById('pattern-bg-color').value = shape.fill.bgColor || '#ffffff';
+    }
+  }
+
+  function initFillPanel() {
+    renderPatternPreviews();
+
+    document.getElementById('fill-type').addEventListener('change', (e) => {
+      if (selectedIds.size !== 1) return;
+      const shape = getShapeById([...selectedIds][0]);
+      if (!shape) return;
+      pushHistory();
+
+      const pts = worldPointsOf(shape);
+      const bounds = getBounds(pts);
+      const newType = e.target.value;
+
+      if (newType === 'solid') {
+        const existingColor = getFillDisplayColor(shape.fill);
+        shape.fill = { type: 'solid', color: existingColor };
+      } else if (newType === 'linear') {
+        shape.fill = createDefaultLinearGradient(bounds);
+      } else if (newType === 'radial') {
+        shape.fill = createDefaultRadialGradient(bounds);
+      } else if (newType === 'pattern') {
+        shape.fill = createDefaultPattern();
+      }
+
+      updateFillPanel();
+      renderLayers();
+      render();
+      scheduleSave();
+    });
+
+    document.getElementById('fill-solid-color').addEventListener('input', (e) => {
+      if (selectedIds.size !== 1) return;
+      const shape = getShapeById([...selectedIds][0]);
+      if (!shape || !shape.fill || shape.fill.type !== 'solid') return;
+      pushHistory();
+      shape.fill.color = e.target.value;
+      renderLayers();
+      render();
+      scheduleSave();
+    });
+
+    document.getElementById('add-linear-stop').addEventListener('click', () => {
+      if (selectedIds.size !== 1) return;
+      const shape = getShapeById([...selectedIds][0]);
+      if (!shape || !shape.fill || shape.fill.type !== 'linear') return;
+      if (shape.fill.stops.length >= 8) {
+        showToast('Maximum 8 color stops allowed', 'warning');
+        return;
+      }
+      pushHistory();
+      shape.fill.stops.push({ offset: 0.5, color: '#ffffff' });
+      shape.fill.stops.sort((a, b) => a.offset - b.offset);
+      updateFillPanel();
+      render();
+      scheduleSave();
+    });
+
+    document.getElementById('add-radial-stop').addEventListener('click', () => {
+      if (selectedIds.size !== 1) return;
+      const shape = getShapeById([...selectedIds][0]);
+      if (!shape || !shape.fill || shape.fill.type !== 'radial') return;
+      if (shape.fill.stops.length >= 8) {
+        showToast('Maximum 8 color stops allowed', 'warning');
+        return;
+      }
+      pushHistory();
+      shape.fill.stops.push({ offset: 0.5, color: '#ffffff' });
+      shape.fill.stops.sort((a, b) => a.offset - b.offset);
+      updateFillPanel();
+      render();
+      scheduleSave();
+    });
+
+    document.querySelectorAll('.pattern-item').forEach(item => {
+      item.addEventListener('click', () => {
+        if (selectedIds.size !== 1) return;
+        const shape = getShapeById([...selectedIds][0]);
+        if (!shape || !shape.fill || shape.fill.type !== 'pattern') return;
+        pushHistory();
+        shape.fill.pattern = item.dataset.pattern;
+        updateFillPanel();
+        render();
+        scheduleSave();
+      });
+    });
+
+    document.getElementById('pattern-scale').addEventListener('input', (e) => {
+      if (selectedIds.size !== 1) return;
+      const shape = getShapeById([...selectedIds][0]);
+      if (!shape || !shape.fill || shape.fill.type !== 'pattern') return;
+      const val = parseFloat(e.target.value);
+      shape.fill.scale = val;
+      document.getElementById('pattern-scale-value').textContent = val.toFixed(1) + 'x';
+      render();
+      scheduleSave();
+    });
+
+    document.getElementById('pattern-rotation').addEventListener('input', (e) => {
+      if (selectedIds.size !== 1) return;
+      const shape = getShapeById([...selectedIds][0]);
+      if (!shape || !shape.fill || shape.fill.type !== 'pattern') return;
+      pushHistory();
+      let val = parseFloat(e.target.value);
+      if (isNaN(val)) val = 0;
+      val = ((val % 360) + 360) % 360;
+      shape.fill.rotation = val;
+      render();
+      scheduleSave();
+    });
+
+    document.getElementById('pattern-fg-color').addEventListener('input', (e) => {
+      if (selectedIds.size !== 1) return;
+      const shape = getShapeById([...selectedIds][0]);
+      if (!shape || !shape.fill || shape.fill.type !== 'pattern') return;
+      pushHistory();
+      shape.fill.fgColor = e.target.value;
+      render();
+      scheduleSave();
+    });
+
+    document.getElementById('pattern-bg-color').addEventListener('input', (e) => {
+      if (selectedIds.size !== 1) return;
+      const shape = getShapeById([...selectedIds][0]);
+      if (!shape || !shape.fill || shape.fill.type !== 'pattern') return;
+      pushHistory();
+      shape.fill.bgColor = e.target.value;
+      render();
+      scheduleSave();
+    });
+  }
+
+  function exportFillToSVGDefs(fill, defsMap, shapeId, transform) {
+    if (!fill || typeof fill === 'string' || fill.type === 'solid') return null;
+
+    const fillWithTransform = { ...fill, _transform: transform };
+
+    if (fill.type === 'linear') {
+      const gradId = `linearGrad_${shapeId}`;
+      defsMap[gradId] = fillWithTransform;
+      return `url(#${gradId})`;
+    }
+    if (fill.type === 'radial') {
+      const gradId = `radialGrad_${shapeId}`;
+      defsMap[gradId] = fillWithTransform;
+      return `url(#${gradId})`;
+    }
+    if (fill.type === 'pattern') {
+      const patternId = `pattern_${shapeId}`;
+      defsMap[patternId] = fillWithTransform;
+      return `url(#${patternId})`;
+    }
+    return null;
+  }
+
+  function generateSVGDefs(defsMap) {
+    let defs = '<defs>';
+    for (const id in defsMap) {
+      const fill = defsMap[id];
+      const t = fill._transform || { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 };
+      const cos = Math.cos(t.rotation);
+      const sin = Math.sin(t.rotation);
+      const transformStr = `matrix(${cos * t.scaleX} ${sin * t.scaleX} ${-sin * t.scaleY} ${cos * t.scaleY} ${t.tx} ${t.ty})`;
+
+      if (fill.type === 'linear') {
+        defs += `<linearGradient id="${id}" x1="${fill.x1}" y1="${fill.y1}" x2="${fill.x2}" y2="${fill.y2}" gradientUnits="userSpaceOnUse" gradientTransform="${transformStr}">`;
+        for (const stop of fill.stops || []) {
+          defs += `<stop offset="${(stop.offset * 100).toFixed(1)}%" stop-color="${stop.color}"/>`;
+        }
+        defs += '</linearGradient>';
+      } else if (fill.type === 'radial') {
+        defs += `<radialGradient id="${id}" cx="${fill.cx}" cy="${fill.cy}" r="${fill.r}" gradientUnits="userSpaceOnUse" gradientTransform="${transformStr}">`;
+        for (const stop of fill.stops || []) {
+          defs += `<stop offset="${(stop.offset * 100).toFixed(1)}%" stop-color="${stop.color}"/>`;
+        }
+        defs += '</radialGradient>';
+      } else if (fill.type === 'pattern') {
+        const baseSize = 20;
+        const size = Math.max(4, Math.floor(baseSize * (fill.scale || 1)));
+        const patternRot = fill.rotation || 0;
+        let patternTransform = '';
+        if (patternRot) {
+          patternTransform = `rotate(${patternRot}) `;
+        }
+        patternTransform += transformStr;
+        defs += `<pattern id="${id}" width="${size}" height="${size}" patternUnits="userSpaceOnUse" patternTransform="${patternTransform.trim()}">`;
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = size;
+        tempCanvas.height = size;
+        const tctx = tempCanvas.getContext('2d');
+        drawPatternTile(tctx, fill.pattern || 'diagonal', size, fill.fgColor || '#000', fill.bgColor || '#fff');
+        const dataUrl = tempCanvas.toDataURL('image/png');
+        defs += `<rect width="${size}" height="${size}" fill="${fill.bgColor || '#fff'}"/>`;
+        defs += `<image width="${size}" height="${size}" href="${dataUrl}"/>`;
+        defs += '</pattern>';
+      }
+    }
+    defs += '</defs>';
+    return defs;
+  }
+
+  function patchRenderShape() {
+    const originalRenderShape = renderShape;
+    renderShape = function(s) {
+      const currentFrame = animationController.currentFrame;
+      const useAnimation = animationController.isPlaying || animationController.currentFrame > 0;
+
+      if (isComponentInstance(s)) {
+        if (editingComponentId !== null) {
+          if (editingComponentId === s.componentId) {
+            return;
+          }
+        }
+        const expanded = getInstanceExpandedShapes(s);
+        for (const es of expanded) {
+          const pts = es.points;
+          const holes = es.holes || [];
+          ctx.save();
+          if (useAnimation) {
+            const animProps = animationController.getShapePropertiesAtFrame(s.id, currentFrame, { opacity: 1 });
+            ctx.globalAlpha = animProps.opacity;
+          }
+          drawPolygonPath(pts, holes);
+          const esFill = ensureFillStructure(es.fill);
+          ctx.fillStyle = getCanvasFillStyle(ctx, esFill, { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }, pts);
+          ctx.fill('evenodd');
+          ctx.lineWidth = (es.strokeWidth || 2) / viewport.scale;
+          ctx.strokeStyle = es.stroke || '#000';
+          ctx.stroke();
+          ctx.restore();
+        }
+      } else {
+        let pts = worldPointsOf(s);
+        let holes = worldHolesOf(s);
+        let opacity = s.opacity !== undefined ? s.opacity : 1;
+
+        if (useAnimation && isNodeEditMode) {
+          const animProps = getAnimatedShapeProps(s, currentFrame);
+          opacity = animProps.opacity;
+        }
+
+        ctx.save();
+        ctx.globalAlpha = opacity;
+        drawPolygonPath(pts, holes);
+        const shapeFill = ensureFillStructure(s.fill);
+        ctx.fillStyle = getCanvasFillStyle(ctx, shapeFill, s.transform, pts);
+        ctx.fill('evenodd');
+        ctx.lineWidth = (s.strokeWidth || 2) / viewport.scale;
+        ctx.strokeStyle = s.stroke || '#000';
+        ctx.stroke();
+        ctx.restore();
+      }
+    };
+  }
+
+  function patchRender() {
+    const originalRender = render;
+    render = function() {
+      const w = window.innerWidth, h = window.innerHeight;
+      if (editingComponentId !== null) {
+        ctx.fillStyle = '#faf6f2';
+      } else {
+        ctx.fillStyle = '#f0f0f0';
+      }
+      ctx.fillRect(0, 0, w, h);
+      ctx.save();
+      ctx.translate(w / 2, h / 2);
+      ctx.scale(viewport.scale, viewport.scale);
+      ctx.translate(-viewport.x, -viewport.y);
+      drawGrid();
+
+      if (editingComponentId !== null) {
+        const comp = getComponentById(editingComponentId);
+        if (comp) {
+          for (const s of comp.shapes) {
+            if (s.visible) renderShape(s);
+          }
+          renderConstraintIcons();
+        }
+      } else {
+        for (const s of shapes) {
+          if (s.visible) renderShape(s);
+        }
+
+        renderConstraintIcons();
+      }
+
+      if (isNodeEditMode) {
+        renderNodeEditGlobal();
+      } else {
+        for (const id of selectedIds) {
+          const s = getShapeById(id);
+          if (s && s.visible && !s.locked) renderSelection(s);
+        }
+      }
+
+      if (!isNodeEditMode) {
+        renderGradientHandles();
+      }
+
+      if (isDrawing && currentTool === 'rect' && drawStart && drawEnd) {
+        const x = Math.min(drawStart.x, drawEnd.x), y = Math.min(drawStart.y, drawEnd.y);
+        const w2 = Math.abs(drawEnd.x - drawStart.x), h2 = Math.abs(drawEnd.y - drawStart.y);
+        ctx.save();
+        ctx.fillStyle = 'rgba(100, 150, 255, 0.3)';
+        ctx.strokeStyle = '#4d9fff';
+        ctx.lineWidth = 2 / viewport.scale;
+        ctx.setLineDash([6 / viewport.scale, 4 / viewport.scale]);
+        ctx.fillRect(x, y, w2, h2);
+        ctx.strokeRect(x, y, w2, h2);
+        ctx.restore();
+      }
+
+      if (isDrawing && currentTool === 'circle' && drawStart && drawEnd) {
+        const r = dist(drawStart, drawEnd);
+        ctx.save();
+        ctx.fillStyle = 'rgba(100, 150, 255, 0.3)';
+        ctx.strokeStyle = '#4d9fff';
+        ctx.lineWidth = 2 / viewport.scale;
+        ctx.setLineDash([6 / viewport.scale, 4 / viewport.scale]);
+        ctx.beginPath();
+        ctx.arc(drawStart.x, drawStart.y, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      if (currentTool === 'polygon' && polygonPoints.length > 0) {
+        ctx.save();
+        ctx.strokeStyle = '#4d9fff';
+        ctx.lineWidth = 2 / viewport.scale;
+        ctx.setLineDash([6 / viewport.scale, 4 / viewport.scale]);
+        ctx.beginPath();
+        ctx.moveTo(polygonPoints[0].x, polygonPoints[0].y);
+        for (let i = 1; i < polygonPoints.length; i++) ctx.lineTo(polygonPoints[i].x, polygonPoints[i].y);
+        if (lastMouseWorld) ctx.lineTo(lastMouseWorld.x, lastMouseWorld.y);
+        ctx.stroke();
+        ctx.restore();
+        for (const p of polygonPoints) {
+          ctx.save();
+          ctx.fillStyle = '#4d9fff';
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 4 / viewport.scale, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+
+      if (isMarquee && marqueeStart && marqueeEnd) {
+        const x = Math.min(marqueeStart.x, marqueeEnd.x), y = Math.min(marqueeStart.y, marqueeEnd.y);
+        const w3 = Math.abs(marqueeEnd.x - marqueeStart.x), h3 = Math.abs(marqueeEnd.y - marqueeStart.y);
+        ctx.save();
+        ctx.fillStyle = 'rgba(77, 159, 255, 0.15)';
+        ctx.strokeStyle = '#4d9fff';
+        ctx.lineWidth = 1.5 / viewport.scale;
+        ctx.setLineDash([4 / viewport.scale, 3 / viewport.scale]);
+        ctx.fillRect(x, y, w3, h3);
+        ctx.strokeRect(x, y, w3, h3);
+        ctx.restore();
+      }
+
+      renderConstraintSelection();
+      renderSnapGuides();
+      ctx.restore();
+      zoomEl.textContent = Math.round(viewport.scale * 100) + '%';
+    };
+  }
+
+  function patchRenderLayers() {
+    const originalRenderLayers = renderLayers;
+    renderLayers = function() {
+      if (editingComponentId !== null) return;
+      layersListEl.innerHTML = '';
+      if (shapes.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-layers';
+        empty.textContent = 'No layers yet';
+        layersListEl.appendChild(empty);
+        return;
+      }
+      for (let i = shapes.length - 1; i >= 0; i--) {
+        const s = shapes[i];
+        const item = document.createElement('div');
+        item.className = 'layer-item';
+        item.dataset.id = s.id;
+        item.draggable = true;
+        if (selectedIds.has(s.id)) item.classList.add('selected');
+        if (s.locked) item.classList.add('locked');
+        if (isComponentInstance(s)) item.classList.add('is-instance');
+
+        const visibilityBtn = document.createElement('button');
+        visibilityBtn.className = 'layer-btn ' + (s.visible ? 'active' : 'inactive');
+        visibilityBtn.innerHTML = s.visible
+          ? '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>'
+          : '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78l3.15 3.15.02-.16c0-1.66-1.34-3-3-3l-.17.01z"/></svg>';
+        visibilityBtn.title = s.visible ? 'Hide' : 'Show';
+        visibilityBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          pushHistory();
+          s.visible = !s.visible;
+          if (!s.visible && selectedIds.has(s.id)) {
+            selectedIds.delete(s.id);
+            if (selectedIds.size === 0) { isNodeEditMode = false; selectedVertex = null; }
+          }
+          updateToolbar();
+          updateFillPanel();
+          renderLayers();
+          renderComponentsList();
+          render();
+        });
+
+        const colorSwatch = document.createElement('div');
+        colorSwatch.className = 'layer-color';
+        let displayFill = getFillDisplayColor(s.fill);
+        if (isComponentInstance(s) && s.overrides && s.overrides.fill) {
+          displayFill = getFillDisplayColor(s.overrides.fill);
+        }
+        colorSwatch.style.background = displayFill;
+
+        const nameWrapper = document.createElement('div');
+        nameWrapper.style.display = 'flex';
+        nameWrapper.style.alignItems = 'center';
+        nameWrapper.style.flex = '1';
+        nameWrapper.style.minWidth = '0';
+
+        const nameEl = document.createElement('span');
+        nameEl.className = 'layer-name';
+        if (isComponentInstance(s)) {
+          const comp = getComponentById(s.componentId);
+          nameEl.textContent = comp ? comp.name : s.name;
+        } else {
+          nameEl.textContent = s.name;
+        }
+        nameEl.title = isComponentInstance(s) ? 'Component Instance - Double-click to edit component' : 'Double-click to rename';
+        nameEl.addEventListener('dblclick', (e) => {
+          e.stopPropagation();
+          if (isComponentInstance(s)) {
+            enterComponentEditMode(s.componentId);
+          } else {
+            startRenameLayer(item, s, nameEl);
+          }
+        });
+
+        if (isComponentInstance(s)) {
+          const badge = document.createElement('span');
+          badge.className = 'layer-badge';
+          badge.textContent = 'C';
+          nameWrapper.appendChild(badge);
+        }
+        nameWrapper.appendChild(nameEl);
+
+        const lockBtn = document.createElement('button');
+        lockBtn.className = 'layer-btn ' + (s.locked ? 'active' : 'inactive');
+        lockBtn.innerHTML = s.locked
+          ? '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>'
+          : '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6zm9 14H6V10h12v10zm-6-3c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2z"/></svg>';
+        lockBtn.title = s.locked ? 'Unlock' : 'Lock';
+        lockBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          pushHistory();
+          s.locked = !s.locked;
+          if (s.locked && selectedIds.has(s.id)) {
+            selectedIds.delete(s.id);
+            selectedVertex = null;
+            isNodeEditMode = false;
+          }
+          updateToolbar();
+          updateFillPanel();
+          renderLayers();
+          render();
+        });
+
+        item.appendChild(visibilityBtn);
+        item.appendChild(colorSwatch);
+        item.appendChild(nameWrapper);
+
+        if (isComponentInstance(s)) {
+          const actionsDiv = document.createElement('div');
+          actionsDiv.className = 'instance-context-actions';
+
+          const overrideBtn = document.createElement('button');
+          overrideBtn.className = 'instance-action-btn';
+          overrideBtn.innerHTML = '🎨';
+          overrideBtn.title = 'Instance Overrides';
+          overrideBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openInstanceOverrideDialog(s.id);
+          });
+
+          const unlinkBtn = document.createElement('button');
+          unlinkBtn.className = 'instance-action-btn';
+          unlinkBtn.innerHTML = '⟳';
+          unlinkBtn.title = 'Unlink Instance';
+          unlinkBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            unlinkInstance(s.id);
+          });
+
+          const editBtn = document.createElement('button');
+          editBtn.className = 'instance-action-btn';
+          editBtn.innerHTML = '✎';
+          editBtn.title = 'Edit Source Component';
+          editBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            enterComponentEditMode(s.componentId);
+          });
+
+          actionsDiv.appendChild(overrideBtn);
+          actionsDiv.appendChild(unlinkBtn);
+          actionsDiv.appendChild(editBtn);
+          item.appendChild(actionsDiv);
+        }
+
+        item.appendChild(lockBtn);
+
+        item.addEventListener('click', (e) => {
+          if (s.locked) return;
+          if (e.shiftKey) {
+            if (selectedIds.has(s.id)) selectedIds.delete(s.id);
+            else selectedIds.add(s.id);
+          } else {
+            selectedIds.clear();
+            selectedIds.add(s.id);
+          }
+          selectedVertex = null;
+          constraintSelection = [];
+          updateToolbar();
+          updateFillPanel();
+          renderLayers();
+          render();
+        });
+
+        item.addEventListener('dragstart', (e) => {
+          item.classList.add('dragging');
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', s.id.toString());
+        });
+        item.addEventListener('dragend', () => {
+          item.classList.remove('dragging');
+          document.querySelectorAll('.layer-item.drag-over').forEach(el => el.classList.remove('drag-over'));
+        });
+        item.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          document.querySelectorAll('.layer-item.drag-over').forEach(el => el.classList.remove('drag-over'));
+          item.classList.add('drag-over');
+        });
+        item.addEventListener('dragleave', () => item.classList.remove('drag-over'));
+        item.addEventListener('drop', (e) => {
+          e.preventDefault();
+          item.classList.remove('drag-over');
+          const draggedId = parseInt(e.dataTransfer.getData('text/plain'), 10);
+          if (isNaN(draggedId) || draggedId === s.id) return;
+          const draggedIdx = shapes.findIndex(sh => sh.id === draggedId);
+          const targetIdx = shapes.findIndex(sh => sh.id === s.id);
+          if (draggedIdx === -1 || targetIdx === -1) return;
+          pushHistory();
+          const [dragged] = shapes.splice(draggedIdx, 1);
+          const newTargetIdx = shapes.findIndex(sh => sh.id === s.id);
+          shapes.splice(newTargetIdx, 0, dragged);
+          renderLayers();
+          render();
+        });
+        layersListEl.appendChild(item);
+      }
+    };
+  }
+
+  function patchExportSVG() {
+    const exportBtn = document.getElementById('export-svg');
+    const oldListeners = exportBtn.cloneNode(true);
+    exportBtn.parentNode.replaceChild(oldListeners, exportBtn);
+
+    document.getElementById('export-svg').addEventListener('click', () => {
+      const allX = [];
+      const allY = [];
+      const exportShapes = [];
+      const defsMap = {};
+
+      for (const s of shapes) {
+        if (!s.visible) continue;
+        if (isComponentInstance(s)) {
+          const expanded = getInstanceExpandedShapes(s);
+          for (const es of expanded) {
+            exportShapes.push(es);
+            const pts = es.points;
+            for (const p of pts) { allX.push(p.x); allY.push(p.y); }
+            const holes = es.holes || [];
+            for (const hole of holes) {
+              for (const p of hole) { allX.push(p.x); allY.push(p.y); }
+            }
+          }
+        } else {
+          exportShapes.push(s);
+          const pts = worldPointsOf(s);
+          for (const p of pts) { allX.push(p.x); allY.push(p.y); }
+          const holes = worldHolesOf(s);
+          for (const hole of holes) {
+            for (const p of hole) { allX.push(p.x); allY.push(p.y); }
+          }
+        }
+      }
+      if (allX.length === 0) { showToast('No shapes to export'); return; }
+      const minX = Math.min(...allX);
+      const minY = Math.min(...allY);
+      const maxX = Math.max(...allX);
+      const maxY = Math.max(...allY);
+      const pad = 20;
+      let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${minX - pad} ${minY - pad} ${maxX - minX + pad * 2} ${maxY - minY + pad * 2}">`;
+
+      for (let i = 0; i < exportShapes.length; i++) {
+        const s = exportShapes[i];
+        const fill = ensureFillStructure(s.fill);
+        const transform = s._isExpandedInstance
+          ? { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }
+          : s.transform;
+        const fillRef = exportFillToSVGDefs(fill, defsMap, `shape${i}`, transform);
+        const exportFill = fillRef || getFillDisplayColor(fill);
+
+        const pts = s._isExpandedInstance ? s.points : worldPointsOf(s);
+        const holes = s._isExpandedInstance ? (s.holes || []) : worldHolesOf(s);
+        let d = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ') + 'Z';
+        for (const hole of holes) {
+          d += ' ' + hole.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ') + 'Z';
+        }
+        svg += `<path d="${d}" fill="${exportFill}" stroke="${s.stroke || '#000'}" stroke-width="${s.strokeWidth || 2}" fill-rule="evenodd"/>`;
+      }
+
+      if (Object.keys(defsMap).length > 0) {
+        svg = svg.replace('>', '>' + generateSVGDefs(defsMap));
+      }
+
+      svg += '</svg>';
+      const blob = new Blob([svg], { type: 'image/svg+xml' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'drawing.svg';
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+  }
+
+  function patchBooleanOp() {
+    const originalRunBooleanOp = runBooleanOp;
+    runBooleanOp = function(operation) {
+      const sel = getSelectedShapes();
+      if (sel.length < 2) { showToast('Select 2 shapes first', 'warning'); return; }
+      const subject = sel[0];
+      const clip = sel[1];
+      const subjectPts = worldPointsOf(subject);
+      const clipPts = worldPointsOf(clip);
+      try {
+        const result = weilerAtherton(subjectPts, clipPts, operation);
+        if (!result.polygons || result.polygons.length === 0) {
+          showToast('No result for this operation', 'warning');
+          return;
+        }
+        pushHistory();
+        const newShapes = [];
+        const baseFill = JSON.parse(JSON.stringify(ensureFillStructure(subject.fill)));
+        for (let i = 0; i < result.polygons.length; i++) {
+          const poly = result.polygons[i];
+          if (poly.length < 3) continue;
+          const holes = result.holes && result.holes[i] ? [result.holes[i]] : [];
+          const s = createShape(poly, baseFill, holes);
+          s.fill = JSON.parse(JSON.stringify(baseFill));
+          s.stroke = subject.stroke || '#000';
+          s.strokeWidth = subject.strokeWidth || 2;
+          newShapes.push(s);
+        }
+        if (newShapes.length === 0) {
+          showToast('No valid result', 'warning');
+          return;
+        }
+        const removeIds = [subject.id, clip.id];
+        shapes = shapes.filter(s => !removeIds.includes(s.id));
+        constraints = constraints.filter(c => {
+          const rps = c.getReferencedPoints();
+          for (const rp of rps) {
+            const { shapeId } = parsePointId(rp);
+            if (removeIds.includes(shapeId)) return false;
+          }
+          return true;
+        });
+        for (const s of newShapes) shapes.push(s);
+        selectedIds.clear();
+        for (const s of newShapes) selectedIds.add(s.id);
+        rebuildSolverAndParams();
+        initialSolve();
+        updateToolbar();
+        updateFillPanel();
+        updateDOFDisplay();
+        renderLayers();
+        renderConstraintList();
+        render();
+        const opName = { union: 'Union', subtract: 'Subtract', intersect: 'Intersect' }[operation];
+        showToast(opName + ': ' + newShapes.length + ' shape(s)', 'success');
+      } catch (e) {
+        console.error(e);
+        showToast('Boolean op failed: ' + e.message, 'error');
+      }
+    };
+  }
+
+  function patchMouseHandlers() {
+    const canvasEl = document.getElementById('canvas');
+
+    const originalMouseDown = canvasEl.onmousedown;
+    canvasEl.addEventListener('mousedown', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const sx = e.clientX - rect.left;
+      const sy = e.clientY - rect.top;
+      const world = screenToWorld(sx, sy);
+
+      if (!isNodeEditMode && !isDrawing && !isPanning && !isMarquee) {
+        const handleHit = hitTestGradientHandle(world.x, world.y);
+        if (handleHit) {
+          e.preventDefault();
+          e.stopPropagation();
+          isDraggingGradientHandle = true;
+          gradientDragType = handleHit.type;
+          gradientDragShapeId = handleHit.shapeId;
+          pushHistory();
+          return;
+        }
+      }
+    }, true);
+
+    const originalMouseMove = window.onmousemove;
+    window.addEventListener('mousemove', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const sx = e.clientX - rect.left;
+      const sy = e.clientY - rect.top;
+      const world = screenToWorld(sx, sy);
+      lastMouseWorld = world;
+
+      if (isDraggingGradientHandle && gradientDragShapeId !== null) {
+        const shape = getShapeById(gradientDragShapeId);
+        if (!shape || !shape.fill || typeof shape.fill === 'string') return;
+
+        const t = shape.transform;
+        const invCos = Math.cos(-t.rotation);
+        const invSin = Math.sin(-t.rotation);
+        const isx = Math.abs(t.scaleX) < 1e-10 ? 0 : 1 / t.scaleX;
+        const isy = Math.abs(t.scaleY) < 1e-10 ? 0 : 1 / t.scaleY;
+        const localX = (world.x - t.tx) * invCos - (world.y - t.ty) * invSin;
+        const localY = (world.x - t.tx) * invSin + (world.y - t.ty) * invCos;
+        const localPoint = { x: localX * isx, y: localY * isy };
+
+        if (gradientDragType === 'linear-p1') {
+          shape.fill.x1 = localPoint.x;
+          shape.fill.y1 = localPoint.y;
+        } else if (gradientDragType === 'linear-p2') {
+          shape.fill.x2 = localPoint.x;
+          shape.fill.y2 = localPoint.y;
+        } else if (gradientDragType === 'radial-center') {
+          shape.fill.cx = localPoint.x;
+          shape.fill.cy = localPoint.y;
+        } else if (gradientDragType === 'radial-radius') {
+          const center = { x: shape.fill.cx, y: shape.fill.cy };
+          shape.fill.r = Math.max(5, dist(localPoint, center));
+        }
+        updateFillPanel();
+        render();
+        return;
+      }
+
+      if (!isNodeEditMode && !isDrawing && !isDraggingShape && !isTransforming && !isPanning && !isMarquee) {
+        const handleHit = hitTestGradientHandle(world.x, world.y);
+        if (handleHit) {
+          canvas.style.cursor = 'pointer';
+        }
+      }
+    });
+
+    const originalMouseUp = window.onmouseup;
+    window.addEventListener('mouseup', () => {
+      if (isDraggingGradientHandle) {
+        isDraggingGradientHandle = false;
+        gradientDragType = null;
+        gradientDragShapeId = null;
+        scheduleSave();
+      }
+    });
+  }
+
+  function patchLoadState() {
+    const originalLoadState = loadStateFromStorage;
+    loadStateFromStorage = function() {
+      const result = originalLoadState();
+      if (result) {
+        for (const s of shapes) {
+          s.fill = ensureFillStructure(s.fill);
+        }
+      }
+      return result;
+    };
+  }
+
+  function patchDrawComponentIcon() {
+    const originalDraw = drawComponentIcon;
+    drawComponentIcon = function(canvas, component) {
+      const c = canvas.getContext('2d');
+      const w = canvas.width;
+      const h = canvas.height;
+      c.clearRect(0, 0, w, h);
+      const bounds = computeComponentBounds(component);
+      const bw = bounds.maxX - bounds.minX;
+      const bh = bounds.maxY - bounds.minY;
+      if (bw < 1 || bh < 1) return;
+      const padding = 4;
+      const scale = Math.min((w - padding * 2) / bw, (h - padding * 2) / bh);
+      const offsetX = (w - bw * scale) / 2 - bounds.minX * scale;
+      const offsetY = (h - bh * scale) / 2 - bounds.minY * scale;
+      c.save();
+      c.translate(offsetX, offsetY);
+      c.scale(scale, scale);
+      const expanded = expandComponentShapes(component, { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 });
+      for (const s of expanded) {
+        c.beginPath();
+        const pts = s.points;
+        if (pts.length > 0) {
+          c.moveTo(pts[0].x, pts[0].y);
+          for (let i = 1; i < pts.length; i++) c.lineTo(pts[i].x, pts[i].y);
+          c.closePath();
+        }
+        const holes = s.holes || [];
+        for (const hole of holes) {
+          if (hole.length > 0) {
+            c.moveTo(hole[0].x, hole[0].y);
+            for (let i = 1; i < hole.length; i++) c.lineTo(hole[i].x, hole[i].y);
+            c.closePath();
+          }
+        }
+        const fill = ensureFillStructure(s.fill);
+        if (fill.type === 'solid' || typeof fill === 'string') {
+          c.fillStyle = getFillDisplayColor(fill);
+        } else {
+          c.fillStyle = getFillDisplayColor(fill);
+        }
+        c.fill('evenodd');
+        c.lineWidth = 2 / scale;
+        c.strokeStyle = s.stroke || '#000';
+        c.stroke();
+      }
+      c.restore();
+    };
+  }
+
+  function patchAnimationSystem() {
+    if (typeof saveOriginalShapes === 'function') {
+      const orig = saveOriginalShapes;
+      saveOriginalShapes = function() {
+        originalShapeData = shapes.map(s => ({
+          id: s.id,
+          points: s.points.map(p => ({ ...p })),
+          holes: (s.holes || []).map(h => h.map(p => ({ ...p }))),
+          transform: { ...s.transform },
+          fill: JSON.parse(JSON.stringify(ensureFillStructure(s.fill))),
+          opacity: s.opacity
+        }));
+      };
+    }
+
+    if (typeof restoreOriginalShapes === 'function') {
+      const orig = restoreOriginalShapes;
+      restoreOriginalShapes = function() {
+        if (!originalShapeData) return;
+        for (const data of originalShapeData) {
+          const shape = getShapeById(data.id);
+          if (shape) {
+            shape.points = data.points.map(p => ({ ...p }));
+            shape.holes = (data.holes || []).map(h => h.map(p => ({ ...p })));
+            shape.transform = { ...data.transform };
+            shape.fill = JSON.parse(JSON.stringify(data.fill));
+            if (shape.opacity !== undefined) {
+              shape.opacity = data.opacity;
+            }
+          }
+        }
+      };
+    }
+
+    if (typeof applyAnimationToShapes === 'function') {
+      const orig = applyAnimationToShapes;
+      applyAnimationToShapes = function(frame) {
+        for (const s of shapes) {
+          if (!s.visible) continue;
+          if (isComponentInstance(s)) continue;
+
+          const baseFill = ensureFillStructure(s.fill);
+          const baseFillAnim = baseFill.type === 'solid' ? baseFill.color : getFillDisplayColor(baseFill);
+
+          const baseProps = {
+            tx: s.transform.tx,
+            ty: s.transform.ty,
+            rotation: s.transform.rotation,
+            scaleX: s.transform.scaleX,
+            scaleY: s.transform.scaleY,
+            fill: baseFillAnim,
+            opacity: s.opacity !== undefined ? s.opacity : 1
+          };
+
+          const animProps = animationController.getShapePropertiesAtFrame(s.id, frame, baseProps);
+
+          s.transform.tx = animProps.tx;
+          s.transform.ty = animProps.ty;
+          s.transform.rotation = animProps.rotation;
+          s.transform.scaleX = animProps.scaleX;
+          s.transform.scaleY = animProps.scaleY;
+          if (s.fill && (typeof s.fill === 'string' || s.fill.type === 'solid')) {
+            if (typeof s.fill === 'string') {
+              s.fill = { type: 'solid', color: animProps.fill };
+            } else {
+              s.fill.color = animProps.fill;
+            }
+          }
+          s.opacity = animProps.opacity;
+        }
+      };
+    }
+  }
+
+  function patchSaveOriginalShapesRef() {
+    window.addEventListener('selectionchange', () => {});
+  }
+
+  initFillPanel();
+  patchRenderShape();
+  patchRender();
+  patchRenderLayers();
+  patchExportSVG();
+  patchBooleanOp();
+  patchMouseHandlers();
+  patchLoadState();
+  patchDrawComponentIcon();
+  patchAnimationSystem();
+
   window.addEventListener('beforeunload', saveStateToStorage);
 
   resize();
@@ -5423,6 +6808,7 @@
     rebuildSolverAndParams();
     initialSolve();
     updateToolbar();
+    updateFillPanel();
     updateDOFDisplay();
     renderLayers();
     renderConstraintList();
@@ -5431,6 +6817,7 @@
     render();
   } else {
     initDemo();
+    updateFillPanel();
   }
 
   initTimeline();

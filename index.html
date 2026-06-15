@@ -135,6 +135,96 @@
   <div id="components-list"></div>
 </div>
 
+<div id="fill-panel">
+  <div class="panel-header">
+    <span>Fill</span>
+  </div>
+  <div class="fill-settings">
+    <div class="form-row">
+      <label>Type:</label>
+      <select id="fill-type">
+        <option value="solid">Solid Color</option>
+        <option value="linear">Linear Gradient</option>
+        <option value="radial">Radial Gradient</option>
+        <option value="pattern">Pattern</option>
+      </select>
+    </div>
+
+    <div id="fill-solid-section" class="fill-section">
+      <div class="form-row">
+        <label>Color:</label>
+        <input type="color" id="fill-solid-color" value="#4d9fff" />
+      </div>
+    </div>
+
+    <div id="fill-linear-section" class="fill-section hidden">
+      <div class="form-row">
+        <label>Stops:</label>
+        <div class="gradient-stops-bar" id="linear-stops-bar"></div>
+      </div>
+      <div id="linear-stops-list" class="stops-list"></div>
+      <div class="form-row">
+        <button class="mini-btn fill-btn" id="add-linear-stop" title="Add color stop">+ Add Stop</button>
+      </div>
+      <div class="fill-hint">Drag the two handles on canvas to adjust gradient direction</div>
+    </div>
+
+    <div id="fill-radial-section" class="fill-section hidden">
+      <div class="form-row">
+        <label>Stops:</label>
+        <div class="gradient-stops-bar" id="radial-stops-bar"></div>
+      </div>
+      <div id="radial-stops-list" class="stops-list"></div>
+      <div class="form-row">
+        <button class="mini-btn fill-btn" id="add-radial-stop" title="Add color stop">+ Add Stop</button>
+      </div>
+      <div class="fill-hint">Drag center and radius handles on canvas to adjust gradient</div>
+    </div>
+
+    <div id="fill-pattern-section" class="fill-section hidden">
+      <div class="form-row">
+        <label>Pattern:</label>
+      </div>
+      <div class="pattern-grid" id="pattern-grid">
+        <div class="pattern-item" data-pattern="diagonal" title="Diagonal Lines">
+          <canvas class="pattern-preview" width="40" height="40" data-pattern="diagonal"></canvas>
+          <span>Diagonal</span>
+        </div>
+        <div class="pattern-item" data-pattern="grid" title="Grid">
+          <canvas class="pattern-preview" width="40" height="40" data-pattern="grid"></canvas>
+          <span>Grid</span>
+        </div>
+        <div class="pattern-item" data-pattern="dots" title="Dots">
+          <canvas class="pattern-preview" width="40" height="40" data-pattern="dots"></canvas>
+          <span>Dots</span>
+        </div>
+        <div class="pattern-item" data-pattern="checkerboard" title="Checkerboard">
+          <canvas class="pattern-preview" width="40" height="40" data-pattern="checkerboard"></canvas>
+          <span>Checker</span>
+        </div>
+      </div>
+      <div class="form-row">
+        <label>Scale:</label>
+        <input type="range" id="pattern-scale" min="0.2" max="3" step="0.1" value="1" />
+        <span id="pattern-scale-value" class="unit">1.0x</span>
+      </div>
+      <div class="form-row">
+        <label>Rotation:</label>
+        <input type="number" id="pattern-rotation" min="0" max="360" step="1" value="0" />
+        <span class="unit">°</span>
+      </div>
+      <div class="form-row">
+        <label>Foreground:</label>
+        <input type="color" id="pattern-fg-color" value="#000000" />
+      </div>
+      <div class="form-row">
+        <label>Background:</label>
+        <input type="color" id="pattern-bg-color" value="#ffffff" />
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="text-panel" class="hidden">
   <div class="panel-header">
     <span>Text</span>
