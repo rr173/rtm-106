@@ -20,6 +20,9 @@
   <button id="tool-polygon" class="tool-btn" title="Polygon (P)">
     <svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="currentColor" stroke-width="2" d="M12 3l8 6-3 9H7l-3-9z"/></svg>
   </button>
+  <button id="tool-text" class="tool-btn" title="Text (T)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M5 4v3h5.5v12h3V7H19V4z"/></svg>
+  </button>
   <div class="sep"></div>
   <button id="op-union" class="op-btn" disabled title="Union">
     <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="9" cy="12" r="6" fill="currentColor" opacity="0.5"/><circle cx="15" cy="12" r="6" fill="currentColor" opacity="0.5"/></svg>
@@ -130,6 +133,37 @@
     <span>Components</span>
   </div>
   <div id="components-list"></div>
+</div>
+
+<div id="text-panel" class="hidden">
+  <div class="panel-header">
+    <span>Text</span>
+  </div>
+  <div class="text-settings">
+    <div class="form-row">
+      <label>Text:</label>
+      <input type="text" id="text-input" value="HELLO" placeholder="Enter text (A-Z, 0-9)" />
+    </div>
+    <div class="form-row">
+      <label>Font Size:</label>
+      <input type="number" id="text-size" value="100" min="10" max="500" step="1" />
+      <span class="unit">px</span>
+    </div>
+    <div class="form-row">
+      <label>Weight:</label>
+      <input type="range" id="text-weight" min="-100" max="200" value="0" step="10" />
+      <span id="text-weight-value" class="unit">0</span>
+    </div>
+    <div class="form-row">
+      <label>Spacing:</label>
+      <input type="number" id="text-spacing" value="50" min="-100" max="200" step="1" />
+      <span class="unit">px</span>
+    </div>
+    <div class="text-actions">
+      <button id="text-split" class="mini-btn" title="Split into individual characters">Split Chars</button>
+      <button id="text-on-path" class="mini-btn" title="Put text on selected path">Text on Path</button>
+    </div>
+  </div>
 </div>
 
 <div id="layers-panel">
@@ -372,6 +406,7 @@
 <script src="geometry.js"></script>
 <script src="constraint-solver.js"></script>
 <script src="animation.js"></script>
+<script src="glyphs.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -73,6 +73,13 @@
   let drawEnd = null;
   let polygonPoints = [];
 
+  let textSettings = {
+    text: 'HELLO',
+    fontSize: 100,
+    fontWeight: 0,
+    letterSpacing: 50
+  };
+
   let isPanning = false;
   let panStart = null;
 
@@ -245,6 +252,7 @@
     constraintSelection = [];
     constraintMode = null;
     updateToolbar();
+    updateTextPanel();
     renderLayers();
     renderConstraintList();
     renderParams();
@@ -262,6 +270,7 @@
     constraintSelection = [];
     constraintMode = null;
     updateToolbar();
+    updateTextPanel();
     renderLayers();
     renderConstraintList();
     renderParams();
@@ -285,6 +294,185 @@
       opacity: 1,
       transform: { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }
     };
+  }
+
+  function createTextShape(text, x, y, fontSize, fontWeight, letterSpacing, fill) {
+    const gs = window.GlyphSystem;
+    if (!gs) {
+      console.warn('GlyphSystem not available');
+      return null;
+    }
+
+    const charPaths = gs.textToPaths(text.toUpperCase(), fontSize, letterSpacing, fontWeight);
+
+    if (charPaths.length === 0) return null;
+
+    let allOuter = [];
+    let allHoles = [];
+
+    for (const cp of charPaths) {
+      allOuter = allOuter.concat(cp.outer);
+      if (cp.holes && cp.holes.length > 0) {
+        allHoles = allHoles.concat(cp.holes);
+      }
+    }
+
+    const shape = createShape(allOuter, fill, allHoles);
+    shape.name = 'Text: ' + text;
+    shape.type = 'text';
+    shape.textData = {
+      text: text.toUpperCase(),
+      fontSize: fontSize,
+      fontWeight: fontWeight,
+      letterSpacing: letterSpacing
+    };
+
+    const bounds = getBounds(shape.points);
+    const offsetX = x - bounds.minX;
+    const offsetY = y - bounds.maxY;
+
+    shape.points = shape.points.map(p => ({ x: p.x + offsetX, y: p.y + offsetY }));
+    shape.holes = shape.holes.map(h => h.map(p => ({ x: p.x + offsetX, y: p.y + offsetY })));
+
+    return shape;
+  }
+
+  function isTextShape(shape) {
+    return shape && shape.type === 'text' && shape.textData;
+  }
+
+  function updateTextShape(shape, newText, newFontSize, newWeight, newSpacing) {
+    if (!isTextShape(shape)) return false;
+
+    const gs = window.GlyphSystem;
+    if (!gs) return false;
+
+    const text = newText !== undefined ? newText.toUpperCase() : shape.textData.text;
+    const fontSize = newFontSize !== undefined ? newFontSize : shape.textData.fontSize;
+    const fontWeight = newWeight !== undefined ? newWeight : shape.textData.fontWeight;
+    const letterSpacing = newSpacing !== undefined ? newSpacing : shape.textData.letterSpacing;
+
+    const oldBounds = getBounds(shape.points);
+    const oldLeft = oldBounds.minX;
+    const oldBottom = oldBounds.maxY;
+
+    const charPaths = gs.textToPaths(text, fontSize, letterSpacing, fontWeight);
+
+    let allOuter = [];
+    let allHoles = [];
+
+    for (const cp of charPaths) {
+      allOuter = allOuter.concat(cp.outer);
+      if (cp.holes && cp.holes.length > 0) {
+        allHoles = allHoles.concat(cp.holes);
+      }
+    }
+
+    if (allOuter.length === 0) return false;
+
+    const newBounds = getBounds(allOuter);
+    const offsetX = oldLeft - newBounds.minX;
+    const offsetY = oldBottom - newBounds.maxY;
+
+    shape.points = allOuter.map(p => ({ x: p.x + offsetX, y: p.y + offsetY }));
+    shape.holes = allHoles.map(h => h.map(p => ({ x: p.x + offsetX, y: p.y + offsetY })));
+    shape.textData = { text, fontSize, fontWeight, letterSpacing };
+    shape.name = 'Text: ' + text;
+
+    return true;
+  }
+
+  function splitTextIntoCharacters(textShape) {
+    if (!isTextShape(textShape)) return [];
+
+    const gs = window.GlyphSystem;
+    if (!gs) return [];
+
+    const td = textShape.textData;
+    const text = td.text;
+    const fontSize = td.fontSize;
+    const fontWeight = td.fontWeight;
+    const letterSpacing = td.letterSpacing;
+
+    const oldBounds = getBounds(textShape.points);
+    const oldLeft = oldBounds.minX;
+    const oldBottom = oldBounds.maxY;
+
+    const charPaths = gs.textToPaths(text, fontSize, letterSpacing, fontWeight);
+
+    const firstBounds = charPaths.length > 0 ? getBounds(charPaths[0].outer) : { minX: 0, maxY: 0 };
+    const offsetX = oldLeft - firstBounds.minX;
+    const offsetY = oldBottom - firstBounds.maxY;
+
+    const result = [];
+    let charIndex = 0;
+
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      const glyph = gs.getGlyph(ch);
+      if (!glyph.paths || glyph.paths.length === 0) continue;
+
+      const glyphCharPaths = charPaths.filter(cp => cp.charIndex === i);
+      if (glyphCharPaths.length === 0) continue;
+
+      let outerPts = [];
+      let holePts = [];
+
+      for (const gcp of glyphCharPaths) {
+        outerPts = outerPts.concat(gcp.outer);
+        if (gcp.holes) holePts = holePts.concat(gcp.holes);
+      }
+
+      const shape = createShape(
+        outerPts.map(p => ({ x: p.x + offsetX, y: p.y + offsetY })),
+        textShape.fill,
+        holePts.map(h => h.map(p => ({ x: p.x + offsetX, y: p.y + offsetY })))
+      );
+      shape.name = 'Char: ' + ch;
+      shape.type = 'text';
+      shape.textData = {
+        text: ch,
+        fontSize: fontSize,
+        fontWeight: fontWeight,
+        letterSpacing: 0
+      };
+      shape.stroke = textShape.stroke;
+      shape.strokeWidth = textShape.strokeWidth;
+      shape.opacity = textShape.opacity;
+
+      result.push(shape);
+      charIndex++;
+    }
+
+    return result;
+  }
+
+  function putTextOnPath(textShape, pathPoints) {
+    if (!isTextShape(textShape)) return false;
+
+    const gs = window.GlyphSystem;
+    if (!gs) return false;
+
+    const td = textShape.textData;
+    const charPaths = gs.textToPaths(td.text, td.fontSize, td.letterSpacing, td.fontWeight);
+
+    const transformed = gs.transformPointsAlongPath(charPaths, pathPoints, 0);
+
+    let allOuter = [];
+    let allHoles = [];
+
+    for (const t of transformed) {
+      allOuter = allOuter.concat(t.outer);
+      if (t.holes) allHoles = allHoles.concat(t.holes);
+    }
+
+    if (allOuter.length === 0) return false;
+
+    textShape.points = allOuter;
+    textShape.holes = allHoles;
+    textShape.textData.onPath = true;
+
+    return true;
   }
 
   function isComponentInstance(shape) {
@@ -2577,6 +2765,37 @@
     }
   }
 
+  function updateTextPanel() {
+    const panel = document.getElementById('text-panel');
+    if (!panel) return;
+
+    const selectedShapes = getSelectedShapes();
+    const textShapes = selectedShapes.filter(s => isTextShape(s));
+    const hasTextSelection = textShapes.length > 0;
+    const isTextTool = currentTool === 'text';
+
+    if (isTextTool || hasTextSelection) {
+      panel.classList.remove('hidden');
+    } else {
+      panel.classList.add('hidden');
+    }
+
+    if (hasTextSelection) {
+      const firstText = textShapes[0];
+      document.getElementById('text-input').value = firstText.textData.text;
+      document.getElementById('text-size').value = firstText.textData.fontSize;
+      document.getElementById('text-weight').value = firstText.textData.fontWeight;
+      document.getElementById('text-weight-value').textContent = firstText.textData.fontWeight;
+      document.getElementById('text-spacing').value = firstText.textData.letterSpacing;
+    } else {
+      document.getElementById('text-input').value = textSettings.text;
+      document.getElementById('text-size').value = textSettings.fontSize;
+      document.getElementById('text-weight').value = textSettings.fontWeight;
+      document.getElementById('text-weight-value').textContent = textSettings.fontWeight;
+      document.getElementById('text-spacing').value = textSettings.letterSpacing;
+    }
+  }
+
   function getShapesBounds(shapeList) {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const s of shapeList) {
@@ -3179,12 +3398,14 @@
           selectedIds.add(shapeHit.id);
           selectedVertex = null;
           updateToolbar();
+          updateTextPanel();
           renderLayers();
           render();
         } else {
           selectedIds.clear();
           selectedVertex = null;
           updateToolbar();
+          updateTextPanel();
           renderLayers();
           render();
         }
@@ -3216,6 +3437,7 @@
           }
           canvas.style.cursor = 'move';
           updateToolbar();
+          updateTextPanel();
           renderLayers();
           render();
           return;
@@ -3225,6 +3447,7 @@
           marqueeEnd = { ...world };
           if (!e.shiftKey) selectedIds.clear();
           updateToolbar();
+          updateTextPanel();
           renderLayers();
           render();
           return;
@@ -3244,6 +3467,31 @@
           }
         }
         render();
+        return;
+      } else if (currentTool === 'text') {
+        pushHistory();
+        const shape = createTextShape(
+          textSettings.text,
+          world.x,
+          world.y,
+          textSettings.fontSize,
+          textSettings.fontWeight,
+          textSettings.letterSpacing
+        );
+        if (shape) {
+          shapes.push(shape);
+          selectedIds.clear();
+          selectedIds.add(shape.id);
+          rebuildSolverAndParams();
+          initialSolve();
+          updateToolbar();
+          updateDOFDisplay();
+          updateTextPanel();
+          renderLayers();
+          renderConstraintList();
+          render();
+          showToast('Text created: ' + textSettings.text);
+        }
         return;
       }
     }
@@ -3578,6 +3826,7 @@
       marqueeEnd = null;
       canvas.style.cursor = 'default';
       updateToolbar();
+      updateTextPanel();
       renderLayers();
       render();
       return;
@@ -3794,8 +4043,9 @@
     else if (key === 'r') { currentTool = 'rect'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); render(); }
     else if (key === 'c') { currentTool = 'circle'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); render(); }
     else if (key === 'p') { currentTool = 'polygon'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; polygonPoints = []; updateToolbar(); render(); }
+    else if (key === 't') { currentTool = 'text'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); updateTextPanel(); render(); }
     else if (key === 'n') { isNodeEditMode = !isNodeEditMode; if (!isNodeEditMode) selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); updateDOFDisplay(); render(); showToast(isNodeEditMode ? 'Node Edit Mode ON' : 'Node Edit Mode OFF'); }
-    else if (key === 'a') { selectedIds.clear(); for (const s of shapes) { if (s.visible && !s.locked) selectedIds.add(s.id); } updateToolbar(); renderLayers(); render(); }
+    else if (key === 'a') { selectedIds.clear(); for (const s of shapes) { if (s.visible && !s.locked) selectedIds.add(s.id); } updateToolbar(); updateTextPanel(); renderLayers(); render(); }
     else if (key === ';') { snapEnabled = !snapEnabled; showToast(snapEnabled ? 'Snap ON' : 'Snap OFF'); render(); }
     else if (key === 'g') { if (editingComponentId === null) openCreateComponentDialog(); }
   });
@@ -3812,6 +4062,150 @@
   document.getElementById('tool-rect').addEventListener('click', () => { currentTool = 'rect'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); render(); });
   document.getElementById('tool-circle').addEventListener('click', () => { currentTool = 'circle'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); render(); });
   document.getElementById('tool-polygon').addEventListener('click', () => { currentTool = 'polygon'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; polygonPoints = []; updateToolbar(); render(); });
+  document.getElementById('tool-text').addEventListener('click', () => { currentTool = 'text'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); updateTextPanel(); render(); });
+
+  document.getElementById('text-input').addEventListener('input', (e) => {
+    const value = e.target.value.toUpperCase();
+    textSettings.text = value;
+    const selectedShapes = getSelectedShapes().filter(s => isTextShape(s));
+    if (selectedShapes.length > 0) {
+      pushHistory();
+      for (const s of selectedShapes) {
+        updateTextShape(s, value);
+      }
+      rebuildSolverAndParams();
+      initialSolve();
+      updateDOFDisplay();
+      renderLayers();
+      render();
+    }
+  });
+
+  document.getElementById('text-size').addEventListener('input', (e) => {
+    const value = parseFloat(e.target.value) || 100;
+    textSettings.fontSize = value;
+    const selectedShapes = getSelectedShapes().filter(s => isTextShape(s));
+    if (selectedShapes.length > 0) {
+      pushHistory();
+      for (const s of selectedShapes) {
+        updateTextShape(s, undefined, value);
+      }
+      rebuildSolverAndParams();
+      initialSolve();
+      updateDOFDisplay();
+      renderLayers();
+      render();
+    }
+  });
+
+  document.getElementById('text-weight').addEventListener('input', (e) => {
+    const value = parseFloat(e.target.value) || 0;
+    textSettings.fontWeight = value;
+    document.getElementById('text-weight-value').textContent = value;
+    const selectedShapes = getSelectedShapes().filter(s => isTextShape(s));
+    if (selectedShapes.length > 0) {
+      pushHistory();
+      for (const s of selectedShapes) {
+        updateTextShape(s, undefined, undefined, value);
+      }
+      rebuildSolverAndParams();
+      initialSolve();
+      updateDOFDisplay();
+      renderLayers();
+      render();
+    }
+  });
+
+  document.getElementById('text-spacing').addEventListener('input', (e) => {
+    const value = parseFloat(e.target.value) || 0;
+    textSettings.letterSpacing = value;
+    const selectedShapes = getSelectedShapes().filter(s => isTextShape(s));
+    if (selectedShapes.length > 0) {
+      pushHistory();
+      for (const s of selectedShapes) {
+        updateTextShape(s, undefined, undefined, undefined, value);
+      }
+      rebuildSolverAndParams();
+      initialSolve();
+      updateDOFDisplay();
+      renderLayers();
+      render();
+    }
+  });
+
+  document.getElementById('text-split').addEventListener('click', () => {
+    const selectedShapes = getSelectedShapes().filter(s => isTextShape(s));
+    if (selectedShapes.length === 0) {
+      showToast('Select a text shape to split', 'warning');
+      return;
+    }
+    pushHistory();
+    const newShapes = [];
+    const indicesToRemove = [];
+    for (const textShape of selectedShapes) {
+      const chars = splitTextIntoCharacters(textShape);
+      if (chars.length > 0) {
+        const idx = shapes.findIndex(s => s.id === textShape.id);
+        if (idx >= 0) indicesToRemove.push(idx);
+        newShapes.push(...chars);
+      }
+    }
+    indicesToRemove.sort((a, b) => b - a);
+    for (const idx of indicesToRemove) {
+      shapes.splice(idx, 1);
+    }
+    selectedIds.clear();
+    for (const s of newShapes) {
+      shapes.push(s);
+      selectedIds.add(s.id);
+    }
+    rebuildSolverAndParams();
+    initialSolve();
+    updateToolbar();
+    updateDOFDisplay();
+    updateTextPanel();
+    renderLayers();
+    renderConstraintList();
+    render();
+    showToast('Split into ' + newShapes.length + ' characters', 'success');
+  });
+
+  document.getElementById('text-on-path').addEventListener('click', () => {
+    const selectedShapes = getSelectedShapes();
+    const textShapes = selectedShapes.filter(s => isTextShape(s));
+    const pathShapes = selectedShapes.filter(s => !isTextShape(s) && !isComponentInstance(s));
+    
+    if (textShapes.length === 0) {
+      showToast('Select a text shape and a path shape', 'warning');
+      return;
+    }
+    if (pathShapes.length === 0) {
+      showToast('Select a path shape to put text on', 'warning');
+      return;
+    }
+    if (textShapes.length > 1) {
+      showToast('Select only one text shape', 'warning');
+      return;
+    }
+    
+    pushHistory();
+    const textShape = textShapes[0];
+    const pathShape = pathShapes[0];
+    const pathPts = worldPointsOf(pathShape);
+    
+    const success = putTextOnPath(textShape, pathPts);
+    if (success) {
+      rebuildSolverAndParams();
+      initialSolve();
+      updateToolbar();
+      updateDOFDisplay();
+      renderLayers();
+      render();
+      showToast('Text placed on path', 'success');
+    } else {
+      showToast('Failed to put text on path', 'error');
+    }
+  });
 
   document.getElementById('create-component').addEventListener('click', () => {
     if (editingComponentId === null) openCreateComponentDialog();
