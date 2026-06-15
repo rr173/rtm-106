@@ -123,6 +123,10 @@
 
   let shapeCounter = 0;
 
+  const PM = window.PathMotion;
+  let motionPathManager = new PM.MotionPathManager();
+  let selectedPathShapeIdForBinding = null;
+
   const SNAP_THRESHOLD = 8;
   let snapEnabled = true;
   let snapInfo = {
@@ -164,6 +168,32 @@
     };
   }
 
+  function getMotionPathState(shape, frame) {
+    if (isComponentInstance(shape)) return null;
+    if (shape.type === 'motion-path') return null;
+    const binding = motionPathManager.getBinding(shape.id);
+    if (!binding) return null;
+    const pathShape = getShapeById(binding.pathShapeId);
+    if (!pathShape || !pathShape.visible || pathShape.type !== 'motion-path') return null;
+    const pathPoints = worldPointsOf(pathShape);
+    if (pathPoints.length < 2) return null;
+    const useFrame = (frame !== undefined) ? frame : animationController.currentFrame;
+    const total = Math.max(1, animationController.getTotalFrames());
+    const animProps = animationController.getShapePropertiesAtFrame(shape.id, useFrame, {
+      tx: shape.transform.tx,
+      ty: shape.transform.ty,
+      rotation: shape.transform.rotation
+    });
+    const pathKfs = pathShape.motionPathData ? pathShape.motionPathData.speedKeyframes : null;
+    const bindingWithKfs = { ...binding, speedKeyframes: pathKfs || binding.speedKeyframes };
+    const state = motionPathManager.computeBindingState(
+      bindingWithKfs, pathPoints, useFrame, total,
+      animProps.tx, animProps.ty, animProps.rotation
+    );
+    state.binding = binding;
+    return state;
+  }
+
   function worldPointsOf(shape) {
     if (isComponentInstance(shape)) {
       const expanded = getInstanceExpandedShapes(shape);
@@ -173,7 +203,15 @@
       return allPts;
     }
     const t = shape.transform;
-    return applyTransform(shape.points, t.tx, t.ty, t.rotation, t.scaleX, t.scaleY);
+    let tx = t.tx, ty = t.ty, rot = t.rotation, sx = t.scaleX, sy = t.scaleY;
+
+    const mpState = getMotionPathState(shape);
+    if (mpState && (animationController.isPlaying || animationController.currentFrame > 0)) {
+      tx = mpState.tx;
+      ty = mpState.ty;
+      rot = mpState.rotation;
+    }
+    return applyTransform(shape.points, tx, ty, rot, sx, sy);
   }
 
   function worldHolesOf(shape) {
@@ -187,7 +225,15 @@
     }
     if (!shape.holes) return [];
     const t = shape.transform;
-    return shape.holes.map(h => applyTransform(h, t.tx, t.ty, t.rotation, t.scaleX, t.scaleY));
+    let tx = t.tx, ty = t.ty, rot = t.rotation, sx = t.scaleX, sy = t.scaleY;
+
+    const mpState = getMotionPathState(shape);
+    if (mpState && (animationController.isPlaying || animationController.currentFrame > 0)) {
+      tx = mpState.tx;
+      ty = mpState.ty;
+      rot = mpState.rotation;
+    }
+    return shape.holes.map(h => applyTransform(h, tx, ty, rot, sx, sy));
   }
 
   function getInstanceExpandedSingleShapes(instance) {
@@ -223,7 +269,8 @@
       constraints: JSON.parse(JSON.stringify(constraints.map(c => serializeConstraint(c)))),
       paramsData: JSON.parse(JSON.stringify(paramsData)),
       components: JSON.parse(JSON.stringify(components)),
-      nextComponentId: nextComponentId
+      nextComponentId: nextComponentId,
+      motionPathData: JSON.parse(JSON.stringify(motionPathManager.serialize()))
     };
   }
 
@@ -233,6 +280,16 @@
     paramsData = JSON.parse(JSON.stringify(state.paramsData));
     components = state.components ? JSON.parse(JSON.stringify(state.components)) : {};
     nextComponentId = state.nextComponentId || 1;
+    if (state.motionPathData) {
+      motionPathManager.deserialize(JSON.parse(JSON.stringify(state.motionPathData)));
+    } else {
+      motionPathManager = new PM.MotionPathManager();
+    }
+    for (const s of shapes) {
+      if (s.type === 'motion-path') {
+        motionPathManager.invalidatePathCache(s.id);
+      }
+    }
     rebuildSolverAndParams();
   }
 
@@ -369,6 +426,31 @@
       strokeWidth: 2,
       opacity: 1,
       transform: { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }
+    };
+  }
+
+  function createMotionPathShape(points) {
+    shapeCounter++;
+    return {
+      id: nextId++,
+      name: 'Path ' + shapeCounter,
+      type: 'motion-path',
+      visible: true,
+      locked: false,
+      points: points,
+      holes: [],
+      fill: 'rgba(142, 36, 170, 0.05)',
+      stroke: '#8e24aa',
+      strokeWidth: 2,
+      opacity: 1,
+      transform: { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 },
+      motionPathData: {
+        speedKeyframes: [
+          { pathT: 0, speedFactor: 1 },
+          { pathT: 1, speedFactor: 1 }
+        ],
+        closed: false
+      }
     };
   }
 
@@ -705,6 +787,7 @@
   function saveStateToStorage() {
     try {
       const animationData = animationController.serialize();
+      const motionPathData = motionPathManager.serialize();
       const state = {
         shapes,
         constraints: constraints.map(c => serializeConstraint(c)),
@@ -713,7 +796,8 @@
         nextId,
         nextComponentId,
         viewport,
-        animationData
+        animationData,
+        motionPathData
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch (e) {
@@ -741,8 +825,14 @@
       if (state.animationData) {
         animationController.deserialize(state.animationData);
       }
+      if (state.motionPathData) {
+        motionPathManager.deserialize(state.motionPathData);
+      }
       for (const s of shapes) {
         if (s.opacity === undefined) s.opacity = 1;
+        if (s.type === 'motion-path') {
+          motionPathManager.invalidatePathCache(s.id);
+        }
       }
       return true;
     } catch (e) {
@@ -1105,6 +1195,54 @@
       }
     }
 
+    if (currentTool === 'motionpath' && polygonPoints.length > 0) {
+      ctx.save();
+      ctx.strokeStyle = '#8e24aa';
+      ctx.lineWidth = 2 / viewport.scale;
+      ctx.setLineDash([6 / viewport.scale, 4 / viewport.scale]);
+      ctx.beginPath();
+      ctx.moveTo(polygonPoints[0].x, polygonPoints[0].y);
+      for (let i = 1; i < polygonPoints.length; i++) ctx.lineTo(polygonPoints[i].x, polygonPoints[i].y);
+      if (lastMouseWorld) ctx.lineTo(lastMouseWorld.x, lastMouseWorld.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+      for (const p of polygonPoints) {
+        ctx.save();
+        ctx.fillStyle = '#8e24aa';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 4 / viewport.scale, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    if ((animationController.isPlaying || animationController.currentFrame > 0) && editingComponentId === null) {
+      const useAnimation = true;
+      const cf = animationController.currentFrame;
+      for (const s of shapes) {
+        if (s.type === 'motion-path') continue;
+        if (!s.visible || s.locked) continue;
+        const binding = motionPathManager.getBinding(s.id);
+        if (!binding) continue;
+        const pathShape = getShapeById(binding.pathShapeId);
+        if (!pathShape || !pathShape.visible) continue;
+        const animProps = getAnimatedShapeProps(s, cf);
+        if (animProps._pathMotionState) {
+          const ps = animProps._pathMotionState;
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(ps.point.x, ps.point.y, 5 / viewport.scale, 0, Math.PI * 2);
+          ctx.fillStyle = '#ff5722';
+          ctx.fill();
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = 1.5 / viewport.scale;
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+    }
+
     if (isMarquee && marqueeStart && marqueeEnd) {
       const x = Math.min(marqueeStart.x, marqueeEnd.x), y = Math.min(marqueeStart.y, marqueeEnd.y);
       const w3 = Math.abs(marqueeEnd.x - marqueeStart.x), h3 = Math.abs(marqueeEnd.y - marqueeStart.y);
@@ -1388,7 +1526,7 @@
     const baseFill = shape.fill;
     const baseOpacity = shape.opacity !== undefined ? shape.opacity : 1;
 
-    const animProps = animationController.getShapePropertiesAtFrame(shape.id, frame, {
+    let animProps = animationController.getShapePropertiesAtFrame(shape.id, frame, {
       tx: baseTransform.tx,
       ty: baseTransform.ty,
       rotation: baseTransform.rotation,
@@ -1397,6 +1535,32 @@
       fill: baseFill,
       opacity: baseOpacity
     });
+
+    if (shape.type !== 'motion-path' && !isComponentInstance(shape)) {
+      const binding = motionPathManager.getBinding(shape.id);
+      if (binding) {
+        const pathShape = getShapeById(binding.pathShapeId);
+        if (pathShape && pathShape.visible && pathShape.type === 'motion-path') {
+          const pathPts = worldPointsOf(pathShape);
+          if (pathPts.length >= 2) {
+            const total = Math.max(1, animationController.getTotalFrames());
+            const pathKfs = pathShape.motionPathData ? pathShape.motionPathData.speedKeyframes : null;
+            const bindingWithKfs = { ...binding, speedKeyframes: pathKfs || binding.speedKeyframes };
+            const mpState = motionPathManager.computeBindingState(
+              bindingWithKfs, pathPts, frame, total,
+              animProps.tx, animProps.ty, animProps.rotation
+            );
+            animProps = {
+              ...animProps,
+              tx: mpState.tx,
+              ty: mpState.ty,
+              rotation: mpState.rotation,
+              _pathMotionState: mpState
+            };
+          }
+        }
+      }
+    }
 
     return animProps;
   }
@@ -1430,9 +1594,45 @@
     return shape.holes.map(h => applyTransform(h, props.tx, props.ty, props.rotation, props.scaleX, props.scaleY));
   }
 
+  function drawOpenPath(points) {
+    ctx.beginPath();
+    if (points.length > 0) {
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+    }
+  }
+
   function renderShape(s) {
     const currentFrame = animationController.currentFrame;
     const useAnimation = animationController.isPlaying || animationController.currentFrame > 0;
+
+    if (s.type === 'motion-path') {
+      const pts = worldPointsOf(s);
+      const opacity = s.opacity !== undefined ? s.opacity : 1;
+      ctx.save();
+      ctx.globalAlpha = opacity;
+      drawOpenPath(pts);
+      ctx.lineWidth = (s.strokeWidth || 2) / viewport.scale;
+      ctx.strokeStyle = s.stroke || '#8e24aa';
+      ctx.setLineDash([6 / viewport.scale, 4 / viewport.scale]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      if (s.fill) {
+        ctx.fillStyle = s.fill;
+        drawOpenPath(pts);
+        ctx.globalAlpha = opacity * 0.08;
+        ctx.fill();
+      }
+      for (let i = 0; i < pts.length; i++) {
+        ctx.beginPath();
+        ctx.arc(pts[i].x, pts[i].y, 3 / viewport.scale, 0, Math.PI * 2);
+        ctx.fillStyle = '#8e24aa';
+        ctx.globalAlpha = opacity;
+        ctx.fill();
+      }
+      ctx.restore();
+      return;
+    }
 
     if (isComponentInstance(s)) {
       if (editingComponentId !== null) {
@@ -1446,13 +1646,13 @@
         const holes = es.holes || [];
         ctx.save();
         if (useAnimation) {
-          const animProps = animationController.getShapePropertiesAtFrame(s.id, currentFrame, { opacity: 1 });
+          const animProps = getAnimatedShapeProps(s, currentFrame);
           ctx.globalAlpha = animProps.opacity;
         }
         drawPolygonPath(pts, holes);
         let fillColor = es.fill;
         if (useAnimation) {
-          const animProps = animationController.getShapePropertiesAtFrame(s.id, currentFrame, { fill: es.fill });
+          const animProps = getAnimatedShapeProps(s, currentFrame);
           fillColor = animProps.fill;
         }
         ctx.fillStyle = fillColor;
@@ -1463,12 +1663,12 @@
         ctx.restore();
       }
     } else {
-      let pts = worldPointsOf(s);
-      let holes = worldHolesOf(s);
+      let pts = useAnimation ? getAnimatedWorldPoints(s, currentFrame) : worldPointsOf(s);
+      let holes = useAnimation ? getAnimatedWorldHoles(s, currentFrame) : worldHolesOf(s);
       let fillColor = s.fill;
       let opacity = s.opacity !== undefined ? s.opacity : 1;
 
-      if (useAnimation && isNodeEditMode) {
+      if (useAnimation) {
         const animProps = getAnimatedShapeProps(s, currentFrame);
         fillColor = animProps.fill;
         opacity = animProps.opacity;
@@ -1649,6 +1849,14 @@
         const badge = document.createElement('span');
         badge.className = 'layer-badge';
         badge.textContent = 'C';
+        nameWrapper.appendChild(badge);
+      }
+      if (s.type === 'motion-path') {
+        const badge = document.createElement('span');
+        badge.className = 'layer-badge';
+        badge.textContent = 'P';
+        badge.style.background = '#8e24aa';
+        badge.style.color = '#fff';
         nameWrapper.appendChild(badge);
       }
       nameWrapper.appendChild(nameEl);
@@ -2872,6 +3080,93 @@
     }
   }
 
+  function updateMotionPathPanel() {
+    const panel = document.getElementById('motion-path-panel');
+    if (!panel) return;
+
+    const selectedShapes = getSelectedShapes();
+    const pathShapes = selectedShapes.filter(s => s.type === 'motion-path');
+    const nonPathShapes = selectedShapes.filter(s => s.type !== 'motion-path' && !isComponentInstance(s));
+
+    if (pathShapes.length === 0 && nonPathShapes.length === 0) {
+      panel.classList.add('hidden');
+      return;
+    }
+    panel.classList.remove('hidden');
+
+    const bindSection = document.getElementById('mp-bind-section');
+    const pathSection = document.getElementById('mp-path-section');
+
+    if (nonPathShapes.length > 0) {
+      bindSection.classList.remove('hidden');
+      const target = nonPathShapes[0];
+      const existingBinding = motionPathManager.getBinding(target.id);
+
+      const pathSelect = document.getElementById('mp-path-select');
+      const allPaths = shapes.filter(s => s.type === 'motion-path');
+      pathSelect.innerHTML = '<option value="">-- 选择运动轨迹 --</option>';
+      for (const ps of allPaths) {
+        const opt = document.createElement('option');
+        opt.value = ps.id;
+        opt.textContent = ps.name || ('Path ' + ps.id);
+        if (existingBinding && existingBinding.pathShapeId === ps.id) {
+          opt.selected = true;
+        }
+        pathSelect.appendChild(opt);
+      }
+
+      document.getElementById('mp-offset').value = existingBinding ? Math.round(existingBinding.startOffset * 100) : 0;
+      document.getElementById('mp-offset-value').textContent = (existingBinding ? Math.round(existingBinding.startOffset * 100) : 0) + '%';
+      document.getElementById('mp-orient').checked = existingBinding ? existingBinding.autoOrient : false;
+      document.getElementById('mp-loop').value = existingBinding ? existingBinding.loopMode : 'loop';
+    } else {
+      bindSection.classList.add('hidden');
+    }
+
+    if (pathShapes.length > 0) {
+      pathSection.classList.remove('hidden');
+      const pathShape = pathShapes[0];
+      selectedPathShapeIdForBinding = pathShape.id;
+      const speedListEl = document.getElementById('mp-speed-list');
+      speedListEl.innerHTML = '';
+      const kfs = pathShape.motionPathData && pathShape.motionPathData.speedKeyframes
+        ? [...pathShape.motionPathData.speedKeyframes].sort((a, b) => a.pathT - b.pathT)
+        : [{ pathT: 0, speedFactor: 1 }, { pathT: 1, speedFactor: 1 }];
+      for (let i = 0; i < kfs.length; i++) {
+        const kf = kfs[i];
+        const item = document.createElement('div');
+        item.className = 'speed-kf-item';
+        item.innerHTML = `
+          <span class="kf-label">T${i}</span>
+          <input type="number" min="0" max="1" step="0.01" value="${kf.pathT}" class="kf-t" style="width:60px">
+          <input type="number" min="0.1" max="10" step="0.1" value="${kf.speedFactor}" class="kf-s" style="width:60px">
+          <button class="kf-del" ${kfs.length <= 2 ? 'disabled' : ''} style="padding:2px 6px">×</button>
+        `;
+        speedListEl.appendChild(item);
+        item.querySelector('.kf-t').addEventListener('change', (e) => {
+          pushHistory();
+          kf.pathT = Math.max(0, Math.min(1, parseFloat(e.target.value) || 0));
+          updateMotionPathPanel();
+        });
+        item.querySelector('.kf-s').addEventListener('change', (e) => {
+          pushHistory();
+          kf.speedFactor = Math.max(0.1, parseFloat(e.target.value) || 1);
+          motionPathManager.invalidatePathCache(pathShape.id);
+        });
+        item.querySelector('.kf-del').addEventListener('click', () => {
+          if (kfs.length <= 2) return;
+          pushHistory();
+          kfs.splice(i, 1);
+          pathShape.motionPathData.speedKeyframes = kfs;
+          motionPathManager.invalidatePathCache(pathShape.id);
+          updateMotionPathPanel();
+        });
+      }
+    } else {
+      pathSection.classList.add('hidden');
+    }
+  }
+
   function getShapesBounds(shapeList) {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const s of shapeList) {
@@ -3475,6 +3770,7 @@
           selectedVertex = null;
           updateToolbar();
           updateTextPanel();
+          updateMotionPathPanel();
           renderLayers();
           render();
         } else {
@@ -3482,6 +3778,7 @@
           selectedVertex = null;
           updateToolbar();
           updateTextPanel();
+          updateMotionPathPanel();
           renderLayers();
           render();
         }
@@ -3500,6 +3797,7 @@
               selectedIds.add(shapeHit.id);
             }
           }
+          updateMotionPathPanel();
           isDraggingShape = true;
           dragStart = { x: world.x, y: world.y };
           dragOriginalWorldPts = [];
@@ -3534,6 +3832,17 @@
         drawEnd = { ...world };
         return;
       } else if (currentTool === 'polygon') {
+        if (polygonPoints.length === 0) {
+          polygonPoints = [{ ...world }];
+        } else {
+          const last = polygonPoints[polygonPoints.length - 1];
+          if (dist(last, world) > 5 / viewport.scale) {
+            polygonPoints.push({ ...world });
+          }
+        }
+        render();
+        return;
+      } else if (currentTool === 'motionpath') {
         if (polygonPoints.length === 0) {
           polygonPoints = [{ ...world }];
         } else {
@@ -3903,6 +4212,7 @@
       canvas.style.cursor = 'default';
       updateToolbar();
       updateTextPanel();
+      updateMotionPathPanel();
       renderLayers();
       render();
       return;
@@ -3911,7 +4221,23 @@
     if (isDraggingVertex) {
       isDraggingVertex = false;
       canvas.style.cursor = 'crosshair';
+      if (selectedVertex) {
+        const shapeId = selectedVertex.shapeId;
+        const s = getShapeById(shapeId);
+        if (s && s.type === 'motion-path') {
+          motionPathManager.invalidatePathCache(shapeId);
+        } else {
+          for (const ps of shapes) {
+            if (ps.type === 'motion-path') motionPathManager.invalidatePathCache(ps.id);
+          }
+        }
+      } else {
+        for (const ps of shapes) {
+          if (ps.type === 'motion-path') motionPathManager.invalidatePathCache(ps.id);
+        }
+      }
       selectedVertex = null;
+      scheduleSave();
       render();
       return;
     }
@@ -3921,7 +4247,12 @@
       dragStart = null;
       dragOriginalWorldPts = [];
       canvas.style.cursor = 'default';
+      for (const ps of shapes) {
+        if (ps.type === 'motion-path') motionPathManager.invalidatePathCache(ps.id);
+      }
       updateToolbar();
+      updateMotionPathPanel();
+      scheduleSave();
       render();
       return;
     }
@@ -3932,6 +4263,11 @@
       transformStart = null;
       transformOriginalData = [];
       canvas.style.cursor = 'default';
+      for (const ps of shapes) {
+        if (ps.type === 'motion-path') motionPathManager.invalidatePathCache(ps.id);
+      }
+      updateMotionPathPanel();
+      scheduleSave();
       render();
       return;
     }
@@ -3985,6 +4321,29 @@
         selectedIds.add(shape.id);
       }
       polygonPoints = [];
+      rebuildSolverAndParams();
+      initialSolve();
+      updateToolbar();
+      updateDOFDisplay();
+      renderLayers();
+      renderConstraintList();
+      render();
+      return;
+    }
+
+    if (currentTool === 'motionpath' && polygonPoints.length >= 2) {
+      pushHistory();
+      const pts = polygonPoints.slice();
+      if (pts.length >= 2) {
+        const shape = createMotionPathShape(pts);
+        shapes.push(shape);
+        selectedIds.clear();
+        selectedIds.add(shape.id);
+        selectedPathShapeIdForBinding = shape.id;
+        updateMotionPathPanel();
+      }
+      polygonPoints = [];
+      currentTool = 'select';
       rebuildSolverAndParams();
       initialSolve();
       updateToolbar();
@@ -4093,7 +4452,9 @@
           const idx = shapes.findIndex(s => s.id === id);
           if (idx >= 0) shapes.splice(idx, 1);
           animationController.removeShapeAnimation(id);
+          motionPathManager.removeShapeBindings(id);
         }
+        motionPathManager.cleanupBindings(shapes.map(s => s.id));
         constraints = constraints.filter(c => {
           const rps = c.getReferencedPoints();
           for (const rp of rps) {
@@ -4106,6 +4467,8 @@
         rebuildSolverAndParams();
         initialSolve();
         updateToolbar();
+        updateTextPanel();
+        updateMotionPathPanel();
         updateDOFDisplay();
         renderLayers();
         renderConstraintList();
@@ -4119,9 +4482,10 @@
     else if (key === 'r') { currentTool = 'rect'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); render(); }
     else if (key === 'c') { currentTool = 'circle'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); render(); }
     else if (key === 'p') { currentTool = 'polygon'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; polygonPoints = []; updateToolbar(); render(); }
+    else if (key === 'm') { currentTool = 'motionpath'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; polygonPoints = []; updateToolbar(); render(); }
     else if (key === 't') { currentTool = 'text'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); updateTextPanel(); render(); }
     else if (key === 'n') { isNodeEditMode = !isNodeEditMode; if (!isNodeEditMode) selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); updateDOFDisplay(); render(); showToast(isNodeEditMode ? 'Node Edit Mode ON' : 'Node Edit Mode OFF'); }
-    else if (key === 'a') { selectedIds.clear(); for (const s of shapes) { if (s.visible && !s.locked) selectedIds.add(s.id); } updateToolbar(); updateTextPanel(); renderLayers(); render(); }
+    else if (key === 'a') { selectedIds.clear(); for (const s of shapes) { if (s.visible && !s.locked) selectedIds.add(s.id); } updateToolbar(); updateTextPanel(); updateMotionPathPanel(); renderLayers(); render(); }
     else if (key === ';') { snapEnabled = !snapEnabled; showToast(snapEnabled ? 'Snap ON' : 'Snap OFF'); render(); }
     else if (key === 'g') { if (editingComponentId === null) openCreateComponentDialog(); }
   });
@@ -4138,6 +4502,7 @@
   document.getElementById('tool-rect').addEventListener('click', () => { currentTool = 'rect'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); render(); });
   document.getElementById('tool-circle').addEventListener('click', () => { currentTool = 'circle'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); render(); });
   document.getElementById('tool-polygon').addEventListener('click', () => { currentTool = 'polygon'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; polygonPoints = []; updateToolbar(); render(); });
+  document.getElementById('tool-motionpath').addEventListener('click', () => { currentTool = 'motionpath'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; polygonPoints = []; updateToolbar(); render(); });
   document.getElementById('tool-text').addEventListener('click', () => { currentTool = 'text'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); updateTextPanel(); render(); });
 
   document.getElementById('text-input').addEventListener('input', (e) => {
@@ -4328,6 +4693,95 @@
   });
   overrideStrokeColorEl.addEventListener('input', () => {
     if (tempOverrides) tempOverrides.stroke = overrideStrokeColorEl.value;
+  });
+
+  const mpCloseBtn = document.getElementById('motion-path-close');
+  if (mpCloseBtn) {
+    mpCloseBtn.addEventListener('click', () => {
+      document.getElementById('motion-path-panel').classList.add('hidden');
+    });
+  }
+
+  document.getElementById('mp-path-select').addEventListener('change', (e) => {
+    const selectedShapes = getSelectedShapes();
+    const targets = selectedShapes.filter(s => s.type !== 'motion-path' && !isComponentInstance(s));
+    if (targets.length === 0) return;
+    pushHistory();
+    const pathId = e.target.value ? parseInt(e.target.value, 10) : null;
+    for (const target of targets) {
+      if (pathId) {
+        const existing = motionPathManager.getBinding(target.id);
+        motionPathManager.setBinding(target.id, {
+          pathShapeId: pathId,
+          startOffset: existing ? existing.startOffset : 0,
+          autoOrient: existing ? existing.autoOrient : false,
+          loopMode: existing ? existing.loopMode : 'loop'
+        });
+      } else {
+        motionPathManager.removeBinding(target.id);
+      }
+    }
+    scheduleSave();
+    render();
+  });
+
+  document.getElementById('mp-offset').addEventListener('input', (e) => {
+    const selectedShapes = getSelectedShapes();
+    const targets = selectedShapes.filter(s => s.type !== 'motion-path' && !isComponentInstance(s));
+    document.getElementById('mp-offset-value').textContent = e.target.value + '%';
+    if (targets.length === 0) return;
+    const offsetVal = (parseFloat(e.target.value) || 0) / 100;
+    for (const target of targets) {
+      const b = motionPathManager.getBinding(target.id);
+      if (b) b.startOffset = offsetVal;
+    }
+    scheduleSave();
+    render();
+  });
+
+  document.getElementById('mp-orient').addEventListener('change', (e) => {
+    const selectedShapes = getSelectedShapes();
+    const targets = selectedShapes.filter(s => s.type !== 'motion-path' && !isComponentInstance(s));
+    if (targets.length === 0) return;
+    pushHistory();
+    for (const target of targets) {
+      const b = motionPathManager.getBinding(target.id);
+      if (b) b.autoOrient = e.target.checked;
+    }
+    scheduleSave();
+    render();
+  });
+
+  document.getElementById('mp-loop').addEventListener('change', (e) => {
+    const selectedShapes = getSelectedShapes();
+    const targets = selectedShapes.filter(s => s.type !== 'motion-path' && !isComponentInstance(s));
+    if (targets.length === 0) return;
+    pushHistory();
+    for (const target of targets) {
+      const b = motionPathManager.getBinding(target.id);
+      if (b) b.loopMode = e.target.value;
+    }
+    scheduleSave();
+    render();
+  });
+
+  document.getElementById('mp-add-kf').addEventListener('click', () => {
+    const selectedShapes = getSelectedShapes();
+    const pathShapes = selectedShapes.filter(s => s.type === 'motion-path');
+    if (pathShapes.length === 0) return;
+    pushHistory();
+    const ps = pathShapes[0];
+    if (!ps.motionPathData) ps.motionPathData = {};
+    if (!ps.motionPathData.speedKeyframes) ps.motionPathData.speedKeyframes = [{pathT:0,speedFactor:1},{pathT:1,speedFactor:1}];
+    let newT = 0.5;
+    if (ps.motionPathData.speedKeyframes.length >= 2) {
+      const sorted = [...ps.motionPathData.speedKeyframes].sort((a,b)=>a.pathT-b.pathT);
+      newT = (sorted[0].pathT + sorted[sorted.length-1].pathT) / 2;
+    }
+    ps.motionPathData.speedKeyframes.push({ pathT: newT, speedFactor: 1 });
+    motionPathManager.invalidatePathCache(ps.id);
+    updateMotionPathPanel();
+    render();
   });
 
   canvas.addEventListener('dragover', (e) => {
@@ -5213,12 +5667,8 @@
       animationController.goToFrame(i);
       for (const s of shapes) {
         if (!s.visible) continue;
-        let pts;
-        if (isComponentInstance(s)) {
-          pts = getAnimatedWorldPoints(s, i);
-        } else {
-          pts = worldPointsOf(s);
-        }
+        if (s.type === 'motion-path') continue;
+        let pts = getAnimatedWorldPoints(s, i);
         for (const p of pts) {
           minX = Math.min(minX, p.x);
           minY = Math.min(minY, p.y);
@@ -5249,9 +5699,11 @@
 
       let pts, holes, fillColor, opacity;
 
+      if (s.type === 'motion-path') continue;
+
       if (isComponentInstance(s)) {
         const expanded = getInstanceExpandedShapes(s);
-        const animProps = animationController.getShapePropertiesAtFrame(s.id, frame, { fill: '#ccc', opacity: 1 });
+        const animProps = getAnimatedShapeProps(s, frame);
         for (const es of expanded) {
           const ePts = es.points;
           const eHoles = es.holes || [];
@@ -5276,10 +5728,11 @@
         continue;
       }
 
-      pts = worldPointsOf(s);
-      holes = worldHolesOf(s);
-      fillColor = s.fill;
-      opacity = s.opacity !== undefined ? s.opacity : 1;
+      pts = getAnimatedWorldPoints(s, frame);
+      holes = getAnimatedWorldHoles(s, frame);
+      const animProps = getAnimatedShapeProps(s, frame);
+      fillColor = animProps.fill;
+      opacity = animProps.opacity;
 
       ctx.save();
       ctx.globalAlpha = opacity;
@@ -6809,6 +7262,7 @@
     initialSolve();
     updateToolbar();
     updateFillPanel();
+    updateMotionPathPanel();
     updateDOFDisplay();
     renderLayers();
     renderConstraintList();
@@ -6818,6 +7272,7 @@
   } else {
     initDemo();
     updateFillPanel();
+    updateMotionPathPanel();
   }
 
   initTimeline();

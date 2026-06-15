@@ -23,6 +23,10 @@
   <button id="tool-text" class="tool-btn" title="Text (T)">
     <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M5 4v3h5.5v12h3V7H19V4z"/></svg>
   </button>
+  <button id="tool-motionpath" class="tool-btn" title="Motion Path (M)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3,2" d="M4 12c4-8 12 8 16 0"/></svg>
+    <span>Path</span>
+  </button>
   <div class="sep"></div>
   <button id="op-union" class="op-btn" disabled title="Union">
     <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="9" cy="12" r="6" fill="currentColor" opacity="0.5"/><circle cx="15" cy="12" r="6" fill="currentColor" opacity="0.5"/></svg>
@@ -278,6 +282,49 @@
   <div class="params-hint">Double-click constraint icon to bind parameter</div>
 </div>
 
+<div id="motion-path-panel" class="hidden">
+  <div class="panel-header">
+    <span>Motion Path</span>
+    <button id="motion-path-close" class="mini-btn" title="Close">×</button>
+  </div>
+  <div id="mp-bind-section">
+    <div id="motion-path-empty" class="empty-list">Select a shape and a motion path to bind</div>
+    <div id="motion-path-bind-form" class="motion-form">
+      <div class="form-row">
+        <label>Bind to Path:</label>
+        <select id="mp-path-select"></select>
+      </div>
+      <div class="form-row">
+        <label>Start Offset:</label>
+        <input type="range" id="mp-offset" min="0" max="100" step="1" value="0" style="flex:1" />
+        <span id="mp-offset-value" class="unit">0%</span>
+      </div>
+      <div class="form-row">
+        <label>Loop Mode:</label>
+        <select id="mp-loop">
+          <option value="once">Once</option>
+          <option value="loop">Loop</option>
+          <option value="pingpong">Ping-Pong</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Auto Orient:</label>
+        <input type="checkbox" id="mp-orient" />
+      </div>
+    </div>
+  </div>
+  <div id="mp-path-section" class="hidden">
+    <div class="panel-header" style="border-top:1px solid #eee">
+      <span>Speed Keyframes</span>
+    </div>
+    <div id="mp-speed-list" class="speed-kf-list"></div>
+    <div class="form-row">
+      <button id="mp-add-kf" class="mini-btn fill-btn">+ Add Keyframe</button>
+    </div>
+  </div>
+  <div class="params-hint">Path tool: click to add waypoints, double-click to finish (M key)</div>
+</div>
+
 <div id="node-edit-indicator" class="hidden">
   <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
   <span>Node Edit Mode (N to toggle)</span>
@@ -495,6 +542,7 @@
 
 <script src="geometry.js"></script>
 <script src="constraint-solver.js"></script>
+<script src="path-motion.js"></script>
 <script src="animation.js"></script>
 <script src="glyphs.js"></script>
 <script src="app.js"></script>
