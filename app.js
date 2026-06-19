@@ -296,7 +296,7 @@
   }
 
   function getMasksOfShape(shapeId) {
-    return shapes.filter(s => s.maskOf === shapeId && s.visible);
+    return shapes.filter(s => s.maskOf === shapeId);
   }
 
   function getMaskedShape(maskShapeId) {
@@ -338,6 +338,7 @@
     maskShape.maskOf = maskedShapeId;
     maskShape.maskType = 'clip';
     maskShape._originalVisible = maskShape.visible !== false;
+    maskShape.visible = false;
 
     const maskIdx = shapes.findIndex(s => s.id === maskShapeId);
     const maskedIdx = shapes.findIndex(s => s.id === maskedShapeId);
@@ -359,6 +360,7 @@
     maskShape.maskOf = maskedShapeId;
     maskShape.maskType = 'alpha';
     maskShape._originalVisible = maskShape.visible !== false;
+    maskShape.visible = false;
 
     const maskIdx = shapes.findIndex(s => s.id === maskShapeId);
     const maskedIdx = shapes.findIndex(s => s.id === maskedShapeId);
@@ -1003,7 +1005,7 @@
     
     for (let i = shapes.length - 1; i >= 0; i--) {
       const s = shapes[i];
-      if (!s.visible || s.locked) continue;
+      if (s.locked) continue;
       if (!isMaskShape(s)) continue;
       const wp = worldPointsOf(s);
       if (!pointInPolygonOrOnEdge(pt, wp)) continue;
@@ -1287,7 +1289,7 @@
       }
     } else {
       for (const s of shapes) {
-        if (s.visible) renderShape(s);
+        if (s.visible || isMaskShape(s)) renderShape(s);
       }
 
       renderConstraintIcons();
@@ -1303,7 +1305,7 @@
     } else {
       for (const id of selectedIds) {
         const s = getShapeById(id);
-        if (s && s.visible && !s.locked) renderSelection(s);
+        if (s && !s.locked && (s.visible || isMaskShape(s))) renderSelection(s);
       }
     }
 
@@ -1848,16 +1850,27 @@
       const maskPts = useAnimation ? getAnimatedWorldPoints(mask, currentFrame) : worldPointsOf(mask);
       const maskHoles = useAnimation ? getAnimatedWorldHoles(mask, currentFrame) : worldHolesOf(mask);
 
+      const maskFill = ensureFillStructure(mask.fill);
+      const maskFillColor = getFillDisplayColor(maskFill);
+
       if (i === 0) {
         mctx.save();
         mctx.beginPath();
-        for (const p of maskPts) {
-          const idx = maskPts.indexOf(p);
-          if (idx === 0) mctx.moveTo(p.x, p.y);
-          else mctx.lineTo(p.x, p.y);
+        if (maskPts.length > 0) {
+          mctx.moveTo(maskPts[0].x, maskPts[0].y);
+          for (let j = 1; j < maskPts.length; j++) mctx.lineTo(maskPts[j].x, maskPts[j].y);
+          mctx.closePath();
         }
-        mctx.closePath();
-        mctx.fillStyle = '#fff';
+        if (maskHoles) {
+          for (const hole of maskHoles) {
+            if (hole.length > 0) {
+              mctx.moveTo(hole[0].x, hole[0].y);
+              for (let j = 1; j < hole.length; j++) mctx.lineTo(hole[j].x, hole[j].y);
+              mctx.closePath();
+            }
+          }
+        }
+        mctx.fillStyle = maskFillColor;
         mctx.globalAlpha = 1;
         mctx.fill('evenodd');
         mctx.restore();
@@ -1865,13 +1878,21 @@
         mctx.globalCompositeOperation = 'destination-in';
         mctx.save();
         mctx.beginPath();
-        for (const p of maskPts) {
-          const idx = maskPts.indexOf(p);
-          if (idx === 0) mctx.moveTo(p.x, p.y);
-          else mctx.lineTo(p.x, p.y);
+        if (maskPts.length > 0) {
+          mctx.moveTo(maskPts[0].x, maskPts[0].y);
+          for (let j = 1; j < maskPts.length; j++) mctx.lineTo(maskPts[j].x, maskPts[j].y);
+          mctx.closePath();
         }
-        mctx.closePath();
-        mctx.fillStyle = '#fff';
+        if (maskHoles) {
+          for (const hole of maskHoles) {
+            if (hole.length > 0) {
+              mctx.moveTo(hole[0].x, hole[0].y);
+              for (let j = 1; j < hole.length; j++) mctx.lineTo(hole[j].x, hole[j].y);
+              mctx.closePath();
+            }
+          }
+        }
+        mctx.fillStyle = maskFillColor;
         mctx.fill('evenodd');
         mctx.restore();
         mctx.globalCompositeOperation = 'source-over';
@@ -1884,8 +1905,11 @@
     const shapeData = shapeImgData.data;
 
     for (let i = 0; i < shapeData.length; i += 4) {
-      const maskAlpha = maskData[i] / 255;
-      shapeData[i + 3] = shapeData[i + 3] * maskAlpha;
+      const r = maskData[i];
+      const g = maskData[i + 1];
+      const b = maskData[i + 2];
+      const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+      shapeData[i + 3] = shapeData[i + 3] * luminance;
     }
 
     octx.putImageData(shapeImgData, 0, 0);
@@ -5349,8 +5373,11 @@
       e.preventDefault();
       const sel = getSelectedShapes();
       if (sel.length === 2 && !sel.some(s => isMaskShape(s))) {
-        const maskShape = sel[0];
-        const maskedShape = sel[1];
+        const sorted = sel.slice().sort((a, b) => {
+          return shapes.findIndex(s => s.id === a.id) - shapes.findIndex(s => s.id === b.id);
+        });
+        const maskedShape = sorted[0];
+        const maskShape = sorted[1];
         pushHistory();
         const success = createClipMask(maskedShape.id, maskShape.id);
         if (success) {
@@ -5373,8 +5400,11 @@
       e.preventDefault();
       const sel = getSelectedShapes();
       if (sel.length === 2 && !sel.some(s => isMaskShape(s))) {
-        const maskShape = sel[0];
-        const maskedShape = sel[1];
+        const sorted = sel.slice().sort((a, b) => {
+          return shapes.findIndex(s => s.id === a.id) - shapes.findIndex(s => s.id === b.id);
+        });
+        const maskedShape = sorted[0];
+        const maskShape = sorted[1];
         pushHistory();
         const success = createAlphaMask(maskedShape.id, maskShape.id);
         if (success) {
@@ -6027,8 +6057,11 @@
   document.getElementById('mask-clip').addEventListener('click', () => {
     const sel = getSelectedShapes();
     if (sel.length !== 2) return;
-    const maskShape = sel[0];
-    const maskedShape = sel[1];
+    const sorted = sel.slice().sort((a, b) => {
+      return shapes.findIndex(s => s.id === a.id) - shapes.findIndex(s => s.id === b.id);
+    });
+    const maskedShape = sorted[0];
+    const maskShape = sorted[1];
     pushHistory();
     const success = createClipMask(maskedShape.id, maskShape.id);
     if (success) {
@@ -6050,8 +6083,11 @@
   document.getElementById('mask-alpha').addEventListener('click', () => {
     const sel = getSelectedShapes();
     if (sel.length !== 2) return;
-    const maskShape = sel[0];
-    const maskedShape = sel[1];
+    const sorted = sel.slice().sort((a, b) => {
+      return shapes.findIndex(s => s.id === a.id) - shapes.findIndex(s => s.id === b.id);
+    });
+    const maskedShape = sorted[0];
+    const maskShape = sorted[1];
     pushHistory();
     const success = createAlphaMask(maskedShape.id, maskShape.id);
     if (success) {
