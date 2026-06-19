@@ -1434,7 +1434,8 @@
       stroke: '#000',
       strokeWidth: 2,
       opacity: 1,
-      transform: { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }
+      transform: { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 },
+      effects: []
     };
   }
 
@@ -1453,6 +1454,7 @@
       strokeWidth: 2,
       opacity: 1,
       transform: { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 },
+      effects: [],
       motionPathData: {
         speedKeyframes: [
           { pathT: 0, speedFactor: 1 },
@@ -7822,6 +7824,81 @@
         group.appendChild(row);
       }
 
+      if (shape.effects && shape.effects.length > 0) {
+        for (const effect of shape.effects) {
+          const effectLabel = EFFECT_LABELS ? EFFECT_LABELS[effect.type] : effect.type;
+          for (const paramName in effect.params) {
+            const trackName = 'effect_' + effect.id + '_' + paramName;
+            const track = shapeAnim.getPropertyTrack(trackName);
+            if (!track || track.keyframes.length === 0) continue;
+
+            const row = document.createElement('div');
+            row.className = 'track-row';
+            row.dataset.shapeId = shapeId;
+            row.dataset.prop = trackName;
+
+            const label = document.createElement('div');
+            label.className = 'track-label';
+            label.textContent = effectLabel + ' · ' + paramName;
+            row.appendChild(label);
+
+            const trackCanvas = document.createElement('div');
+            trackCanvas.className = 'track-canvas';
+            trackCanvas.dataset.shapeId = shapeId;
+            trackCanvas.dataset.prop = trackName;
+
+            const canvasEl = document.createElement('canvas');
+            trackCanvas.appendChild(canvasEl);
+
+            for (const kf of track.keyframes) {
+              const dot = document.createElement('div');
+              dot.className = 'keyframe-dot';
+              dot.dataset.shapeId = shapeId;
+              dot.dataset.prop = trackName;
+              dot.dataset.frame = kf.frame;
+              const totalFrames = animationController.getTotalFrames();
+              dot.style.left = ((kf.frame / totalFrames) * 100) + '%';
+
+              if (selectedKeyframeShapeId === shapeId &&
+                  selectedKeyframeProp === trackName &&
+                  selectedKeyframeFrame === kf.frame) {
+                dot.classList.add('selected');
+              }
+
+              dot.addEventListener('click', (e) => {
+                e.stopPropagation();
+                selectKeyframe(shapeId, trackName, kf.frame);
+              });
+
+              dot.addEventListener('dblclick', (e) => {
+                e.stopPropagation();
+                if (confirm('Delete this keyframe?')) {
+                  animationController.removeKeyframe(shapeId, trackName, kf.frame);
+                  selectedKeyframeShapeId = null;
+                  selectedKeyframeProp = null;
+                  selectedKeyframeFrame = null;
+                  renderTimelineTracks();
+                  scheduleSave();
+                }
+              });
+
+              trackCanvas.appendChild(dot);
+            }
+
+            trackCanvas.addEventListener('click', (e) => {
+              const rect = trackCanvas.getBoundingClientRect();
+              const x = e.clientX - rect.left;
+              const ratio = x / rect.width;
+              const frame = Math.round(ratio * animationController.getTotalFrames());
+              animationController.goToFrame(frame);
+            });
+
+            row.appendChild(trackCanvas);
+            group.appendChild(row);
+          }
+        }
+      }
+
       container.appendChild(group);
     }
   }
@@ -10690,4 +10767,1243 @@
     }
     return result;
   };
+
+  const EFFECT_DEFAULTS = {
+    'gaussian-blur': { radius: 5 },
+    'drop-shadow': { offsetX: 4, offsetY: 4, blurRadius: 6, color: '#000000' },
+    'inner-glow': { spread: 5, color: '#ffff00' },
+    'hue-rotate': { angle: 0 },
+    'brightness-contrast': { brightness: 0, contrast: 0 }
+  };
+
+  const EFFECT_LABELS = {
+    'gaussian-blur': 'Gaussian Blur',
+    'drop-shadow': 'Drop Shadow',
+    'inner-glow': 'Inner Glow',
+    'hue-rotate': 'Hue Rotate',
+    'brightness-contrast': 'Brightness / Contrast'
+  };
+
+  let effectsDragIdx = -1;
+
+  function getShapeEffects(shape) {
+    if (!shape) return [];
+    if (isComponentInstance(shape)) {
+      if (shape.overrides && shape.overrides.effects !== undefined) {
+        return shape.overrides.effects;
+      }
+      return [];
+    }
+    if (!shape.effects) shape.effects = [];
+    return shape.effects;
+  }
+
+  function getActiveEffects(shape, frame) {
+    const effects = getShapeEffects(shape);
+    return effects.filter(e => e.enabled !== false).map(e => {
+      if (frame !== undefined && frame > 0) {
+        const animated = getAnimatedEffectParams(shape.id, e, frame);
+        return { ...e, params: { ...e.params, ...animated } };
+      }
+      return e;
+    });
+  }
+
+  function getAnimatedEffectParams(shapeId, effect, frame) {
+    const result = {};
+    const anim = animationController.getShapeAnimation(shapeId, false);
+    if (!anim) return result;
+    const effectPrefix = 'effect_' + effect.id + '_';
+    for (const paramName in effect.params) {
+      const trackName = effectPrefix + paramName;
+      const track = anim.getTrack(trackName, false);
+      if (track && track.hasKeyframes()) {
+        result[paramName] = track.getValueAt(frame, effect.params[paramName]);
+      }
+    }
+    return result;
+  }
+
+  function buildCanvasFilterString(effects) {
+    const parts = [];
+    for (const e of effects) {
+      const p = e.params;
+      switch (e.type) {
+        case 'gaussian-blur':
+          parts.push('blur(' + p.radius + 'px)');
+          break;
+        case 'drop-shadow':
+          parts.push('drop-shadow(' + p.offsetX + 'px ' + p.offsetY + 'px ' + p.blurRadius + 'px ' + p.color + ')');
+          break;
+        case 'hue-rotate':
+          parts.push('hue-rotate(' + p.angle + 'deg)');
+          break;
+        case 'brightness-contrast': {
+          const b = 1 + p.brightness / 100;
+          const c = 1 + p.contrast / 100;
+          parts.push('brightness(' + b + ')');
+          parts.push('contrast(' + c + ')');
+          break;
+        }
+        case 'inner-glow':
+          break;
+      }
+    }
+    return parts.length > 0 ? parts.join(' ') : 'none';
+  }
+
+  function applyEffectsToCtx(targetCtx, shape, frame) {
+    const effects = getActiveEffects(shape, frame);
+    if (effects.length === 0) return false;
+
+    const hasInnerGlow = effects.some(e => e.type === 'inner-glow');
+    const canvasFilter = buildCanvasFilterString(effects);
+
+    if (canvasFilter !== 'none') {
+      targetCtx.filter = canvasFilter;
+    }
+
+    if (hasInnerGlow) {
+      for (const e of effects) {
+        if (e.type === 'inner-glow' && e.enabled !== false) {
+          const p = e.params;
+          targetCtx.shadowColor = p.color;
+          targetCtx.shadowBlur = p.spread;
+          targetCtx.shadowOffsetX = 0;
+          targetCtx.shadowOffsetY = 0;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  function renderShapeWithEffects(s, useAnimation, currentFrame) {
+    const effects = getActiveEffects(s, useAnimation ? currentFrame : undefined);
+    if (effects.length === 0) return false;
+
+    const pts = useAnimation ? getAnimatedWorldPoints(s, currentFrame) : worldPointsOf(s);
+    const holes = useAnimation ? getAnimatedWorldHoles(s, currentFrame) : worldHolesOf(s);
+    const animProps = useAnimation ? getAnimatedShapeProps(s, currentFrame) : null;
+    const fillColor = useAnimation && animProps ? animProps.fill : s.fill;
+    const opacity = useAnimation && animProps ? animProps.opacity : (s.opacity !== undefined ? s.opacity : 1);
+    const fillTransform = useAnimation && animProps
+      ? { tx: animProps.tx, ty: animProps.ty, rotation: animProps.rotation, scaleX: animProps.scaleX, scaleY: animProps.scaleY }
+      : s.transform;
+
+    const hasInnerGlow = effects.some(e => e.type === 'inner-glow');
+
+    if (hasInnerGlow) {
+      const glowEffect = effects.find(e => e.type === 'inner-glow');
+      const gp = glowEffect.params;
+
+      ctx.save();
+      ctx.globalAlpha = opacity;
+
+      const offscreen = document.createElement('canvas');
+      const bounds = getBounds(pts);
+      const pad = gp.spread + 10;
+      const x = bounds.minX - pad;
+      const y = bounds.minY - pad;
+      const w = bounds.maxX - bounds.minX + pad * 2;
+      const h = bounds.maxY - bounds.minY + pad * 2;
+
+      offscreen.width = Math.ceil(w * viewport.scale);
+      offscreen.height = Math.ceil(h * viewport.scale);
+      const octx = offscreen.getContext('2d');
+      octx.scale(viewport.scale, viewport.scale);
+      octx.translate(-x, -y);
+
+      drawPolygonPath.call(null, pts, holes);
+      const shapeFill = ensureFillStructure(fillColor);
+      if (typeof shapeFill === 'string') {
+        octx.fillStyle = shapeFill;
+      } else {
+        octx.fillStyle = getCanvasFillStyle(octx, shapeFill, fillTransform, pts);
+      }
+
+      const otherFilterEffects = effects.filter(e => e.type !== 'inner-glow');
+      if (otherFilterEffects.length > 0) {
+        octx.filter = buildCanvasFilterString(otherFilterEffects);
+      }
+
+      const tempCtx = ctx;
+      ctx = octx;
+      drawPolygonPath(pts, holes);
+      ctx = tempCtx;
+
+      octx.fill('evenodd');
+
+      octx.globalCompositeOperation = 'source-atop';
+      octx.shadowColor = gp.color;
+      octx.shadowBlur = gp.spread;
+      octx.shadowOffsetX = 0;
+      octx.shadowOffsetY = 0;
+
+      octx.beginPath();
+      octx.rect(x, y, w, h);
+      octx.fillStyle = gp.color;
+      octx.fill();
+
+      octx.globalCompositeOperation = 'source-over';
+
+      ctx.drawImage(offscreen, x, y, w, h);
+      ctx.restore();
+      return true;
+    }
+
+    ctx.save();
+    ctx.globalAlpha = opacity;
+    applyEffectsToCtx(ctx, s, useAnimation ? currentFrame : undefined);
+    drawPolygonPath(pts, holes);
+    const shapeFill = ensureFillStructure(fillColor);
+    if (typeof shapeFill === 'string') {
+      ctx.fillStyle = shapeFill;
+    } else {
+      ctx.fillStyle = getCanvasFillStyle(ctx, shapeFill, fillTransform, pts);
+    }
+    ctx.fill('evenodd');
+    ctx.lineWidth = (s.strokeWidth || 2) / viewport.scale;
+    ctx.strokeStyle = s.stroke || '#000';
+    ctx.stroke();
+    ctx.filter = 'none';
+    ctx.restore();
+    return true;
+  }
+
+  const _origPatchRenderShape = patchRenderShape;
+  patchRenderShape = function() {
+    _origPatchRenderShape();
+    const prevRenderShape = renderShape;
+    renderShape = function(s) {
+      const currentFrame = animationController.currentFrame;
+      const useAnimation = animationController.isPlaying || animationController.currentFrame > 0;
+
+      if (isMaskShape(s)) {
+        if (selectedIds.has(s.id) || isNodeEditMode) {
+          renderMaskOutline(s);
+        }
+        return;
+      }
+
+      if (s.type === 'motion-path') {
+        const pts = worldPointsOf(s);
+        const opacity = s.opacity !== undefined ? s.opacity : 1;
+        ctx.save();
+        ctx.globalAlpha = opacity;
+        drawOpenPath(pts);
+        ctx.lineWidth = (s.strokeWidth || 2) / viewport.scale;
+        ctx.strokeStyle = s.stroke || '#8e24aa';
+        ctx.setLineDash([6 / viewport.scale, 4 / viewport.scale]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        if (s.fill) {
+          ctx.fillStyle = s.fill;
+          drawOpenPath(pts);
+          ctx.globalAlpha = opacity * 0.08;
+          ctx.fill();
+        }
+        for (let i = 0; i < pts.length; i++) {
+          ctx.beginPath();
+          ctx.arc(pts[i].x, pts[i].y, 3 / viewport.scale, 0, Math.PI * 2);
+          ctx.fillStyle = '#8e24aa';
+          ctx.globalAlpha = opacity;
+          ctx.fill();
+        }
+        ctx.restore();
+        return;
+      }
+
+      const effects = getActiveEffects(s, useAnimation ? currentFrame : undefined);
+      if (effects.length > 0 && !isComponentInstance(s)) {
+        const masks = getMasksOfShape(s.id);
+        if (masks.length > 0) {
+          const clipMasks = masks.filter(m => getMaskType(m) === 'clip');
+          ctx.save();
+          if (clipMasks.length > 0) {
+            applyClipMasks(clipMasks, useAnimation, currentFrame);
+          }
+          renderShapeWithEffects(s, useAnimation, currentFrame);
+          ctx.restore();
+        } else {
+          renderShapeWithEffects(s, useAnimation, currentFrame);
+        }
+        return;
+      }
+
+      if (isComponentInstance(s)) {
+        if (editingComponentId !== null && editingComponentId === s.componentId) return;
+
+        const instanceEffects = getActiveEffects(s, useAnimation ? currentFrame : undefined);
+        const expanded = getInstanceExpandedShapes(s);
+
+        if (instanceEffects.length > 0) {
+          const animProps = useAnimation ? getAnimatedShapeProps(s, currentFrame) : null;
+          const opacity = useAnimation && animProps ? animProps.opacity : 1;
+
+          for (const es of expanded) {
+            const ePts = es.points;
+            const eHoles = es.holes || [];
+            ctx.save();
+            ctx.globalAlpha = opacity;
+            applyEffectsToCtx(ctx, s, useAnimation ? currentFrame : undefined);
+            const esFill = ensureFillStructure(es.fill);
+            if (typeof esFill === 'string') {
+              ctx.fillStyle = esFill;
+            } else {
+              ctx.fillStyle = getCanvasFillStyle(ctx, esFill, { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }, ePts);
+            }
+            drawPolygonPath(ePts, eHoles);
+            ctx.fill('evenodd');
+            ctx.lineWidth = (es.strokeWidth || 2) / viewport.scale;
+            ctx.strokeStyle = es.stroke || '#000';
+            ctx.stroke();
+            ctx.filter = 'none';
+            ctx.restore();
+          }
+          return;
+        }
+
+        for (const es of expanded) {
+          const ePts = es.points;
+          const eHoles = es.holes || [];
+          ctx.save();
+          let fillColor = es.fill;
+          let opacity = 1;
+          if (useAnimation) {
+            const animProps = getAnimatedShapeProps(s, currentFrame);
+            fillColor = animProps.fill;
+            opacity = animProps.opacity;
+          }
+          ctx.globalAlpha = opacity;
+          drawPolygonPath(ePts, eHoles);
+          const esFill = ensureFillStructure(fillColor);
+          if (typeof esFill === 'string') {
+            ctx.fillStyle = esFill;
+          } else {
+            ctx.fillStyle = getCanvasFillStyle(ctx, esFill, { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }, ePts);
+          }
+          ctx.fill('evenodd');
+          ctx.lineWidth = (es.strokeWidth || 2) / viewport.scale;
+          ctx.strokeStyle = es.stroke || '#000';
+          ctx.stroke();
+          ctx.restore();
+        }
+        return;
+      }
+
+      prevRenderShape(s);
+    };
+  };
+
+  const _origPatchBooleanOp = patchBooleanOp;
+  patchBooleanOp = function() {
+    const originalRunBooleanOp = runBooleanOp;
+    runBooleanOp = function(operation) {
+      const sel = getSelectedShapes();
+      if (sel.length < 2) { showToast('Select 2 shapes first', 'warning'); return; }
+      if (sel.some(s => isMaskShape(s))) {
+        showToast('Mask shapes cannot participate in boolean operations', 'warning');
+        return;
+      }
+      const subject = sel[0];
+      const clip = sel[1];
+      const subjectPts = worldPointsOf(subject);
+      const clipPts = worldPointsOf(clip);
+      try {
+        const result = weilerAtherton(subjectPts, clipPts, operation);
+        if (!result.polygons || result.polygons.length === 0) {
+          showToast('No result for this operation', 'warning');
+          return;
+        }
+        pushHistory();
+        const baseFill = JSON.parse(JSON.stringify(ensureFillStructure(subject.fill)));
+        const inheritedEffects = subject.effects ? JSON.parse(JSON.stringify(subject.effects)) : [];
+        const newShapes = [];
+        for (let i = 0; i < result.polygons.length; i++) {
+          const poly = result.polygons[i];
+          if (poly.length < 3) continue;
+          const holes = result.holes && result.holes[i] ? [result.holes[i]] : [];
+          const s = createShape(poly, baseFill, holes);
+          s.fill = JSON.parse(JSON.stringify(baseFill));
+          s.stroke = subject.stroke || '#000';
+          s.strokeWidth = subject.strokeWidth || 2;
+          if (i === 0) {
+            s.effects = inheritedEffects;
+          }
+          newShapes.push(s);
+        }
+        if (newShapes.length === 0) {
+          showToast('No valid result', 'warning');
+          return;
+        }
+        const removeIds = [subject.id, clip.id];
+        for (const rid of removeIds) {
+          dimensionSystem.removeDimensionsForShape(rid);
+        }
+        shapes = shapes.filter(s => !removeIds.includes(s.id));
+        constraints = constraints.filter(c => {
+          const rps = c.getReferencedPoints();
+          for (const rp of rps) {
+            const { shapeId } = parsePointId(rp);
+            if (removeIds.includes(shapeId)) return false;
+          }
+          return true;
+        });
+        for (const s of newShapes) shapes.push(s);
+        selectedIds.clear();
+        for (const s of newShapes) selectedIds.add(s.id);
+        rebuildSolverAndParams();
+        initialSolve();
+        updateToolbar();
+        updateFillPanel();
+        updateEffectsPanel();
+        updateDOFDisplay();
+        renderLayers();
+        renderConstraintList();
+        render();
+        const opName = { union: 'Union', subtract: 'Subtract', intersect: 'Intersect' }[operation];
+        showToast(opName + ': ' + newShapes.length + ' shape(s)', 'success');
+      } catch (e) {
+        console.error(e);
+        showToast('Boolean op failed: ' + e.message, 'error');
+      }
+    };
+  };
+
+  function updateEffectsPanel() {
+    const panel = document.getElementById('effects-panel');
+    const list = document.getElementById('effects-list');
+    if (!panel || !list) return;
+
+    if (selectedIds.size !== 1) {
+      panel.classList.remove('visible');
+      return;
+    }
+
+    const shape = getShapeById([...selectedIds][0]);
+    if (!shape || isMaskShape(shape) || shape.type === 'motion-path') {
+      panel.classList.remove('visible');
+      return;
+    }
+
+    panel.classList.add('visible');
+    list.innerHTML = '';
+
+    const effects = getShapeEffects(shape);
+    if (effects.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'effects-empty';
+      empty.textContent = 'No effects applied';
+      list.appendChild(empty);
+      return;
+    }
+
+    effects.forEach(function(effect, idx) {
+      const item = document.createElement('div');
+      item.className = 'effect-item' + (effect.enabled === false ? ' disabled' : '');
+      item.draggable = true;
+      item.dataset.effectIdx = idx;
+
+      const header = document.createElement('div');
+      header.className = 'effect-item-header';
+
+      const dragHandle = document.createElement('span');
+      dragHandle.className = 'effect-drag-handle';
+      dragHandle.textContent = '⋮⋮';
+
+      const toggle = document.createElement('input');
+      toggle.type = 'checkbox';
+      toggle.className = 'effect-toggle';
+      toggle.checked = effect.enabled !== false;
+      toggle.addEventListener('change', function() {
+        pushHistory();
+        effect.enabled = toggle.checked;
+        updateEffectsPanel();
+        render();
+        scheduleSave();
+      });
+
+      const name = document.createElement('span');
+      name.className = 'effect-name';
+      name.textContent = EFFECT_LABELS[effect.type] || effect.type;
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'effect-delete';
+      delBtn.textContent = '×';
+      delBtn.title = 'Delete effect';
+      delBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        pushHistory();
+        effects.splice(idx, 1);
+        updateEffectsPanel();
+        render();
+        scheduleSave();
+      });
+
+      header.appendChild(dragHandle);
+      header.appendChild(toggle);
+      header.appendChild(name);
+      header.appendChild(delBtn);
+      item.appendChild(header);
+
+      const params = document.createElement('div');
+      params.className = 'effect-params';
+
+      function addParamRow(label, key, min, max, step, unit, inputType) {
+        const row = document.createElement('div');
+        row.className = 'effect-param-row';
+
+        const lbl = document.createElement('label');
+        lbl.textContent = label;
+        row.appendChild(lbl);
+
+        if (inputType === 'color') {
+          const input = document.createElement('input');
+          input.type = 'color';
+          input.value = effect.params[key] || '#000000';
+          input.addEventListener('input', function() {
+            pushHistory();
+            effect.params[key] = input.value;
+            render();
+            scheduleSave();
+          });
+          row.appendChild(input);
+        } else if (inputType === 'range') {
+          const range = document.createElement('input');
+          range.type = 'range';
+          range.min = min;
+          range.max = max;
+          range.step = step;
+          range.value = effect.params[key];
+          row.appendChild(range);
+
+          const numInput = document.createElement('input');
+          numInput.type = 'number';
+          numInput.min = min;
+          numInput.max = max;
+          numInput.step = step;
+          numInput.value = effect.params[key];
+          row.appendChild(numInput);
+
+          if (unit) {
+            const unitSpan = document.createElement('span');
+            unitSpan.className = 'unit';
+            unitSpan.textContent = unit;
+            row.appendChild(unitSpan);
+          }
+
+          range.addEventListener('input', function() {
+            pushHistory();
+            effect.params[key] = parseFloat(range.value);
+            numInput.value = range.value;
+            render();
+            scheduleSave();
+          });
+          numInput.addEventListener('input', function() {
+            pushHistory();
+            let val = parseFloat(numInput.value);
+            if (isNaN(val)) val = parseFloat(min);
+            val = Math.max(parseFloat(min), Math.min(parseFloat(max), val));
+            effect.params[key] = val;
+            range.value = val;
+            render();
+            scheduleSave();
+          });
+        }
+
+        params.appendChild(row);
+      }
+
+      switch (effect.type) {
+        case 'gaussian-blur':
+          addParamRow('R', 'radius', 0, 50, 0.5, 'px', 'range');
+          break;
+        case 'drop-shadow':
+          addParamRow('X', 'offsetX', -50, 50, 1, 'px', 'range');
+          addParamRow('Y', 'offsetY', -50, 50, 1, 'px', 'range');
+          addParamRow('Blur', 'blurRadius', 0, 50, 0.5, 'px', 'range');
+          addParamRow('Color', 'color', 0, 0, 0, '', 'color');
+          break;
+        case 'inner-glow':
+          addParamRow('Spread', 'spread', 0, 50, 0.5, 'px', 'range');
+          addParamRow('Color', 'color', 0, 0, 0, '', 'color');
+          break;
+        case 'hue-rotate':
+          addParamRow('Angle', 'angle', 0, 360, 1, '°', 'range');
+          break;
+        case 'brightness-contrast':
+          addParamRow('B', 'brightness', -100, 100, 1, '', 'range');
+          addParamRow('C', 'contrast', -100, 100, 1, '', 'range');
+          break;
+      }
+
+      item.appendChild(params);
+
+      item.addEventListener('dragstart', function(e) {
+        effectsDragIdx = idx;
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', idx.toString());
+        item.style.opacity = '0.4';
+      });
+      item.addEventListener('dragend', function() {
+        item.style.opacity = '1';
+        effectsDragIdx = -1;
+        document.querySelectorAll('.effect-item.drag-over').forEach(function(el) { el.classList.remove('drag-over'); });
+      });
+      item.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        document.querySelectorAll('.effect-item.drag-over').forEach(function(el) { el.classList.remove('drag-over'); });
+        item.classList.add('drag-over');
+      });
+      item.addEventListener('dragleave', function() {
+        item.classList.remove('drag-over');
+      });
+      item.addEventListener('drop', function(e) {
+        e.preventDefault();
+        item.classList.remove('drag-over');
+        const fromIdx = effectsDragIdx;
+        const toIdx = idx;
+        if (fromIdx === toIdx || fromIdx < 0) return;
+        pushHistory();
+        const moved = effects.splice(fromIdx, 1)[0];
+        const newToIdx = fromIdx < toIdx ? toIdx - 1 : toIdx;
+        effects.splice(newToIdx, 0, moved);
+        updateEffectsPanel();
+        render();
+        scheduleSave();
+      });
+
+      list.appendChild(item);
+    });
+  }
+
+  function initEffectsPanel() {
+    const addSelect = document.getElementById('add-effect-type');
+    if (addSelect) {
+      addSelect.addEventListener('change', function() {
+        const type = addSelect.value;
+        if (!type) return;
+
+        if (selectedIds.size !== 1) {
+          showToast('Select a shape first', 'warning');
+          addSelect.value = '';
+          return;
+        }
+
+        const shape = getShapeById([...selectedIds][0]);
+        if (!shape) {
+          addSelect.value = '';
+          return;
+        }
+
+        pushHistory();
+
+        const effectId = 'fx_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+        const newEffect = {
+          id: effectId,
+          type: type,
+          enabled: true,
+          params: JSON.parse(JSON.stringify(EFFECT_DEFAULTS[type]))
+        };
+
+        if (!shape.effects) shape.effects = [];
+        shape.effects.push(newEffect);
+
+        addSelect.value = '';
+        updateEffectsPanel();
+        render();
+        scheduleSave();
+        showToast(EFFECT_LABELS[type] + ' added', 'success');
+      });
+    }
+  }
+
+  const _origPatchExportSVG = patchExportSVG;
+  patchExportSVG = function() {
+    const exportBtn = document.getElementById('export-svg');
+    const oldListeners = exportBtn.cloneNode(true);
+    exportBtn.parentNode.replaceChild(oldListeners, exportBtn);
+
+    document.getElementById('export-svg').addEventListener('click', function() {
+      showExportDialog();
+    });
+
+    const origGenerateSVGForPage = generateSVGForPage;
+    generateSVGForPage = function(pageData) {
+      const pageShapes = pageData.shapes;
+      const allX = [];
+      const allY = [];
+      const exportShapes = [];
+      const defsMap = {};
+      const clipPathDefs = [];
+      const maskDefs = [];
+      const filterDefs = [];
+
+      function pointsToPathD(pts, holes) {
+        let d = pts.map(function(p, i) { return (i === 0 ? 'M' : 'L') + p.x + ',' + p.y; }).join(' ') + 'Z';
+        for (const hole of holes) {
+          d += ' ' + hole.map(function(p, i) { return (i === 0 ? 'M' : 'L') + p.x + ',' + p.y; }).join(' ') + 'Z';
+        }
+        return d;
+      }
+
+      function localWorldPointsOf(s) {
+        const pts = s.points.map(function(p) { return { x: p.x, y: p.y }; });
+        const t = s.transform;
+        if (t.rotation !== 0 || t.scaleX !== 1 || t.scaleY !== 1) {
+          const cx = pts.reduce(function(s, p) { return s + p.x; }, 0) / pts.length;
+          const cy = pts.reduce(function(s, p) { return s + p.y; }, 0) / pts.length;
+          const rad = t.rotation * Math.PI / 180;
+          const cos = Math.cos(rad), sin = Math.sin(rad);
+          for (const p of pts) {
+            const dx = p.x - cx, dy = p.y - cy;
+            p.x = cx + (dx * cos - dy * sin) * t.scaleX;
+            p.y = cy + (dx * sin + dy * cos) * t.scaleY;
+          }
+        }
+        for (const p of pts) {
+          p.x += t.tx;
+          p.y += t.ty;
+        }
+        return pts;
+      }
+
+      function localWorldHolesOf(s) {
+        if (!s.holes || s.holes.length === 0) return [];
+        const worldHoles = [];
+        for (const hole of s.holes) {
+          const pts = hole.map(function(p) { return { x: p.x, y: p.y }; });
+          const t = s.transform;
+          if (t.rotation !== 0 || t.scaleX !== 1 || t.scaleY !== 1) {
+            const cx = pts.reduce(function(s, p) { return s + p.x; }, 0) / pts.length;
+            const cy = pts.reduce(function(s, p) { return s + p.y; }, 0) / pts.length;
+            const rad = t.rotation * Math.PI / 180;
+            const cos = Math.cos(rad), sin = Math.sin(rad);
+            for (const p of pts) {
+              const dx = p.x - cx, dy = p.y - cy;
+              p.x = cx + (dx * cos - dy * sin) * t.scaleX;
+              p.y = cy + (dx * sin + dy * cos) * t.scaleY;
+            }
+          }
+          for (const p of pts) {
+            p.x += t.tx;
+            p.y += t.ty;
+          }
+          worldHoles.push(pts);
+        }
+        return worldHoles;
+      }
+
+      function buildSVGFilterForEffects(shapeEffects, shapeId) {
+        const active = (shapeEffects || []).filter(function(e) { return e.enabled !== false; });
+        if (active.length === 0) return null;
+
+        const filterId = 'filter_' + shapeId;
+        let filterContent = '';
+
+        for (const effect of active) {
+          const p = effect.params;
+          switch (effect.type) {
+            case 'gaussian-blur':
+              filterContent += '<feGaussianBlur in="SourceGraphic" stdDeviation="' + p.radius + '" result="blur_' + effect.id + '"/>';
+              break;
+            case 'drop-shadow':
+              filterContent += '<feGaussianBlur in="SourceAlpha" stdDeviation="' + p.blurRadius + '" result="shadow_blur_' + effect.id + '"/>';
+              filterContent += '<feOffset in="shadow_blur_' + effect.id + '" dx="' + p.offsetX + '" dy="' + p.offsetY + '" result="shadow_offset_' + effect.id + '"/>';
+              filterContent += '<feFlood flood-color="' + p.color + '" result="shadow_color_' + effect.id + '"/>';
+              filterContent += '<feComposite in="shadow_color_' + effect.id + '" in2="shadow_offset_' + effect.id + '" operator="in" result="shadow_' + effect.id + '"/>';
+              filterContent += '<feMerge result="merge_' + effect.id + '"><feMergeNode in="shadow_' + effect.id + '"/><feMergeNode in="SourceGraphic"/></feMerge>';
+              break;
+            case 'inner-glow':
+              filterContent += '<feGaussianBlur in="SourceAlpha" stdDeviation="' + p.spread + '" result="glow_blur_' + effect.id + '"/>';
+              filterContent += '<feFlood flood-color="' + p.color + '" result="glow_color_' + effect.id + '"/>';
+              filterContent += '<feComposite in="glow_color_' + effect.id + '" in2="glow_blur_' + effect.id + '" operator="in" result="glow_inner_' + effect.id + '"/>';
+              filterContent += '<feComposite in="glow_inner_' + effect.id + '" in2="SourceAlpha" operator="in" result="glow_clipped_' + effect.id + '"/>';
+              filterContent += '<feMerge result="merge_' + effect.id + '"><feMergeNode in="SourceGraphic"/><feMergeNode in="glow_clipped_' + effect.id + '"/></feMerge>';
+              break;
+            case 'hue-rotate':
+              filterContent += '<feColorMatrix type="hueRotate" values="' + p.angle + '" result="hue_' + effect.id + '"/>';
+              break;
+            case 'brightness-contrast': {
+              const b = 1 + p.brightness / 100;
+              const intercept = 0.5 - 0.5 * b;
+              filterContent += '<feComponentTransfer result="bright_' + effect.id + '"><feFuncR type="linear" slope="' + b + '" intercept="' + intercept + '"/><feFuncG type="linear" slope="' + b + '" intercept="' + intercept + '"/><feFuncB type="linear" slope="' + b + '" intercept="' + intercept + '"/></feComponentTransfer>';
+              const c = 1 + p.contrast / 100;
+              const cIntercept = 0.5 - 0.5 * c;
+              filterContent += '<feComponentTransfer in="bright_' + effect.id + '" result="contrast_' + effect.id + '"><feFuncR type="linear" slope="' + c + '" intercept="' + cIntercept + '"/><feFuncG type="linear" slope="' + c + '" intercept="' + cIntercept + '"/><feFuncB type="linear" slope="' + c + '" intercept="' + cIntercept + '"/></feComponentTransfer>';
+              break;
+            }
+          }
+        }
+
+        if (!filterContent) return null;
+
+        let hasMerge = filterContent.indexOf('<feMerge') >= 0;
+        if (!hasMerge && active.length > 1) {
+          const mergeParts = active.map(function(e, i) {
+            return '<feMergeNode in="' + getEffectResultName(e, i) + '"/>';
+          });
+          filterContent += '<feMerge>' + mergeParts.join('') + '</feMerge>';
+        }
+
+        filterDefs.push('<filter id="' + filterId + '" x="-50%" y="-50%" width="200%" height="200%">' + filterContent + '</filter>');
+        return filterId;
+      }
+
+      function getEffectResultName(effect, idx) {
+        switch (effect.type) {
+          case 'gaussian-blur': return 'blur_' + effect.id;
+          case 'drop-shadow': return 'merge_' + effect.id;
+          case 'inner-glow': return 'merge_' + effect.id;
+          case 'hue-rotate': return 'hue_' + effect.id;
+          case 'brightness-contrast': return 'contrast_' + effect.id;
+          default: return 'SourceGraphic';
+        }
+      }
+
+      for (const s of pageShapes) {
+        if (!s.visible) continue;
+        if (s.maskOf !== undefined) continue;
+        if (s.type === 'component-instance') {
+          const expanded = getInstanceExpandedShapes(s);
+          for (const es of expanded) {
+            exportShapes.push(es);
+            const pts = es.points;
+            for (const p of pts) { allX.push(p.x); allY.push(p.y); }
+            const holes = es.holes || [];
+            for (const hole of holes) {
+              for (const p of hole) { allX.push(p.x); allY.push(p.y); }
+            }
+          }
+        } else {
+          exportShapes.push(s);
+          const pts = localWorldPointsOf(s);
+          for (const p of pts) { allX.push(p.x); allY.push(p.y); }
+          const holes = localWorldHolesOf(s);
+          for (const hole of holes) {
+            for (const p of hole) { allX.push(p.x); allY.push(p.y); }
+          }
+        }
+      }
+
+      if (allX.length === 0) return null;
+
+      const minX = Math.min.apply(null, allX);
+      const minY = Math.min.apply(null, allY);
+      const maxX = Math.max.apply(null, allX);
+      const maxY = Math.max.apply(null, allY);
+      const pad = 20;
+      let svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="' + (minX - pad) + ' ' + (minY - pad) + ' ' + (maxX - minX + pad * 2) + ' ' + (maxY - minY + pad * 2) + '">';
+
+      let defsContent = '';
+
+      for (let i = 0; i < exportShapes.length; i++) {
+        const s = exportShapes[i];
+        const fill = ensureFillStructure(s.fill);
+        const transform = s._isExpandedInstance
+          ? { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }
+          : s.transform;
+        const fillRef = exportFillToSVGDefs(fill, defsMap, 'shape' + i, transform);
+        const exportFill = fillRef || getFillDisplayColor(fill);
+
+        const pts = s._isExpandedInstance ? s.points : localWorldPointsOf(s);
+        const holes = s._isExpandedInstance ? (s.holes || []) : localWorldHolesOf(s);
+        const d = pointsToPathD(pts, holes);
+
+        let extraAttrs = '';
+
+        const shapeEffects = s.effects || [];
+        const filterId = buildSVGFilterForEffects(shapeEffects, s.id || i);
+        if (filterId) {
+          extraAttrs += ' filter="url(#' + filterId + ')"';
+        }
+
+        if (!s._isExpandedInstance && s.id !== undefined) {
+          const masks = pageShapes.filter(function(ms) { return ms.maskOf === s.id; });
+          if (masks.length > 0) {
+            const clipMasks = masks.filter(function(m) { return (m.maskType || 'clip') === 'clip'; });
+            const alphaMasks = masks.filter(function(m) { return (m.maskType || 'clip') === 'alpha'; });
+
+            if (clipMasks.length > 0) {
+              const clipPathId = 'clipPath-' + s.id;
+              let clipPathContent = '';
+              for (let j = 0; j < clipMasks.length; j++) {
+                const mask = clipMasks[j];
+                const maskPts = localWorldPointsOf(mask);
+                const maskHoles = localWorldHolesOf(mask);
+                const maskD = pointsToPathD(maskPts, maskHoles);
+                clipPathContent += '<path d="' + maskD + '" fill-rule="evenodd"/>';
+              }
+              clipPathDefs.push('<clipPath id="' + clipPathId + '">' + clipPathContent + '</clipPath>');
+              extraAttrs += ' clip-path="url(#' + clipPathId + ')"';
+            }
+
+            if (alphaMasks.length > 0) {
+              const maskId = 'mask-' + s.id;
+              let maskContent = '';
+              const filterId2 = 'luminance-filter-' + s.id;
+              maskDefs.push('<filter id="' + filterId2 + '" x="0" y="0" width="100%" height="100%"><feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0.2126 0.7152 0.0722 0 0"/></filter>');
+              for (let j = 0; j < alphaMasks.length; j++) {
+                const mask = alphaMasks[j];
+                const maskPts = localWorldPointsOf(mask);
+                const maskHoles = localWorldHolesOf(mask);
+                const maskD = pointsToPathD(maskPts, maskHoles);
+                const maskFill = ensureFillStructure(mask.fill);
+                const maskFillColor = getFillDisplayColor(maskFill);
+                if (j === 0) {
+                  maskContent += '<path d="' + maskD + '" fill="' + maskFillColor + '" fill-rule="evenodd" filter="url(#' + filterId2 + ')"/>';
+                } else {
+                  maskContent += '<path d="' + maskD + '" fill="' + maskFillColor + '" fill-rule="evenodd" filter="url(#' + filterId2 + ')" style="mix-blend-mode: multiply"/>';
+                }
+              }
+              maskDefs.push('<mask id="' + maskId + '" maskUnits="userSpaceOnUse">' + maskContent + '</mask>');
+              extraAttrs += ' mask="url(#' + maskId + ')"';
+            }
+          }
+        }
+
+        svg += '<path d="' + d + '" fill="' + exportFill + '" stroke="' + (s.stroke || '#000') + '" stroke-width="' + (s.strokeWidth || 2) + '" fill-rule="evenodd"' + extraAttrs + '/>';
+      }
+
+      if (Object.keys(defsMap).length > 0 || clipPathDefs.length > 0 || maskDefs.length > 0 || filterDefs.length > 0) {
+        defsContent = '<defs>';
+        if (Object.keys(defsMap).length > 0) {
+          defsContent += generateSVGDefs(defsMap);
+        }
+        for (const cp of clipPathDefs) defsContent += cp;
+        for (const m of maskDefs) defsContent += m;
+        for (const f of filterDefs) defsContent += f;
+        defsContent += '</defs>';
+        svg = svg.replace('>', '>' + defsContent);
+      }
+
+      svg += '</svg>';
+      return svg;
+    };
+  };
+
+  const _origPatchDrawComponentIcon = patchDrawComponentIcon;
+  patchDrawComponentIcon = function() {
+    if (typeof _origPatchDrawComponentIcon === 'function') {
+      _origPatchDrawComponentIcon();
+    }
+  };
+
+  const _origPatchAnimationSystem = patchAnimationSystem;
+  patchAnimationSystem = function() {
+    if (typeof _origPatchAnimationSystem === 'function') {
+      _origPatchAnimationSystem();
+    }
+
+    if (typeof addKeyframeFromUI === 'function') {
+      const origAddKeyframe = addKeyframeFromUI;
+      addKeyframeFromUI = function() {
+        if (selectedIds.size === 0) {
+          showToast('Select a shape to add keyframe', 'warning');
+          return;
+        }
+        const frame = animationController.currentFrame;
+        const easing = document.getElementById('sel-easing') ? document.getElementById('sel-easing').value : 'linear';
+
+        for (const id of selectedIds) {
+          const shape = getShapeById(id);
+          if (!shape) continue;
+
+          const props = [
+            { name: 'tx', value: shape.transform.tx },
+            { name: 'ty', value: shape.transform.ty },
+            { name: 'rotation', value: shape.transform.rotation },
+            { name: 'scaleX', value: shape.transform.scaleX },
+            { name: 'opacity', value: shape.opacity !== undefined ? shape.opacity : 1 },
+            { name: 'fill', value: shape.fill }
+          ];
+
+          for (const p of props) {
+            animationController.addKeyframe(id, p.name, frame, p.value, easing);
+          }
+
+          const effects = getShapeEffects(shape);
+          for (const effect of effects) {
+            for (const paramName in effect.params) {
+              const trackName = 'effect_' + effect.id + '_' + paramName;
+              animationController.addKeyframe(id, trackName, frame, effect.params[paramName], easing);
+            }
+          }
+        }
+
+        renderTimelineTracks();
+        scheduleSave();
+        showToast('Keyframe added', 'success');
+      };
+    }
+  };
+
+  const _origDrawFrameToContext = drawFrameToContext;
+  drawFrameToContext = function(targetCtx, frame, bounds, padding) {
+    targetCtx.save();
+    targetCtx.fillStyle = '#ffffff';
+    targetCtx.fillRect(0, 0, targetCtx.canvas.width, targetCtx.canvas.height);
+    targetCtx.translate(padding - bounds.minX, padding - bounds.minY);
+
+    function drawPolygonPathLocal(c, pts, holes) {
+      c.beginPath();
+      if (pts.length > 0) {
+        c.moveTo(pts[0].x, pts[0].y);
+        for (let j = 1; j < pts.length; j++) c.lineTo(pts[j].x, pts[j].y);
+        c.closePath();
+      }
+      if (holes && holes.length > 0) {
+        for (const hole of holes) {
+          if (hole.length > 0) {
+            c.moveTo(hole[0].x, hole[0].y);
+            for (let j = 1; j < hole.length; j++) c.lineTo(hole[j].x, hole[j].y);
+            c.closePath();
+          }
+        }
+      }
+    }
+
+    for (const s of shapes) {
+      if (!s.visible) continue;
+      if (s.type === 'motion-path') continue;
+      if (isMaskShape(s)) continue;
+
+      if (isComponentInstance(s)) {
+        const expanded = getInstanceExpandedShapes(s);
+        const animProps = getAnimatedShapeProps(s, frame);
+        const instanceEffects = getActiveEffects(s, frame);
+
+        for (const es of expanded) {
+          const ePts = es.points;
+          const eHoles = es.holes || [];
+          targetCtx.save();
+          targetCtx.globalAlpha = animProps.opacity;
+
+          if (instanceEffects.length > 0) {
+            const filterStr = buildCanvasFilterString(instanceEffects);
+            if (filterStr !== 'none') targetCtx.filter = filterStr;
+          }
+
+          const rawFill = ensureFillStructure(animProps.fill);
+          if (typeof rawFill === 'string') {
+            targetCtx.fillStyle = rawFill;
+          } else {
+            targetCtx.fillStyle = getCanvasFillStyle(targetCtx, rawFill, { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }, ePts);
+          }
+          targetCtx.strokeStyle = es.stroke || '#000';
+          targetCtx.lineWidth = es.strokeWidth || 2;
+          drawPolygonPathLocal(targetCtx, ePts, eHoles);
+          targetCtx.fill('evenodd');
+          targetCtx.stroke();
+          targetCtx.filter = 'none';
+          targetCtx.restore();
+        }
+        continue;
+      }
+
+      const pts = getAnimatedWorldPoints(s, frame);
+      const holes = getAnimatedWorldHoles(s, frame);
+      const animProps = getAnimatedShapeProps(s, frame);
+      const rawFill = ensureFillStructure(animProps.fill);
+      const fillTransform = {
+        tx: animProps.tx, ty: animProps.ty,
+        rotation: animProps.rotation,
+        scaleX: animProps.scaleX, scaleY: animProps.scaleY
+      };
+
+      const effects = getActiveEffects(s, frame);
+      const masks = getMasksOfShape(s.id);
+
+      if (masks.length > 0) {
+        const clipMasks = masks.filter(function(m) { return getMaskType(m) === 'clip'; });
+        if (clipMasks.length > 0) {
+          targetCtx.save();
+          for (const mask of clipMasks) {
+            const maskPts = getAnimatedWorldPoints(mask, frame);
+            const maskHoles = getAnimatedWorldHoles(mask, frame);
+            drawPolygonPathLocal(targetCtx, maskPts, maskHoles);
+          }
+          targetCtx.clip('evenodd');
+        }
+      }
+
+      targetCtx.save();
+      targetCtx.globalAlpha = animProps.opacity;
+
+      if (effects.length > 0) {
+        const hasInnerGlow = effects.some(function(e) { return e.type === 'inner-glow'; });
+        if (hasInnerGlow) {
+          const glowEffect = effects.find(function(e) { return e.type === 'inner-glow'; });
+          const gp = glowEffect.params;
+
+          const shapeBounds = getBounds(pts);
+          const pad = gp.spread + 10;
+          const x = shapeBounds.minX - pad;
+          const y = shapeBounds.minY - pad;
+          const w = shapeBounds.maxX - shapeBounds.minX + pad * 2;
+          const h = shapeBounds.maxY - shapeBounds.minY + pad * 2;
+
+          const offscreen = document.createElement('canvas');
+          offscreen.width = Math.ceil(w);
+          offscreen.height = Math.ceil(h);
+          const octx = offscreen.getContext('2d');
+          octx.translate(-x, -y);
+
+          const otherEffects = effects.filter(function(e) { return e.type !== 'inner-glow'; });
+          if (otherEffects.length > 0) {
+            octx.filter = buildCanvasFilterString(otherEffects);
+          }
+
+          drawPolygonPathLocal(octx, pts, holes);
+          if (typeof rawFill === 'string') {
+            octx.fillStyle = rawFill;
+          } else {
+            octx.fillStyle = getCanvasFillStyle(octx, rawFill, fillTransform, pts);
+          }
+          octx.fill('evenodd');
+
+          octx.globalCompositeOperation = 'source-atop';
+          octx.shadowColor = gp.color;
+          octx.shadowBlur = gp.spread;
+          octx.shadowOffsetX = 0;
+          octx.shadowOffsetY = 0;
+          octx.beginPath();
+          octx.rect(x, y, w, h);
+          octx.fillStyle = gp.color;
+          octx.fill();
+
+          targetCtx.drawImage(offscreen, x, y, w, h);
+        } else {
+          const filterStr = buildCanvasFilterString(effects);
+          if (filterStr !== 'none') targetCtx.filter = filterStr;
+
+          drawPolygonPathLocal(targetCtx, pts, holes);
+          if (typeof rawFill === 'string') {
+            targetCtx.fillStyle = rawFill;
+          } else {
+            targetCtx.fillStyle = getCanvasFillStyle(targetCtx, rawFill, fillTransform, pts);
+          }
+          targetCtx.fill('evenodd');
+          targetCtx.strokeStyle = s.stroke || '#000';
+          targetCtx.lineWidth = s.strokeWidth || 2;
+          targetCtx.stroke();
+          targetCtx.filter = 'none';
+        }
+      } else {
+        drawPolygonPathLocal(targetCtx, pts, holes);
+        if (typeof rawFill === 'string') {
+          targetCtx.fillStyle = rawFill;
+        } else {
+          targetCtx.fillStyle = getCanvasFillStyle(targetCtx, rawFill, fillTransform, pts);
+        }
+        targetCtx.fill('evenodd');
+        targetCtx.strokeStyle = s.stroke || '#000';
+        targetCtx.lineWidth = s.strokeWidth || 2;
+        targetCtx.stroke();
+      }
+
+      targetCtx.restore();
+
+      if (masks.length > 0) {
+        const clipMasks = masks.filter(function(m) { return getMaskType(m) === 'clip'; });
+        if (clipMasks.length > 0) {
+          targetCtx.restore();
+        }
+      }
+    }
+
+    targetCtx.restore();
+  };
+
+  initEffectsPanel();
+
+  const _origUpdateFillPanel = updateFillPanel;
+  updateFillPanel = function() {
+    _origUpdateFillPanel();
+    updateEffectsPanel();
+  };
+
+  const _origUpdateToolbar = updateToolbar;
+  updateToolbar = function() {
+    _origUpdateToolbar();
+    updateEffectsPanel();
+  };
+
+  const _origUndo = undo;
+  undo = function() {
+    _origUndo();
+    updateEffectsPanel();
+  };
+
+  const _origRedo = redo;
+  redo = function() {
+    _origRedo();
+    updateEffectsPanel();
+  };
+
+  if (typeof openInstanceOverrideDialog === 'function') {
+    const _origOpenInstanceOverrideDialog = openInstanceOverrideDialog;
+    openInstanceOverrideDialog = function(instanceId) {
+      _origOpenInstanceOverrideDialog(instanceId);
+
+      const instance = getShapeById(instanceId);
+      if (!instance || !isComponentInstance(instance)) return;
+
+      const dialogEl = document.getElementById('instance-override-dialog');
+      const bodyEl = dialogEl ? dialogEl.querySelector('.modal-body') : null;
+      if (!bodyEl) return;
+
+      const effectsSection = document.createElement('div');
+      effectsSection.className = 'form-row';
+      effectsSection.style.flexDirection = 'column';
+      effectsSection.style.alignItems = 'flex-start';
+
+      const effectsLabel = document.createElement('label');
+      effectsLabel.style.marginBottom = '4px';
+      effectsLabel.style.fontSize = '12px';
+      effectsLabel.style.fontWeight = '600';
+      effectsLabel.textContent = 'Effects Override:';
+      effectsSection.appendChild(effectsLabel);
+
+      const effectsBtnRow = document.createElement('div');
+      effectsBtnRow.style.display = 'flex';
+      effectsBtnRow.style.gap = '4px';
+
+      const resetEffectsBtn = document.createElement('button');
+      resetEffectsBtn.className = 'mini-btn fill-btn';
+      resetEffectsBtn.textContent = 'Reset Effects';
+      resetEffectsBtn.style.fontSize = '10px';
+      resetEffectsBtn.style.padding = '3px 8px';
+      resetEffectsBtn.addEventListener('click', function() {
+        if (instance.overrides) {
+          delete instance.overrides.effects;
+        }
+        render();
+        scheduleSave();
+      });
+
+      const copySrcEffectsBtn = document.createElement('button');
+      copySrcEffectsBtn.className = 'mini-btn fill-btn';
+      copySrcEffectsBtn.textContent = 'Copy Source Effects';
+      copySrcEffectsBtn.style.fontSize = '10px';
+      copySrcEffectsBtn.style.padding = '3px 8px';
+      copySrcEffectsBtn.addEventListener('click', function() {
+        if (!instance.overrides) instance.overrides = {};
+        const comp = getComponentById(instance.componentId);
+        if (comp && comp.shapes && comp.shapes.length > 0) {
+          const srcEffects = comp.shapes[0].effects;
+          instance.overrides.effects = srcEffects ? JSON.parse(JSON.stringify(srcEffects)) : [];
+        }
+        render();
+        scheduleSave();
+      });
+
+      effectsBtnRow.appendChild(resetEffectsBtn);
+      effectsBtnRow.appendChild(copySrcEffectsBtn);
+      effectsSection.appendChild(effectsBtnRow);
+      bodyEl.appendChild(effectsSection);
+    };
+  }
 })();

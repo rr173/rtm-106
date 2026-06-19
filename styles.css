@@ -2814,3 +2814,185 @@ body.rulers-visible #canvas {
 .right-label {
   right: 16px;
 }
+
+/* ========== Effects Panel ========== */
+#effects-panel {
+  position: fixed;
+  top: 232px;
+  right: 260px;
+  width: 200px;
+  max-height: calc(100vh - 244px);
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.12);
+  display: none;
+  flex-direction: column;
+  z-index: 10;
+  overflow: hidden;
+}
+
+#effects-panel.visible {
+  display: flex;
+}
+
+.add-effect-select {
+  font-size: 11px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 2px 4px;
+  background: #fafafa;
+  color: #333;
+  cursor: pointer;
+  outline: none;
+}
+
+.add-effect-select:focus {
+  border-color: #4d9fff;
+}
+
+#effects-list {
+  overflow-y: auto;
+  flex: 1;
+  padding: 4px;
+}
+
+.effect-item {
+  background: #fafafa;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  transition: all 0.12s;
+  cursor: grab;
+}
+
+.effect-item:active {
+  cursor: grabbing;
+}
+
+.effect-item.disabled {
+  opacity: 0.5;
+}
+
+.effect-item.drag-over {
+  border-color: #1a73e8;
+  background: #e3f0ff;
+}
+
+.effect-item-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border-bottom: 1px solid #eee;
+}
+
+.effect-toggle {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: #1a73e8;
+  flex-shrink: 0;
+}
+
+.effect-name {
+  flex: 1;
+  font-size: 11px;
+  font-weight: 600;
+  color: #333;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.effect-delete {
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: transparent;
+  border-radius: 3px;
+  cursor: pointer;
+  color: #999;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.effect-item:hover .effect-delete {
+  opacity: 1;
+}
+
+.effect-delete:hover {
+  background: #ffcdd2;
+  color: #c62828;
+}
+
+.effect-params {
+  padding: 6px;
+}
+
+.effect-param-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.effect-param-row label {
+  font-size: 10px;
+  color: #666;
+  min-width: 24px;
+  flex-shrink: 0;
+}
+
+.effect-param-row input[type="range"] {
+  flex: 1;
+  height: 4px;
+  accent-color: #1a73e8;
+}
+
+.effect-param-row input[type="number"] {
+  width: 44px;
+  font-size: 10px;
+  border: 1px solid #ddd;
+  border-radius: 3px;
+  padding: 1px 3px;
+  text-align: center;
+}
+
+.effect-param-row input[type="color"] {
+  width: 24px;
+  height: 20px;
+  border: 1px solid #ddd;
+  border-radius: 3px;
+  padding: 0;
+  cursor: pointer;
+}
+
+.effect-param-row .unit {
+  font-size: 9px;
+  color: #aaa;
+  min-width: 14px;
+}
+
+.effect-drag-handle {
+  cursor: grab;
+  color: #bbb;
+  font-size: 10px;
+  padding: 0 2px;
+  user-select: none;
+}
+
+.effect-drag-handle:active {
+  cursor: grabbing;
+}
+
+.effects-empty {
+  padding: 16px 8px;
+  text-align: center;
+  color: #aaa;
+  font-size: 11px;
+}
