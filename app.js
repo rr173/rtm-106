@@ -291,6 +291,99 @@
     return shapes.find(s => s.id === id);
   }
 
+  function isMaskShape(shape) {
+    return shape && shape.maskOf !== undefined && shape.maskOf !== null;
+  }
+
+  function getMasksOfShape(shapeId) {
+    return shapes.filter(s => s.maskOf === shapeId && s.visible);
+  }
+
+  function getMaskedShape(maskShapeId) {
+    const maskShape = getShapeById(maskShapeId);
+    if (!maskShape || !isMaskShape(maskShape)) return null;
+    return getShapeById(maskShape.maskOf);
+  }
+
+  function getMaskType(maskShape) {
+    return maskShape.maskType || 'clip';
+  }
+
+  function isAlphaMask(maskShape) {
+    return getMaskType(maskShape) === 'alpha';
+  }
+
+  function collectAllMaskedIds(shapeIds) {
+    const result = new Set(shapeIds);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const s of shapes) {
+        if (isMaskShape(s) && result.has(s.maskOf) && !result.has(s.id)) {
+          result.add(s.id);
+          changed = true;
+        }
+      }
+    }
+    return [...result];
+  }
+
+  function createClipMask(maskedShapeId, maskShapeId) {
+    const maskedShape = getShapeById(maskedShapeId);
+    const maskShape = getShapeById(maskShapeId);
+    if (!maskedShape || !maskShape) return false;
+    if (isMaskShape(maskedShape)) return false;
+    if (isMaskShape(maskShape)) return false;
+
+    maskShape.maskOf = maskedShapeId;
+    maskShape.maskType = 'clip';
+    maskShape._originalVisible = maskShape.visible !== false;
+
+    const maskIdx = shapes.findIndex(s => s.id === maskShapeId);
+    const maskedIdx = shapes.findIndex(s => s.id === maskedShapeId);
+    if (maskIdx > maskedIdx) {
+      shapes.splice(maskIdx, 1);
+      shapes.splice(maskedIdx, 0, maskShape);
+    }
+
+    return true;
+  }
+
+  function createAlphaMask(maskedShapeId, maskShapeId) {
+    const maskedShape = getShapeById(maskedShapeId);
+    const maskShape = getShapeById(maskShapeId);
+    if (!maskedShape || !maskShape) return false;
+    if (isMaskShape(maskedShape)) return false;
+    if (isMaskShape(maskShape)) return false;
+
+    maskShape.maskOf = maskedShapeId;
+    maskShape.maskType = 'alpha';
+    maskShape._originalVisible = maskShape.visible !== false;
+
+    const maskIdx = shapes.findIndex(s => s.id === maskShapeId);
+    const maskedIdx = shapes.findIndex(s => s.id === maskedShapeId);
+    if (maskIdx > maskedIdx) {
+      shapes.splice(maskIdx, 1);
+      shapes.splice(maskedIdx, 0, maskShape);
+    }
+
+    return true;
+  }
+
+  function releaseMask(maskShapeId) {
+    const maskShape = getShapeById(maskShapeId);
+    if (!maskShape || !isMaskShape(maskShape)) return false;
+
+    delete maskShape.maskOf;
+    delete maskShape.maskType;
+    if (maskShape._originalVisible !== undefined) {
+      maskShape.visible = maskShape._originalVisible;
+      delete maskShape._originalVisible;
+    }
+
+    return true;
+  }
+
   function deepCloneState() {
     return {
       shapes: JSON.parse(JSON.stringify(shapes)),
@@ -907,6 +1000,21 @@
         if (!inHole) return s;
       }
     }
+    
+    for (let i = shapes.length - 1; i >= 0; i--) {
+      const s = shapes[i];
+      if (!s.visible || s.locked) continue;
+      if (!isMaskShape(s)) continue;
+      const wp = worldPointsOf(s);
+      if (!pointInPolygonOrOnEdge(pt, wp)) continue;
+      const holes = worldHolesOf(s);
+      let inHole = false;
+      for (const hole of holes) {
+        if (pointInPolygonOrOnEdge(pt, hole)) { inHole = true; break; }
+      }
+      if (!inHole) return s;
+    }
+    
     return null;
   }
 
@@ -1664,10 +1772,130 @@
     }
   }
 
-  function renderShape(s) {
-    const currentFrame = animationController.currentFrame;
-    const useAnimation = animationController.isPlaying || animationController.currentFrame > 0;
+  function renderMaskOutline(maskShape) {
+    const pts = worldPointsOf(maskShape);
+    const holes = worldHolesOf(maskShape);
+    ctx.save();
+    drawPolygonPath(pts, holes);
+    ctx.strokeStyle = '#666';
+    ctx.lineWidth = 1.5 / viewport.scale;
+    ctx.setLineDash([6 / viewport.scale, 4 / viewport.scale]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
 
+  function applyClipMasks(masks, useAnimation, currentFrame) {
+    if (masks.length === 0) return;
+    const clipMasks = masks.filter(m => getMaskType(m) === 'clip');
+    if (clipMasks.length === 0) return;
+
+    for (const mask of clipMasks) {
+      const maskPts = useAnimation ? getAnimatedWorldPoints(mask, currentFrame) : worldPointsOf(mask);
+      const maskHoles = useAnimation ? getAnimatedWorldHoles(mask, currentFrame) : worldHolesOf(mask);
+      drawPolygonPath(maskPts, maskHoles);
+    }
+    ctx.clip('evenodd');
+  }
+
+  function renderShapeWithAlphaMask(s, masks, useAnimation, currentFrame) {
+    const alphaMasks = masks.filter(m => getMaskType(m) === 'alpha');
+    if (alphaMasks.length === 0) {
+      renderShapeRaw(s, useAnimation, currentFrame);
+      return;
+    }
+
+    const pts = useAnimation ? getAnimatedWorldPoints(s, currentFrame) : worldPointsOf(s);
+    const holes = useAnimation ? getAnimatedWorldHoles(s, currentFrame) : worldHolesOf(s);
+    const allBounds = getBounds(pts);
+
+    for (const mask of alphaMasks) {
+      const maskPts = useAnimation ? getAnimatedWorldPoints(mask, currentFrame) : worldPointsOf(mask);
+      const mb = getBounds(maskPts);
+      allBounds.minX = Math.min(allBounds.minX, mb.minX);
+      allBounds.minY = Math.min(allBounds.minY, mb.minY);
+      allBounds.maxX = Math.max(allBounds.maxX, mb.maxX);
+      allBounds.maxY = Math.max(allBounds.maxY, mb.maxY);
+    }
+
+    const pad = 2;
+    const x = allBounds.minX - pad;
+    const y = allBounds.minY - pad;
+    const w = allBounds.maxX - allBounds.minX + pad * 2;
+    const h = allBounds.maxY - allBounds.minY + pad * 2;
+
+    const offscreen = document.createElement('canvas');
+    offscreen.width = w * viewport.scale;
+    offscreen.height = h * viewport.scale;
+    const octx = offscreen.getContext('2d');
+    octx.scale(viewport.scale, viewport.scale);
+    octx.translate(-x, -y);
+
+    const savedCtx = ctx;
+    ctx = octx;
+    renderShapeRaw(s, useAnimation, currentFrame);
+    ctx = savedCtx;
+
+    const maskCanvas = document.createElement('canvas');
+    maskCanvas.width = w * viewport.scale;
+    maskCanvas.height = h * viewport.scale;
+    const mctx = maskCanvas.getContext('2d');
+    mctx.scale(viewport.scale, viewport.scale);
+    mctx.translate(-x, -y);
+
+    for (let i = 0; i < alphaMasks.length; i++) {
+      const mask = alphaMasks[i];
+      const maskPts = useAnimation ? getAnimatedWorldPoints(mask, currentFrame) : worldPointsOf(mask);
+      const maskHoles = useAnimation ? getAnimatedWorldHoles(mask, currentFrame) : worldHolesOf(mask);
+
+      if (i === 0) {
+        mctx.save();
+        mctx.beginPath();
+        for (const p of maskPts) {
+          const idx = maskPts.indexOf(p);
+          if (idx === 0) mctx.moveTo(p.x, p.y);
+          else mctx.lineTo(p.x, p.y);
+        }
+        mctx.closePath();
+        mctx.fillStyle = '#fff';
+        mctx.globalAlpha = 1;
+        mctx.fill('evenodd');
+        mctx.restore();
+      } else {
+        mctx.globalCompositeOperation = 'destination-in';
+        mctx.save();
+        mctx.beginPath();
+        for (const p of maskPts) {
+          const idx = maskPts.indexOf(p);
+          if (idx === 0) mctx.moveTo(p.x, p.y);
+          else mctx.lineTo(p.x, p.y);
+        }
+        mctx.closePath();
+        mctx.fillStyle = '#fff';
+        mctx.fill('evenodd');
+        mctx.restore();
+        mctx.globalCompositeOperation = 'source-over';
+      }
+    }
+
+    const maskImgData = mctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+    const shapeImgData = octx.getImageData(0, 0, offscreen.width, offscreen.height);
+    const maskData = maskImgData.data;
+    const shapeData = shapeImgData.data;
+
+    for (let i = 0; i < shapeData.length; i += 4) {
+      const maskAlpha = maskData[i] / 255;
+      shapeData[i + 3] = shapeData[i + 3] * maskAlpha;
+    }
+
+    octx.putImageData(shapeImgData, 0, 0);
+
+    savedCtx.save();
+    savedCtx.drawImage(offscreen, x, y, w, h);
+    savedCtx.restore();
+  }
+
+  function renderShapeRaw(s, useAnimation, currentFrame) {
     if (s.type === 'motion-path') {
       const pts = worldPointsOf(s);
       const opacity = s.opacity !== undefined ? s.opacity : 1;
@@ -1744,6 +1972,40 @@
       ctx.lineWidth = (s.strokeWidth || 2) / viewport.scale;
       ctx.strokeStyle = s.stroke || '#000';
       ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function renderShape(s) {
+    const currentFrame = animationController.currentFrame;
+    const useAnimation = animationController.isPlaying || animationController.currentFrame > 0;
+
+    if (isMaskShape(s)) {
+      if (selectedIds.has(s.id) || isNodeEditMode) {
+        renderMaskOutline(s);
+      }
+      return;
+    }
+
+    const masks = getMasksOfShape(s.id);
+
+    if (masks.length === 0) {
+      renderShapeRaw(s, useAnimation, currentFrame);
+      return;
+    }
+
+    const clipMasks = masks.filter(m => getMaskType(m) === 'clip');
+    const alphaMasks = masks.filter(m => getMaskType(m) === 'alpha');
+
+    if (alphaMasks.length === 0) {
+      ctx.save();
+      applyClipMasks(masks, useAnimation, currentFrame);
+      renderShapeRaw(s, useAnimation, currentFrame);
+      ctx.restore();
+    } else {
+      ctx.save();
+      applyClipMasks(clipMasks, useAnimation, currentFrame);
+      renderShapeWithAlphaMask(s, alphaMasks, useAnimation, currentFrame);
       ctx.restore();
     }
   }
@@ -1835,6 +2097,259 @@
     }
   }
 
+  function createLayerItem(s, isMask, indentLevel) {
+    const item = document.createElement('div');
+    item.className = 'layer-item';
+    item.dataset.id = s.id;
+    item.draggable = true;
+    if (selectedIds.has(s.id)) item.classList.add('selected');
+    if (s.locked) item.classList.add('locked');
+    if (isComponentInstance(s)) item.classList.add('is-instance');
+    if (isMask) item.classList.add('mask-layer');
+
+    if (indentLevel && indentLevel > 0) {
+      item.style.paddingLeft = (indentLevel * 20) + 'px';
+    }
+
+    const visibilityBtn = document.createElement('button');
+    visibilityBtn.className = 'layer-btn ' + (s.visible ? 'active' : 'inactive');
+    visibilityBtn.innerHTML = s.visible
+      ? '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>'
+      : '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78l3.15 3.15.02-.16c0-1.66-1.34-3-3-3l-.17.01z"/></svg>';
+    visibilityBtn.title = s.visible ? 'Hide' : 'Show';
+    visibilityBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      pushHistory();
+      s.visible = !s.visible;
+      if (!s.visible && selectedIds.has(s.id)) {
+        selectedIds.delete(s.id);
+        if (selectedIds.size === 0) { isNodeEditMode = false; selectedVertex = null; }
+      }
+      updateToolbar();
+      renderLayers();
+      renderComponentsList();
+      render();
+    });
+
+    const colorSwatch = document.createElement('div');
+    colorSwatch.className = 'layer-color';
+    let displayFill = s.fill;
+    if (isComponentInstance(s) && s.overrides && s.overrides.fill) {
+      displayFill = s.overrides.fill;
+    }
+    colorSwatch.style.background = displayFill;
+
+    const nameWrapper = document.createElement('div');
+    nameWrapper.style.display = 'flex';
+    nameWrapper.style.alignItems = 'center';
+    nameWrapper.style.flex = '1';
+    nameWrapper.style.minWidth = '0';
+
+    if (isMask) {
+      const maskIcon = document.createElement('span');
+      maskIcon.className = 'mask-icon';
+      maskIcon.title = getMaskType(s) === 'alpha' ? 'Alpha Mask' : 'Clip Mask';
+      maskIcon.innerHTML = getMaskType(s) === 'alpha'
+        ? '<svg viewBox="0 0 24 24" width="14" height="14"><defs><linearGradient id="maskGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#000;stop-opacity:1" /><stop offset="100%" style="stop-color:#fff;stop-opacity:1" /></linearGradient></defs><rect x="3" y="3" width="18" height="18" rx="2" fill="url(#maskGrad)" stroke="#666" stroke-width="1.5"/></svg>'
+        : '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8z" opacity="0.4"/><path fill="currentColor" d="M12 6c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6-2.69-6-6-6z"/></svg>';
+      nameWrapper.appendChild(maskIcon);
+    }
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'layer-name';
+    if (isComponentInstance(s)) {
+      const comp = getComponentById(s.componentId);
+      nameEl.textContent = comp ? comp.name : s.name;
+    } else {
+      nameEl.textContent = s.name;
+    }
+    nameEl.title = isComponentInstance(s) ? 'Component Instance - Double-click to edit component' : 'Double-click to rename';
+    nameEl.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      if (isComponentInstance(s)) {
+        enterComponentEditMode(s.componentId);
+      } else {
+        startRenameLayer(item, s, nameEl);
+      }
+    });
+
+    if (isComponentInstance(s)) {
+      const badge = document.createElement('span');
+      badge.className = 'layer-badge';
+      badge.textContent = 'C';
+      nameWrapper.appendChild(badge);
+    }
+    if (s.type === 'motion-path') {
+      const badge = document.createElement('span');
+      badge.className = 'layer-badge';
+      badge.textContent = 'P';
+      badge.style.background = '#8e24aa';
+      badge.style.color = '#fff';
+      nameWrapper.appendChild(badge);
+    }
+    nameWrapper.appendChild(nameEl);
+
+    const lockBtn = document.createElement('button');
+    lockBtn.className = 'layer-btn ' + (s.locked ? 'active' : 'inactive');
+    lockBtn.innerHTML = s.locked
+      ? '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>'
+      : '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6zm9 14H6V10h12v10zm-6-3c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2z"/></svg>';
+    lockBtn.title = s.locked ? 'Unlock' : 'Lock';
+    lockBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      pushHistory();
+      s.locked = !s.locked;
+      if (s.locked && selectedIds.has(s.id)) {
+        selectedIds.delete(s.id);
+        selectedVertex = null;
+        isNodeEditMode = false;
+      }
+      updateToolbar();
+      renderLayers();
+      render();
+    });
+
+    item.appendChild(visibilityBtn);
+    item.appendChild(colorSwatch);
+    item.appendChild(nameWrapper);
+
+    if (isComponentInstance(s)) {
+      const actionsDiv = document.createElement('div');
+      actionsDiv.className = 'instance-context-actions';
+
+      const overrideBtn = document.createElement('button');
+      overrideBtn.className = 'instance-action-btn';
+      overrideBtn.innerHTML = '🎨';
+      overrideBtn.title = 'Instance Overrides';
+      overrideBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openInstanceOverrideDialog(s.id);
+      });
+
+      const unlinkBtn = document.createElement('button');
+      unlinkBtn.className = 'instance-action-btn';
+      unlinkBtn.innerHTML = '⟳';
+      unlinkBtn.title = 'Unlink Instance';
+      unlinkBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        unlinkInstance(s.id);
+      });
+
+      const editBtn = document.createElement('button');
+      editBtn.className = 'instance-action-btn';
+      editBtn.innerHTML = '✎';
+      editBtn.title = 'Edit Source Component';
+      editBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        enterComponentEditMode(s.componentId);
+      });
+
+      actionsDiv.appendChild(overrideBtn);
+      actionsDiv.appendChild(unlinkBtn);
+      actionsDiv.appendChild(editBtn);
+      item.appendChild(actionsDiv);
+    }
+
+    item.appendChild(lockBtn);
+
+    item.addEventListener('click', (e) => {
+      if (s.locked) return;
+      if (e.shiftKey) {
+        if (selectedIds.has(s.id)) selectedIds.delete(s.id);
+        else selectedIds.add(s.id);
+      } else {
+        selectedIds.clear();
+        selectedIds.add(s.id);
+      }
+      selectedVertex = null;
+      constraintSelection = [];
+      updateToolbar();
+      renderLayers();
+      render();
+    });
+
+    item.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (isMaskShape(s)) {
+        showLayerContextMenu(e.clientX, e.clientY, s);
+      }
+    });
+
+    item.addEventListener('dragstart', (e) => {
+      item.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', s.id.toString());
+    });
+    item.addEventListener('dragend', () => {
+      item.classList.remove('dragging');
+      document.querySelectorAll('.layer-item.drag-over').forEach(el => el.classList.remove('drag-over'));
+    });
+    item.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      document.querySelectorAll('.layer-item.drag-over').forEach(el => el.classList.remove('drag-over'));
+      item.classList.add('drag-over');
+    });
+    item.addEventListener('dragleave', () => item.classList.remove('drag-over'));
+    item.addEventListener('drop', (e) => {
+      e.preventDefault();
+      item.classList.remove('drag-over');
+      const draggedId = parseInt(e.dataTransfer.getData('text/plain'), 10);
+      if (isNaN(draggedId) || draggedId === s.id) return;
+      const draggedIdx = shapes.findIndex(sh => sh.id === draggedId);
+      const targetIdx = shapes.findIndex(sh => sh.id === s.id);
+      if (draggedIdx === -1 || targetIdx === -1) return;
+      pushHistory();
+      const [dragged] = shapes.splice(draggedIdx, 1);
+      const newTargetIdx = shapes.findIndex(sh => sh.id === s.id);
+      shapes.splice(newTargetIdx, 0, dragged);
+      renderLayers();
+      render();
+    });
+
+    return item;
+  }
+
+  function showLayerContextMenu(x, y, shape) {
+    let menu = document.getElementById('layer-context-menu');
+    if (!menu) {
+      menu = document.createElement('div');
+      menu.id = 'layer-context-menu';
+      menu.className = 'context-menu';
+      document.body.appendChild(menu);
+    }
+    menu.innerHTML = '';
+    menu.style.left = x + 'px';
+    menu.style.top = y + 'px';
+
+    const releaseItem = document.createElement('div');
+    releaseItem.className = 'menu-item';
+    releaseItem.innerHTML = '✂️ Release Mask';
+    releaseItem.addEventListener('click', () => {
+      pushHistory();
+      releaseMask(shape.id);
+      menu.classList.add('hidden');
+      updateToolbar();
+      renderLayers();
+      render();
+      showToast('Mask released', 'success');
+    });
+    menu.appendChild(releaseItem);
+
+    menu.classList.remove('hidden');
+
+    const closeMenu = (e) => {
+      if (!menu.contains(e.target)) {
+        menu.classList.add('hidden');
+        document.removeEventListener('mousedown', closeMenu);
+      }
+    };
+    setTimeout(() => {
+      document.addEventListener('mousedown', closeMenu);
+    }, 10);
+  }
+
   function renderLayers() {
     if (editingComponentId !== null) return;
     layersListEl.innerHTML = '';
@@ -1845,195 +2360,32 @@
       layersListEl.appendChild(empty);
       return;
     }
+
+    const processed = new Set();
+
     for (let i = shapes.length - 1; i >= 0; i--) {
       const s = shapes[i];
-      const item = document.createElement('div');
-      item.className = 'layer-item';
-      item.dataset.id = s.id;
-      item.draggable = true;
-      if (selectedIds.has(s.id)) item.classList.add('selected');
-      if (s.locked) item.classList.add('locked');
-      if (isComponentInstance(s)) item.classList.add('is-instance');
+      if (processed.has(s.id)) continue;
+      if (isMaskShape(s)) continue;
 
-      const visibilityBtn = document.createElement('button');
-      visibilityBtn.className = 'layer-btn ' + (s.visible ? 'active' : 'inactive');
-      visibilityBtn.innerHTML = s.visible
-        ? '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>'
-        : '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78l3.15 3.15.02-.16c0-1.66-1.34-3-3-3l-.17.01z"/></svg>';
-      visibilityBtn.title = s.visible ? 'Hide' : 'Show';
-      visibilityBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        pushHistory();
-        s.visible = !s.visible;
-        if (!s.visible && selectedIds.has(s.id)) {
-          selectedIds.delete(s.id);
-          if (selectedIds.size === 0) { isNodeEditMode = false; selectedVertex = null; }
-        }
-        updateToolbar();
-        renderLayers();
-        renderComponentsList();
-        render();
-      });
-
-      const colorSwatch = document.createElement('div');
-      colorSwatch.className = 'layer-color';
-      let displayFill = s.fill;
-      if (isComponentInstance(s) && s.overrides && s.overrides.fill) {
-        displayFill = s.overrides.fill;
-      }
-      colorSwatch.style.background = displayFill;
-
-      const nameWrapper = document.createElement('div');
-      nameWrapper.style.display = 'flex';
-      nameWrapper.style.alignItems = 'center';
-      nameWrapper.style.flex = '1';
-      nameWrapper.style.minWidth = '0';
-
-      const nameEl = document.createElement('span');
-      nameEl.className = 'layer-name';
-      if (isComponentInstance(s)) {
-        const comp = getComponentById(s.componentId);
-        nameEl.textContent = comp ? comp.name : s.name;
-      } else {
-        nameEl.textContent = s.name;
-      }
-      nameEl.title = isComponentInstance(s) ? 'Component Instance - Double-click to edit component' : 'Double-click to rename';
-      nameEl.addEventListener('dblclick', (e) => {
-        e.stopPropagation();
-        if (isComponentInstance(s)) {
-          enterComponentEditMode(s.componentId);
-        } else {
-          startRenameLayer(item, s, nameEl);
-        }
-      });
-
-      if (isComponentInstance(s)) {
-        const badge = document.createElement('span');
-        badge.className = 'layer-badge';
-        badge.textContent = 'C';
-        nameWrapper.appendChild(badge);
-      }
-      if (s.type === 'motion-path') {
-        const badge = document.createElement('span');
-        badge.className = 'layer-badge';
-        badge.textContent = 'P';
-        badge.style.background = '#8e24aa';
-        badge.style.color = '#fff';
-        nameWrapper.appendChild(badge);
-      }
-      nameWrapper.appendChild(nameEl);
-
-      const lockBtn = document.createElement('button');
-      lockBtn.className = 'layer-btn ' + (s.locked ? 'active' : 'inactive');
-      lockBtn.innerHTML = s.locked
-        ? '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>'
-        : '<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6zm9 14H6V10h12v10zm-6-3c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2z"/></svg>';
-      lockBtn.title = s.locked ? 'Unlock' : 'Lock';
-      lockBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        pushHistory();
-        s.locked = !s.locked;
-        if (s.locked && selectedIds.has(s.id)) {
-          selectedIds.delete(s.id);
-          selectedVertex = null;
-          isNodeEditMode = false;
-        }
-        updateToolbar();
-        renderLayers();
-        render();
-      });
-
-      item.appendChild(visibilityBtn);
-      item.appendChild(colorSwatch);
-      item.appendChild(nameWrapper);
-
-      if (isComponentInstance(s)) {
-        const actionsDiv = document.createElement('div');
-        actionsDiv.className = 'instance-context-actions';
-
-        const overrideBtn = document.createElement('button');
-        overrideBtn.className = 'instance-action-btn';
-        overrideBtn.innerHTML = '🎨';
-        overrideBtn.title = 'Instance Overrides';
-        overrideBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          openInstanceOverrideDialog(s.id);
-        });
-
-        const unlinkBtn = document.createElement('button');
-        unlinkBtn.className = 'instance-action-btn';
-        unlinkBtn.innerHTML = '⟳';
-        unlinkBtn.title = 'Unlink Instance';
-        unlinkBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          unlinkInstance(s.id);
-        });
-
-        const editBtn = document.createElement('button');
-        editBtn.className = 'instance-action-btn';
-        editBtn.innerHTML = '✎';
-        editBtn.title = 'Edit Source Component';
-        editBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          enterComponentEditMode(s.componentId);
-        });
-
-        actionsDiv.appendChild(overrideBtn);
-        actionsDiv.appendChild(unlinkBtn);
-        actionsDiv.appendChild(editBtn);
-        item.appendChild(actionsDiv);
-      }
-
-      item.appendChild(lockBtn);
-
-      item.addEventListener('click', (e) => {
-        if (s.locked) return;
-        if (e.shiftKey) {
-          if (selectedIds.has(s.id)) selectedIds.delete(s.id);
-          else selectedIds.add(s.id);
-        } else {
-          selectedIds.clear();
-          selectedIds.add(s.id);
-        }
-        selectedVertex = null;
-        constraintSelection = [];
-        updateToolbar();
-        renderLayers();
-        render();
-      });
-
-      item.addEventListener('dragstart', (e) => {
-        item.classList.add('dragging');
-        e.dataTransfer.effectAllowed = 'move';
-        e.dataTransfer.setData('text/plain', s.id.toString());
-      });
-      item.addEventListener('dragend', () => {
-        item.classList.remove('dragging');
-        document.querySelectorAll('.layer-item.drag-over').forEach(el => el.classList.remove('drag-over'));
-      });
-      item.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
-        document.querySelectorAll('.layer-item.drag-over').forEach(el => el.classList.remove('drag-over'));
-        item.classList.add('drag-over');
-      });
-      item.addEventListener('dragleave', () => item.classList.remove('drag-over'));
-      item.addEventListener('drop', (e) => {
-        e.preventDefault();
-        item.classList.remove('drag-over');
-        const draggedId = parseInt(e.dataTransfer.getData('text/plain'), 10);
-        if (isNaN(draggedId) || draggedId === s.id) return;
-        const draggedIdx = shapes.findIndex(sh => sh.id === draggedId);
-        const targetIdx = shapes.findIndex(sh => sh.id === s.id);
-        if (draggedIdx === -1 || targetIdx === -1) return;
-        pushHistory();
-        const [dragged] = shapes.splice(draggedIdx, 1);
-        const newTargetIdx = shapes.findIndex(sh => sh.id === s.id);
-        shapes.splice(newTargetIdx, 0, dragged);
-        renderLayers();
-        render();
-      });
+      const item = createLayerItem(s, false, 0);
       layersListEl.appendChild(item);
+      processed.add(s.id);
+
+      const masks = getMasksOfShape(s.id);
+      for (const mask of masks) {
+        const maskItem = createLayerItem(mask, true, 1);
+        layersListEl.appendChild(maskItem);
+        processed.add(mask.id);
+      }
+    }
+
+    for (let i = shapes.length - 1; i >= 0; i--) {
+      const s = shapes[i];
+      if (processed.has(s.id)) continue;
+      const item = createLayerItem(s, false, 0);
+      layersListEl.appendChild(item);
+      processed.add(s.id);
     }
   }
 
@@ -3113,6 +3465,18 @@
     document.querySelectorAll('.op-btn').forEach(b => {
       b.disabled = selectedIds.size < 2;
     });
+
+    const selectedShapes = getSelectedShapes();
+    const canCreateMask = selectedShapes.length === 2 && !selectedShapes.some(s => isMaskShape(s));
+    const hasMaskSelection = selectedShapes.some(s => isMaskShape(s));
+    
+    const maskClipBtn = document.getElementById('mask-clip');
+    const maskAlphaBtn = document.getElementById('mask-alpha');
+    const maskReleaseBtn = document.getElementById('mask-release');
+    
+    if (maskClipBtn) maskClipBtn.disabled = !canCreateMask;
+    if (maskAlphaBtn) maskAlphaBtn.disabled = !canCreateMask;
+    if (maskReleaseBtn) maskReleaseBtn.disabled = !hasMaskSelection;
     const alignDisabled = selectedIds.size < 2;
     document.querySelectorAll('.align-btn').forEach(b => {
       b.disabled = alignDisabled;
@@ -4128,10 +4492,16 @@
       }
       const handleHit = hitTestHandle(world.x, world.y);
       if (handleHit && selectedIds.size === 1) {
+        const shape = getSelectedShapes()[0];
+        if (!shape) return;
         isTransforming = true;
         transformHandle = handleHit.type;
-        const shape = getSelectedShapes()[0];
-        transformStart = { world: { ...world }, shapeData: JSON.parse(JSON.stringify(shape)) };
+        const masks = !isMaskShape(shape) ? getMasksOfShape(shape.id) : [];
+        transformStart = {
+          world: { ...world },
+          shapeData: JSON.parse(JSON.stringify(shape)),
+          maskData: masks.map(m => ({ shape: m, data: JSON.parse(JSON.stringify(m)) }))
+        };
         transformOriginalData = deepCloneState();
         pushHistory();
         canvas.style.cursor = handleHit.type === 'rotate' ? 'grab' : (handleHit.type[0] + handleHit.type[handleHit.type.length - 1] + '-resize');
@@ -4178,12 +4548,27 @@
           dragStart = { x: world.x, y: world.y };
           dragOriginalWorldPts = [];
           pushHistory();
-          for (const s of getSelectedShapes()) {
-            dragOriginalWorldPts.push({
-              shape: s,
-              points: worldPointsOf(s).map(p => ({ ...p })),
-              holes: worldHolesOf(s).map(h => h.map(p => ({ ...p })))
-            });
+          
+          const dragShapeIds = new Set([...selectedIds]);
+          for (const sid of selectedIds) {
+            const s = getShapeById(sid);
+            if (s && !isMaskShape(s)) {
+              const masks = getMasksOfShape(sid);
+              for (const mask of masks) {
+                dragShapeIds.add(mask.id);
+              }
+            }
+          }
+          
+          for (const sid of dragShapeIds) {
+            const s = getShapeById(sid);
+            if (s && !s.locked) {
+              dragOriginalWorldPts.push({
+                shape: s,
+                points: worldPointsOf(s).map(p => ({ ...p })),
+                holes: worldHolesOf(s).map(h => h.map(p => ({ ...p })))
+              });
+            }
           }
           canvas.style.cursor = 'move';
           updateToolbar();
@@ -4491,6 +4876,141 @@
           }
         }
       }
+
+      if (transformStart.maskData && transformStart.maskData.length > 0) {
+        const handle = transformHandle;
+        const origBounds = getBounds(origWp);
+        let rot = 0;
+        let sx = 1, sy = 1;
+        let anchorX, anchorY;
+        let moveDx = 0, moveDy = 0;
+
+        if (handle === 'rotate') {
+          const ang1 = Math.atan2(transformStart.world.y - origCenter.y, transformStart.world.x - origCenter.x);
+          const ang2 = Math.atan2(world.y - origCenter.y, world.x - origCenter.x);
+          rot = ang2 - ang1;
+          if (keys.shift) {
+            const snapAngle = Math.PI / 12;
+            rot = Math.round(rot / snapAngle) * snapAngle;
+          }
+          anchorX = origCenter.x;
+          anchorY = origCenter.y;
+        } else {
+          const mapCorner = (type, b) => {
+            switch (type) {
+              case 'nw': return { x: b.minX, y: b.minY };
+              case 'n':  return { x: (b.minX + b.maxX) / 2, y: b.minY };
+              case 'ne': return { x: b.maxX, y: b.minY };
+              case 'e':  return { x: b.maxX, y: (b.minY + b.maxY) / 2 };
+              case 'se': return { x: b.maxX, y: b.maxY };
+              case 's':  return { x: (b.minX + b.maxX) / 2, y: b.maxY };
+              case 'sw': return { x: b.minX, y: b.maxY };
+              case 'w':  return { x: b.minX, y: (b.minY + b.maxY) / 2 };
+            }
+          };
+          const opp = {
+            nw: 'se', n: 's', ne: 'sw', e: 'w',
+            se: 'nw', s: 'n', sw: 'ne', w: 'e'
+          };
+          const oppCorner = mapCorner(opp[handle], origBounds);
+          const origCorner = mapCorner(handle, origBounds);
+          let newCorner = { x: origCorner.x + dx, y: origCorner.y + dy };
+          const origW = origBounds.maxX - origBounds.minX;
+          const origH = origBounds.maxY - origBounds.minY;
+          if (handle.includes('e') || handle.includes('w')) {
+            const newW = Math.abs(newCorner.x - oppCorner.x);
+            sx = origW > 0 ? newW / origW : 1;
+          }
+          if (handle.includes('n') || handle.includes('s')) {
+            const newH = Math.abs(newCorner.y - oppCorner.y);
+            sy = origH > 0 ? newH / origH : 1;
+          }
+          if (e.shiftKey) {
+            const s = Math.max(sx, sy);
+            sx = s; sy = s;
+          }
+          anchorX = oppCorner.x;
+          anchorY = oppCorner.y;
+        }
+
+        const newBounds = getBounds(newPoints);
+        const newCenter = boundsCenter(newBounds);
+        const snapped = computeSnap(newCenter, new Set([s.id]), true);
+        moveDx = snapped.x - newCenter.x;
+        moveDy = snapped.y - newCenter.y;
+
+        for (const maskItem of transformStart.maskData) {
+          const maskShape = maskItem.shape;
+          const maskOrig = maskItem.data;
+          const maskOrigWp = applyTransform(maskOrig.points, maskOrig.transform.tx, maskOrig.transform.ty, maskOrig.transform.rotation, maskOrig.transform.scaleX, maskOrig.transform.scaleY);
+
+          let maskNewWp = maskOrigWp.map(p => {
+            let rx = p.x - anchorX;
+            let ry = p.y - anchorY;
+            if (rot !== 0) {
+              const cos = Math.cos(rot);
+              const sin = Math.sin(rot);
+              const nx = rx * cos - ry * sin;
+              const ny = rx * sin + ry * cos;
+              rx = nx;
+              ry = ny;
+            }
+            rx *= sx;
+            ry *= sy;
+            return {
+              x: anchorX + rx + moveDx,
+              y: anchorY + ry + moveDy
+            };
+          });
+
+          const maskLocalNewPts = applyTransformInverse(maskNewWp, maskOrig.transform.tx, maskOrig.transform.ty, maskOrig.transform.rotation, maskOrig.transform.scaleX, maskOrig.transform.scaleY);
+          maskShape.points = maskOrig.points.map(p => ({ ...p }));
+          maskShape.transform = { ...maskOrig.transform };
+          for (let i = 0; i < maskLocalNewPts.length; i++) {
+            const pid = makePointId(maskShape.id, false, -1, i);
+            extraFixed[pid + '_x'] = maskLocalNewPts[i].x;
+            extraFixed[pid + '_y'] = maskLocalNewPts[i].y;
+          }
+
+          const maskOrigHoles = maskOrig.holes || [];
+          if (maskShape.holes) {
+            const maskWorldHoles = applyTransformToHoles(maskOrigHoles, maskOrig.transform);
+            const maskLocalNewHoles = maskWorldHoles.map(h => {
+              const transformed = h.map(p => {
+                let rx = p.x - anchorX;
+                let ry = p.y - anchorY;
+                if (rot !== 0) {
+                  const cos = Math.cos(rot);
+                  const sin = Math.sin(rot);
+                  const nx = rx * cos - ry * sin;
+                  const ny = rx * sin + ry * cos;
+                  rx = nx;
+                  ry = ny;
+                }
+                rx *= sx;
+                ry *= sy;
+                return {
+                  x: anchorX + rx + moveDx,
+                  y: anchorY + ry + moveDy
+                };
+              });
+              return applyTransformInverse(transformed, maskOrig.transform.tx, maskOrig.transform.ty, maskOrig.transform.rotation, maskOrig.transform.scaleX, maskOrig.transform.scaleY);
+            });
+            for (let h = 0; h < maskShape.holes.length; h++) {
+              const origHole = maskOrigHoles[h] || [];
+              maskShape.holes[h] = origHole.map(p => ({ ...p }));
+              if (maskLocalNewHoles[h]) {
+                for (let i = 0; i < maskLocalNewHoles[h].length; i++) {
+                  const pid = makePointId(maskShape.id, true, h, i);
+                  extraFixed[pid + '_x'] = maskLocalNewHoles[h][i].x;
+                  extraFixed[pid + '_y'] = maskLocalNewHoles[h][i].y;
+                }
+              }
+            }
+          }
+        }
+      }
+
       runSolver(fixedPoints, extraFixed, 50);
       updateDOFDisplay();
       render();
@@ -4825,6 +5345,75 @@
       return;
     }
 
+    if ((e.metaKey || e.ctrlKey) && e.key === '7') {
+      e.preventDefault();
+      const sel = getSelectedShapes();
+      if (sel.length === 2 && !sel.some(s => isMaskShape(s))) {
+        const maskShape = sel[0];
+        const maskedShape = sel[1];
+        pushHistory();
+        const success = createClipMask(maskedShape.id, maskShape.id);
+        if (success) {
+          showToast('Clip mask created', 'success');
+          selectedIds.clear();
+          selectedIds.add(maskedShape.id);
+          rebuildSolverAndParams();
+          initialSolve();
+          updateToolbar();
+          updateDOFDisplay();
+          renderLayers();
+          renderConstraintList();
+          render();
+        }
+      }
+      return;
+    }
+
+    if ((e.metaKey || e.ctrlKey) && e.key === '8') {
+      e.preventDefault();
+      const sel = getSelectedShapes();
+      if (sel.length === 2 && !sel.some(s => isMaskShape(s))) {
+        const maskShape = sel[0];
+        const maskedShape = sel[1];
+        pushHistory();
+        const success = createAlphaMask(maskedShape.id, maskShape.id);
+        if (success) {
+          showToast('Alpha mask created', 'success');
+          selectedIds.clear();
+          selectedIds.add(maskedShape.id);
+          rebuildSolverAndParams();
+          initialSolve();
+          updateToolbar();
+          updateDOFDisplay();
+          renderLayers();
+          renderConstraintList();
+          render();
+        }
+      }
+      return;
+    }
+
+    if ((e.metaKey || e.ctrlKey) && e.key === '9') {
+      e.preventDefault();
+      const sel = getSelectedShapes();
+      const maskShapes = sel.filter(s => isMaskShape(s));
+      if (maskShapes.length > 0) {
+        pushHistory();
+        for (const mask of maskShapes) {
+          releaseMask(mask.id);
+        }
+        showToast('Mask(s) released', 'success');
+        rebuildSolverAndParams();
+        initialSolve();
+        updateToolbar();
+        updateDOFDisplay();
+        renderLayers();
+        renderConstraintList();
+        render();
+      }
+      return;
+    }
+
     if ((e.key === 'Delete' || e.key === 'Backspace') && !isNodeEditMode) {
       if (selectedConstraintIdx >= 0) {
         pushHistory();
@@ -4851,7 +5440,33 @@
       if (selectedIds.size > 0) {
         pushHistory();
         const ids = [...selectedIds];
+        const idsToDelete = new Set(ids);
         for (const id of ids) {
+          const shape = getShapeById(id);
+          if (!shape) continue;
+          if (isMaskShape(shape)) {
+            // 蒙版图形被删除，不需要特殊处理，直接删
+          } else {
+            // 被蒙版图形被删除，同时删除它的所有蒙版
+            const masks = getMasksOfShape(id);
+            for (const mask of masks) {
+              idsToDelete.add(mask.id);
+            }
+          }
+          // 如果是蒙版图形，也释放蒙版关系（虽然要删除了，但清理一下）
+          if (isMaskShape(shape)) {
+            delete shape.maskOf;
+            delete shape.maskType;
+          }
+        }
+        // 清理所有相关的蒙版引用
+        for (const s of shapes) {
+          if (s.maskOf && idsToDelete.has(s.maskOf)) {
+            idsToDelete.add(s.id);
+          }
+        }
+        const finalIds = [...idsToDelete];
+        for (const id of finalIds) {
           dimensionSystem.removeDimensionsForShape(id);
           const idx = shapes.findIndex(s => s.id === id);
           if (idx >= 0) shapes.splice(idx, 1);
@@ -5344,6 +5959,11 @@
   function runBooleanOp(operation) {
     const sel = getSelectedShapes();
     if (sel.length < 2) { showToast('Select 2 shapes first', 'warning'); return; }
+    // 蒙版图形不能参与布尔运算
+    if (sel.some(s => isMaskShape(s))) {
+      showToast('Mask shapes cannot participate in boolean operations', 'warning');
+      return;
+    }
     const subject = sel[0];
     const clip = sel[1];
     const subjectPts = worldPointsOf(subject);
@@ -5403,6 +6023,70 @@
   document.getElementById('op-union').addEventListener('click', () => runBooleanOp('union'));
   document.getElementById('op-subtract').addEventListener('click', () => runBooleanOp('subtract'));
   document.getElementById('op-intersect').addEventListener('click', () => runBooleanOp('intersect'));
+
+  document.getElementById('mask-clip').addEventListener('click', () => {
+    const sel = getSelectedShapes();
+    if (sel.length !== 2) return;
+    const maskShape = sel[0];
+    const maskedShape = sel[1];
+    pushHistory();
+    const success = createClipMask(maskedShape.id, maskShape.id);
+    if (success) {
+      showToast('Clip mask created', 'success');
+      selectedIds.clear();
+      selectedIds.add(maskedShape.id);
+      rebuildSolverAndParams();
+      initialSolve();
+      updateToolbar();
+      updateDOFDisplay();
+      renderLayers();
+      renderConstraintList();
+      render();
+    } else {
+      showToast('Failed to create clip mask', 'error');
+    }
+  });
+
+  document.getElementById('mask-alpha').addEventListener('click', () => {
+    const sel = getSelectedShapes();
+    if (sel.length !== 2) return;
+    const maskShape = sel[0];
+    const maskedShape = sel[1];
+    pushHistory();
+    const success = createAlphaMask(maskedShape.id, maskShape.id);
+    if (success) {
+      showToast('Alpha mask created', 'success');
+      selectedIds.clear();
+      selectedIds.add(maskedShape.id);
+      rebuildSolverAndParams();
+      initialSolve();
+      updateToolbar();
+      updateDOFDisplay();
+      renderLayers();
+      renderConstraintList();
+      render();
+    } else {
+      showToast('Failed to create alpha mask', 'error');
+    }
+  });
+
+  document.getElementById('mask-release').addEventListener('click', () => {
+    const sel = getSelectedShapes();
+    const maskShapes = sel.filter(s => isMaskShape(s));
+    if (maskShapes.length === 0) return;
+    pushHistory();
+    for (const mask of maskShapes) {
+      releaseMask(mask.id);
+    }
+    showToast('Mask(s) released', 'success');
+    rebuildSolverAndParams();
+    initialSolve();
+    updateToolbar();
+    updateDOFDisplay();
+    renderLayers();
+    renderConstraintList();
+    render();
+  });
 
   document.querySelectorAll('.constraint-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -6252,9 +6936,140 @@
     ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     ctx.translate(padding - bounds.minX, padding - bounds.minY);
 
+    function drawPolygonPath(ctx, pts, holes) {
+      ctx.beginPath();
+      if (pts.length > 0) {
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let j = 1; j < pts.length; j++) {
+          ctx.lineTo(pts[j].x, pts[j].y);
+        }
+        ctx.closePath();
+      }
+      if (holes && holes.length > 0) {
+        for (const hole of holes) {
+          if (hole.length > 0) {
+            ctx.moveTo(hole[0].x, hole[0].y);
+            for (let j = 1; j < hole.length; j++) {
+              ctx.lineTo(hole[j].x, hole[j].y);
+            }
+            ctx.closePath();
+          }
+        }
+      }
+    }
+
+    function applyClipMasksToCtx(ctx, masks, frame) {
+      if (masks.length === 0) return;
+      const clipMasks = masks.filter(m => getMaskType(m) === 'clip');
+      if (clipMasks.length === 0) return;
+      for (const mask of clipMasks) {
+        const maskPts = getAnimatedWorldPoints(mask, frame);
+        const maskHoles = getAnimatedWorldHoles(mask, frame);
+        drawPolygonPath(ctx, maskPts, maskHoles);
+      }
+      ctx.clip('evenodd');
+    }
+
+    function drawShapeWithAlphaMask(ctx, s, masks, frame, animProps, fillTransform, rawFill, pts, holes) {
+      const alphaMasks = masks.filter(m => getMaskType(m) === 'alpha');
+      if (alphaMasks.length === 0) {
+        drawShapeSimple(ctx, s, animProps, fillTransform, rawFill, pts, holes);
+        return;
+      }
+
+      const allBounds = getBounds(pts);
+      for (const mask of alphaMasks) {
+        const maskPts = getAnimatedWorldPoints(mask, frame);
+        const mb = getBounds(maskPts);
+        allBounds.minX = Math.min(allBounds.minX, mb.minX);
+        allBounds.minY = Math.min(allBounds.minY, mb.minY);
+        allBounds.maxX = Math.max(allBounds.maxX, mb.maxX);
+        allBounds.maxY = Math.max(allBounds.maxY, mb.maxY);
+      }
+
+      const pad = 2;
+      const x = allBounds.minX - pad;
+      const y = allBounds.minY - pad;
+      const w = allBounds.maxX - allBounds.minX + pad * 2;
+      const h = allBounds.maxY - allBounds.minY + pad * 2;
+
+      const offscreen = document.createElement('canvas');
+      offscreen.width = w;
+      offscreen.height = h;
+      const octx = offscreen.getContext('2d');
+      octx.translate(-x, -y);
+
+      const savedCtx = ctx;
+      ctx = octx;
+      drawShapeSimple(ctx, s, animProps, fillTransform, rawFill, pts, holes);
+      ctx = savedCtx;
+
+      const maskCanvas = document.createElement('canvas');
+      maskCanvas.width = w;
+      maskCanvas.height = h;
+      const mctx = maskCanvas.getContext('2d');
+      mctx.translate(-x, -y);
+
+      for (let i = 0; i < alphaMasks.length; i++) {
+        const mask = alphaMasks[i];
+        const maskPts = getAnimatedWorldPoints(mask, frame);
+        const maskHoles = getAnimatedWorldHoles(mask, frame);
+        
+        const maskFill = ensureFillStructure(mask.fill);
+        const maskFillColor = getFillDisplayColor(maskFill);
+
+        if (i === 0) {
+          mctx.save();
+          drawPolygonPath(mctx, maskPts, maskHoles);
+          mctx.fillStyle = maskFillColor;
+          mctx.globalAlpha = 1;
+          mctx.fill('evenodd');
+          mctx.restore();
+        } else {
+          mctx.globalCompositeOperation = 'destination-in';
+          mctx.save();
+          drawPolygonPath(mctx, maskPts, maskHoles);
+          mctx.fillStyle = maskFillColor;
+          mctx.fill('evenodd');
+          mctx.restore();
+          mctx.globalCompositeOperation = 'source-over';
+        }
+      }
+
+      const maskImgData = mctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+      const shapeImgData = octx.getImageData(0, 0, offscreen.width, offscreen.height);
+      const maskData = maskImgData.data;
+      const shapeData = shapeImgData.data;
+
+      for (let i = 0; i < shapeData.length; i += 4) {
+        const maskAlpha = maskData[i] / 255;
+        shapeData[i + 3] = shapeData[i + 3] * maskAlpha;
+      }
+
+      octx.putImageData(shapeImgData, 0, 0);
+      savedCtx.drawImage(offscreen, x, y, w, h);
+    }
+
+    function drawShapeSimple(ctx, s, animProps, fillTransform, rawFill, pts, holes) {
+      ctx.save();
+      ctx.globalAlpha = animProps.opacity;
+      if (typeof rawFill === 'string') {
+        ctx.fillStyle = rawFill;
+      } else {
+        ctx.fillStyle = getCanvasFillStyle(ctx, rawFill, fillTransform, pts);
+      }
+      ctx.strokeStyle = s.stroke || '#000';
+      ctx.lineWidth = s.strokeWidth || 2;
+      drawPolygonPath(ctx, pts, holes);
+      ctx.fill('evenodd');
+      ctx.stroke();
+      ctx.restore();
+    }
+
     for (const s of shapes) {
       if (!s.visible) continue;
       if (s.type === 'motion-path') continue;
+      if (isMaskShape(s)) continue;
 
       if (isComponentInstance(s)) {
         const expanded = getInstanceExpandedShapes(s);
@@ -6298,38 +7113,25 @@
         scaleX: animProps.scaleX, scaleY: animProps.scaleY
       };
 
-      ctx.save();
-      ctx.globalAlpha = animProps.opacity;
-      if (typeof rawFill === 'string') {
-        ctx.fillStyle = rawFill;
+      const masks = getMasksOfShape(s.id);
+      if (masks.length === 0) {
+        drawShapeSimple(ctx, s, animProps, fillTransform, rawFill, pts, holes);
       } else {
-        ctx.fillStyle = getCanvasFillStyle(ctx, rawFill, fillTransform, pts);
-      }
-      ctx.strokeStyle = s.stroke || '#000';
-      ctx.lineWidth = s.strokeWidth || 2;
-
-      ctx.beginPath();
-      if (pts.length > 0) {
-        ctx.moveTo(pts[0].x, pts[0].y);
-        for (let j = 1; j < pts.length; j++) {
-          ctx.lineTo(pts[j].x, pts[j].y);
-        }
-        ctx.closePath();
-      }
-      if (holes.length > 0) {
-        for (const hole of holes) {
-          if (hole.length > 0) {
-            ctx.moveTo(hole[0].x, hole[0].y);
-            for (let j = 1; j < hole.length; j++) {
-              ctx.lineTo(hole[j].x, hole[j].y);
-            }
-            ctx.closePath();
-          }
+        const clipMasks = masks.filter(m => getMaskType(m) === 'clip');
+        const alphaMasks = masks.filter(m => getMaskType(m) === 'alpha');
+        
+        if (alphaMasks.length === 0) {
+          ctx.save();
+          applyClipMasksToCtx(ctx, masks, frame);
+          drawShapeSimple(ctx, s, animProps, fillTransform, rawFill, pts, holes);
+          ctx.restore();
+        } else {
+          ctx.save();
+          applyClipMasksToCtx(ctx, clipMasks, frame);
+          drawShapeWithAlphaMask(ctx, s, alphaMasks, frame, animProps, fillTransform, rawFill, pts, holes);
+          ctx.restore();
         }
       }
-      ctx.fill('evenodd');
-      ctx.stroke();
-      ctx.restore();
     }
 
     ctx.restore();
@@ -7503,9 +8305,20 @@
       const allY = [];
       const exportShapes = [];
       const defsMap = {};
+      const clipPathDefs = [];
+      const maskDefs = [];
+
+      function pointsToPathD(pts, holes) {
+        let d = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ') + 'Z';
+        for (const hole of holes) {
+          d += ' ' + hole.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ') + 'Z';
+        }
+        return d;
+      }
 
       for (const s of shapes) {
         if (!s.visible) continue;
+        if (isMaskShape(s)) continue;
         if (isComponentInstance(s)) {
           const expanded = getInstanceExpandedShapes(s);
           for (const es of expanded) {
@@ -7535,6 +8348,8 @@
       const pad = 20;
       let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${minX - pad} ${minY - pad} ${maxX - minX + pad * 2} ${maxY - minY + pad * 2}">`;
 
+      let defsContent = '';
+
       for (let i = 0; i < exportShapes.length; i++) {
         const s = exportShapes[i];
         const fill = ensureFillStructure(s.fill);
@@ -7546,15 +8361,74 @@
 
         const pts = s._isExpandedInstance ? s.points : worldPointsOf(s);
         const holes = s._isExpandedInstance ? (s.holes || []) : worldHolesOf(s);
-        let d = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ') + 'Z';
-        for (const hole of holes) {
-          d += ' ' + hole.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ') + 'Z';
+        const d = pointsToPathD(pts, holes);
+
+        let extraAttrs = '';
+
+        if (!s._isExpandedInstance && s.id !== undefined) {
+          const masks = getMasksOfShape(s.id);
+          if (masks.length > 0) {
+            const clipMasks = masks.filter(m => getMaskType(m) === 'clip');
+            const alphaMasks = masks.filter(m => getMaskType(m) === 'alpha');
+
+            if (clipMasks.length > 0) {
+              const clipPathId = `clipPath-${s.id}`;
+              let clipPathContent = '';
+              for (let j = 0; j < clipMasks.length; j++) {
+                const mask = clipMasks[j];
+                const maskPts = worldPointsOf(mask);
+                const maskHoles = worldHolesOf(mask);
+                const maskD = pointsToPathD(maskPts, maskHoles);
+                clipPathContent += `<path d="${maskD}" fill-rule="evenodd"/>`;
+              }
+              clipPathDefs.push(`<clipPath id="${clipPathId}">${clipPathContent}</clipPath>`);
+              extraAttrs += ` clip-path="url(#${clipPathId})"`;
+            }
+
+            if (alphaMasks.length > 0) {
+              const maskId = `mask-${s.id}`;
+              let maskContent = '';
+              
+              const filterId = `luminance-filter-${s.id}`;
+              maskDefs.push(`<filter id="${filterId}" x="0" y="0" width="100%" height="100%"><feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0.2126 0.7152 0.0722 0 0"/></filter>`);
+              
+              for (let j = 0; j < alphaMasks.length; j++) {
+                const mask = alphaMasks[j];
+                const maskPts = worldPointsOf(mask);
+                const maskHoles = worldHolesOf(mask);
+                const maskD = pointsToPathD(maskPts, maskHoles);
+                
+                const maskFill = ensureFillStructure(mask.fill);
+                const maskFillColor = getFillDisplayColor(maskFill);
+                
+                if (j === 0) {
+                  maskContent += `<path d="${maskD}" fill="${maskFillColor}" fill-rule="evenodd" filter="url(#${filterId})"/>`;
+                } else {
+                  maskContent += `<path d="${maskD}" fill="${maskFillColor}" fill-rule="evenodd" filter="url(#${filterId})" style="mix-blend-mode: multiply"/>`;
+                }
+              }
+              maskDefs.push(`<mask id="${maskId}" maskUnits="userSpaceOnUse">${maskContent}</mask>`);
+              extraAttrs += ` mask="url(#${maskId})"`;
+            }
+          }
         }
-        svg += `<path d="${d}" fill="${exportFill}" stroke="${s.stroke || '#000'}" stroke-width="${s.strokeWidth || 2}" fill-rule="evenodd"/>`;
+
+        svg += `<path d="${d}" fill="${exportFill}" stroke="${s.stroke || '#000'}" stroke-width="${s.strokeWidth || 2}" fill-rule="evenodd"${extraAttrs}/>`;
       }
 
-      if (Object.keys(defsMap).length > 0) {
-        svg = svg.replace('>', '>' + generateSVGDefs(defsMap));
+      if (Object.keys(defsMap).length > 0 || clipPathDefs.length > 0 || maskDefs.length > 0) {
+        defsContent = '<defs>';
+        if (Object.keys(defsMap).length > 0) {
+          defsContent += generateSVGDefs(defsMap);
+        }
+        for (const cp of clipPathDefs) {
+          defsContent += cp;
+        }
+        for (const m of maskDefs) {
+          defsContent += m;
+        }
+        defsContent += '</defs>';
+        svg = svg.replace('>', '>' + defsContent);
       }
 
       svg += '</svg>';

@@ -716,6 +716,30 @@ body { background: #f0f0f0; user-select: none; -webkit-user-select: none; }
   margin-left: 4px;
 }
 
+.layer-item.mask-layer {
+  opacity: 0.75;
+  border-left: 3px solid #78909c;
+  padding-left: 5px;
+}
+
+.layer-item.mask-layer .layer-name {
+  font-style: italic;
+  color: #546e7a;
+}
+
+.mask-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 4px;
+  color: #78909c;
+}
+
+#layer-context-menu {
+  position: fixed;
+  z-index: 1000;
+}
+
 .instance-context-actions {
   display: flex;
   gap: 2px;

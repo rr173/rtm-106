@@ -63,6 +63,19 @@
     <span>Component</span>
   </button>
   <div class="sep"></div>
+  <button id="mask-clip" class="op-btn" disabled title="Create Clip Mask (Ctrl+7)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><defs><clipPath id="cp"><circle cx="15" cy="12" r="7"/></clipPath></defs><circle cx="9" cy="12" r="7" fill="currentColor" clip-path="url(#cp)"/><circle cx="15" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3,2"/></svg>
+    <span>Clip Mask</span>
+  </button>
+  <button id="mask-alpha" class="op-btn" disabled title="Create Alpha Mask (Ctrl+8)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><defs><linearGradient id="ag" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#fff;stop-opacity:1"/><stop offset="100%" style="stop-color:#000;stop-opacity:1"/></linearGradient></defs><circle cx="9" cy="12" r="7" fill="url(#ag)"/><circle cx="15" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3,2"/></svg>
+    <span>Alpha Mask</span>
+  </button>
+  <button id="mask-release" class="op-btn" disabled title="Release Mask (Ctrl+9)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="currentColor" stroke-width="2" d="M3 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5S4.73 7.61 3 12z"/><path fill="currentColor" d="M12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z"/><line x1="4" y1="4" x2="20" y2="20" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    <span>Release</span>
+  </button>
+  <div class="sep"></div>
   <button id="export-svg" class="tool-btn" title="Export SVG">
     <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M12 3v12l-4-4-1.4 1.4L12 17.8l5.4-5.4L16 10l-4 4V3zM5 19h14v2H5z"/></svg>
     <span>Export SVG</span>
