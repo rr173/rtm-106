@@ -160,7 +160,43 @@
   <div id="constraint-list"></div>
 </div>
 
-<canvas id="canvas"></canvas>
+<div id="ruler-container">
+  <div id="ruler-corner"></div>
+  <canvas id="ruler-horizontal" class="ruler"></canvas>
+  <canvas id="ruler-vertical" class="ruler"></canvas>
+  <canvas id="canvas"></canvas>
+</div>
+
+<div id="guides-panel">
+  <div class="panel-header">
+    <span>Guides</span>
+  </div>
+  <div class="guides-settings">
+    <div class="form-row">
+      <label>Show Rulers</label>
+      <input type="checkbox" id="guides-show-rulers" checked />
+    </div>
+    <div class="form-row">
+      <label>Show Guides</label>
+      <input type="checkbox" id="guides-show-guides" checked />
+    </div>
+    <div class="form-row">
+      <label>Lock Guides</label>
+      <input type="checkbox" id="guides-lock-guides" />
+    </div>
+    <div class="form-row">
+      <label>Snap to Guides</label>
+      <input type="checkbox" id="guides-snap-guides" checked />
+    </div>
+    <div class="form-row">
+      <button id="guides-clear-all" class="mini-btn fill-btn">Clear All Guides</button>
+    </div>
+    <div class="guides-hint">
+      Drag from rulers to create guides.<br/>
+      Drag guide back to ruler to delete.
+    </div>
+  </div>
+</div>
 
 <div id="components-panel">
   <div class="panel-header">
@@ -669,6 +705,7 @@
 <script src="animation.js"></script>
 <script src="glyphs.js"></script>
 <script src="dimension.js"></script>
+<script src="guide-system.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -144,6 +144,8 @@
   let dimToolSelection = [];
   let dimToolType = null;
 
+  let guideSystem = null;
+
   let pages = [];
   let currentPageId = null;
   let nextPageId = 1;
@@ -161,7 +163,8 @@
       viewport: { x: 0, y: 0, scale: 1 },
       animationData: null,
       motionPathData: null,
-      dimensionData: null
+      dimensionData: null,
+      guideData: null
     };
   }
 
@@ -236,6 +239,15 @@
       console.warn('Failed to save dimensionData:', e);
       page.dimensionData = page.dimensionData || null;
     }
+
+    try {
+      if (guideSystem) {
+        page.guideData = guideSystem.serialize();
+      }
+    } catch (e) {
+      console.warn('Failed to save guideData:', e);
+      page.guideData = page.guideData || null;
+    }
   }
 
   function loadPageState(pageId) {
@@ -274,6 +286,14 @@
         dimensionSystem.deserialize(page.dimensionData || {});
       } catch (e) {
         console.warn('Failed to deserialize dimensionData:', e);
+      }
+
+      try {
+        if (guideSystem) {
+          guideSystem.deserialize(page.guideData || {});
+        }
+      } catch (e) {
+        console.warn('Failed to deserialize guideData:', e);
       }
 
       for (const s of shapes) {
@@ -1825,6 +1845,9 @@
           animationController.deserialize(currentPage.animationData || {});
           motionPathManager.deserialize(currentPage.motionPathData || {});
           dimensionSystem.deserialize(currentPage.dimensionData || {});
+          if (guideSystem) {
+            guideSystem.deserialize(currentPage.guideData || {});
+          }
 
           for (const s of shapes) {
             if (s.opacity === undefined) s.opacity = 1;
@@ -1850,6 +1873,7 @@
         page.animationData = state.animationData || null;
         page.motionPathData = state.motionPathData || null;
         page.dimensionData = state.dimensionData || null;
+        page.guideData = state.guideData || null;
 
         pages = [page];
         currentPageId = page.id;
@@ -1866,6 +1890,9 @@
         animationController.deserialize(page.animationData || {});
         motionPathManager.deserialize(page.motionPathData || {});
         dimensionSystem.deserialize(page.dimensionData || {});
+        if (guideSystem) {
+          guideSystem.deserialize(page.guideData || {});
+        }
 
         for (const s of shapes) {
           if (s.opacity === undefined) s.opacity = 1;
@@ -2172,6 +2199,11 @@
 
   function render() {
     const w = window.innerWidth, h = window.innerHeight;
+    
+    if (guideSystem) {
+      guideSystem.setViewport(viewport);
+    }
+    
     if (editingComponentId !== null) {
       ctx.fillStyle = '#faf6f2';
     } else {
@@ -5089,6 +5121,35 @@
       lines.push(...gridSnap.lines);
     }
 
+    if (guideSystem && guideSystem.snapToGuides) {
+      const guideSnap = guideSystem.snapPointToGuides(point);
+      if (guideSnap.snapped) {
+        if (guideSnap.x !== point.x) {
+          const dx = Math.abs(point.x - guideSnap.x);
+          if (dx < bestDistX) {
+            bestX = guideSnap.x;
+            bestDistX = dx;
+          }
+        }
+        if (guideSnap.y !== point.y) {
+          const dy = Math.abs(point.y - guideSnap.y);
+          if (dy < bestDistY) {
+            bestY = guideSnap.y;
+            bestDistY = dy;
+          }
+        }
+        const guideLines = guideSystem.getGuideLines();
+        for (const gl of guideLines) {
+          if (gl.type === 'vertical' && Math.abs(gl.x - bestX) < 0.001) {
+            lines.push(gl);
+          }
+          if (gl.type === 'horizontal' && Math.abs(gl.y - bestY) < 0.001) {
+            lines.push(gl);
+          }
+        }
+      }
+    }
+
     const targets = collectSnapTargets(excludeIds);
 
     const candidates = [
@@ -5243,6 +5304,7 @@
       else if (line.kind === 'centerline') color = '#1a73e8';
       else if (line.kind === 'edge-align') color = '#fb8c00';
       else if (line.kind === 'edge') color = '#8e24aa';
+      else if (line.kind === 'guide') color = '#0d47a1';
 
       ctx.strokeStyle = color;
       ctx.lineWidth = 1.5 / viewport.scale;
@@ -5972,6 +6034,9 @@
     const world = screenToWorld(sx, sy);
 
     snapInfo = { active: false, lines: [], distances: [] };
+    if (guideSystem) {
+      guideSystem.clearHighlight();
+    }
 
     if (isPanning) {
       isPanning = false;
@@ -9536,6 +9601,15 @@
   patchAnimationSystem();
 
   window.addEventListener('beforeunload', saveStateToStorage);
+
+  if (window.GuideSystem) {
+    guideSystem = new window.GuideSystem();
+    guideSystem.init();
+    guideSystem.setViewport(viewport);
+    guideSystem.onGuidesChanged = function() {
+      scheduleSave();
+    };
+  }
 
   resize();
 
