@@ -5372,6 +5372,24 @@
   }
 
   canvas.addEventListener('mousedown', (e) => {
+    if (snapshotSystem.isCompareMode) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (snapshotSystem.isPreviewMode) {
+      const rect = canvas.getBoundingClientRect();
+      const sx = e.clientX - rect.left;
+      const sy = e.clientY - rect.top;
+      const world = screenToWorld(sx, sy);
+      lastMouseWorld = { ...world };
+      if (e.button === 1 || (e.button === 0 && e.altKey)) {
+        isPanning = true;
+        panStart = { x: e.clientX, y: e.clientY };
+      }
+      return;
+    }
+
     const rect = canvas.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
@@ -9589,6 +9607,996 @@
     window.addEventListener('selectionchange', () => {});
   }
 
+  // ========== Snapshot System ==========
+  const SNAPSHOT_STORAGE_PREFIX = 'rtm-106-snapshots-';
+  const MAX_SNAPSHOTS_PER_PAGE = 20;
+  const THUMB_WIDTH = 60;
+  const THUMB_HEIGHT = 40;
+
+  let snapshotSystem = {
+    snapshots: [],
+    selectedSnapshotIds: new Set(),
+    previewingSnapshotId: null,
+    prePreviewState: null,
+    isPreviewMode: false,
+    isCompareMode: false,
+    compareDividerX: 0.5,
+    isDraggingDivider: false
+  };
+
+  function snapshotStorageKey() {
+    return SNAPSHOT_STORAGE_PREFIX + (currentPageId || 'default');
+  }
+
+  function deepCloneSnapshotState() {
+    const state = {
+      shapes: JSON.parse(JSON.stringify(shapes || [])),
+      constraints: JSON.parse(JSON.stringify((constraints || []).map(c => serializeConstraint(c)).filter(Boolean))),
+      paramsData: JSON.parse(JSON.stringify(paramsData || {})),
+      components: JSON.parse(JSON.stringify(components || {})),
+      nextComponentId: nextComponentId,
+      motionPathData: JSON.parse(JSON.stringify(motionPathManager.serialize())),
+      dimensionData: JSON.parse(JSON.stringify(dimensionSystem.serialize()))
+    };
+    if (guideSystem) {
+      state.guideData = JSON.parse(JSON.stringify(guideSystem.serialize()));
+    }
+    return state;
+  }
+
+  function restoreSnapshotState(state) {
+    shapes = JSON.parse(JSON.stringify(state.shapes));
+    constraints = (state.constraints || []).map(d => deserializeConstraint(d)).filter(Boolean);
+    paramsData = JSON.parse(JSON.stringify(state.paramsData || {}));
+    components = state.components ? JSON.parse(JSON.stringify(state.components)) : {};
+    nextComponentId = state.nextComponentId || 1;
+
+    if (state.motionPathData) {
+      motionPathManager.deserialize(JSON.parse(JSON.stringify(state.motionPathData)));
+    } else {
+      motionPathManager = new PM.MotionPathManager();
+    }
+    if (state.dimensionData) {
+      dimensionSystem.deserialize(JSON.parse(JSON.stringify(state.dimensionData)));
+    } else {
+      dimensionSystem = new DS();
+    }
+    if (state.guideData && guideSystem) {
+      guideSystem.deserialize(JSON.parse(JSON.stringify(state.guideData)));
+    }
+
+    for (const s of shapes) {
+      if (s.type === 'motion-path') {
+        motionPathManager.invalidatePathCache(s.id);
+      }
+      if (s.opacity === undefined) s.opacity = 1;
+    }
+
+    rebuildSolverAndParams();
+    try { initialSolve(); } catch(e) {}
+  }
+
+  function generateSnapshotThumbnail(shapesData) {
+    const offcanvas = document.createElement('canvas');
+    offcanvas.width = THUMB_WIDTH;
+    offcanvas.height = THUMB_HEIGHT;
+    const c = offcanvas.getContext('2d');
+
+    c.fillStyle = '#f0f0f0';
+    c.fillRect(0, 0, THUMB_WIDTH, THUMB_HEIGHT);
+
+    let allX = [], allY = [];
+    const shapesToRender = shapesData || shapes;
+    for (const s of shapesToRender) {
+      if (!s.visible || s.maskOf !== undefined) continue;
+      let renderShapes = [s];
+      if (s.type === 'component-instance') {
+        try {
+          renderShapes = getInstanceExpandedShapesForThumb(s, shapesToRender);
+        } catch(e) { renderShapes = []; }
+      }
+      for (const rs of renderShapes) {
+        const pts = localWorldPointsOfForThumb(rs);
+        if (pts) {
+          for (const p of pts) {
+            allX.push(p.x);
+            allY.push(p.y);
+          }
+        }
+      }
+    }
+
+    if (allX.length === 0) return null;
+
+    const minX = Math.min(...allX), maxX = Math.max(...allX);
+    const minY = Math.min(...allY), maxY = Math.max(...allY);
+    const boundsW = maxX - minX || 1;
+    const boundsH = maxY - minY || 1;
+    const padding = 4;
+
+    const scaleX = (THUMB_WIDTH - padding * 2) / boundsW;
+    const scaleY = (THUMB_HEIGHT - padding * 2) / boundsH;
+    const scale = Math.min(scaleX, scaleY);
+    const offsetX = (THUMB_WIDTH - boundsW * scale) / 2 - minX * scale;
+    const offsetY = (THUMB_HEIGHT - boundsH * scale) / 2 - minY * scale;
+
+    c.save();
+    c.translate(offsetX, offsetY);
+    c.scale(scale, scale);
+
+    for (const s of shapesToRender) {
+      if (!s.visible || s.maskOf !== undefined) continue;
+      let renderShapes = [s];
+      if (s.type === 'component-instance') {
+        try {
+          renderShapes = getInstanceExpandedShapesForThumb(s, shapesToRender);
+        } catch(e) { renderShapes = []; }
+      }
+      for (const rs of renderShapes) {
+        const pts = localWorldPointsOfForThumb(rs);
+        if (!pts || pts.length < 3) continue;
+        const fill = ensureFillStructure(rs.fill);
+        const fillColor = getFillDisplayColor(fill);
+        c.beginPath();
+        c.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) c.lineTo(pts[i].x, pts[i].y);
+        c.closePath();
+        c.fillStyle = fillColor;
+        c.globalAlpha = rs.opacity !== undefined ? rs.opacity : 1;
+        c.fill();
+        c.globalAlpha = 1;
+        c.lineWidth = Math.max(0.5, 1 / scale);
+        c.strokeStyle = rs.stroke || '#000';
+        c.stroke();
+      }
+    }
+
+    c.restore();
+    return offcanvas.toDataURL('image/png');
+  }
+
+  function localWorldPointsOfForThumb(s) {
+    const pts = s.points.map(p => ({ x: p.x, y: p.y }));
+    if (!pts || pts.length === 0) return null;
+    const t = s.transform || { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 };
+    if (t.rotation !== 0 || t.scaleX !== 1 || t.scaleY !== 1) {
+      const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+      const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+      const rad = (t.rotation || 0) * Math.PI / 180;
+      const cos = Math.cos(rad), sin = Math.sin(rad);
+      const sx = t.scaleX !== undefined ? t.scaleX : 1;
+      const sy = t.scaleY !== undefined ? t.scaleY : 1;
+      for (const p of pts) {
+        const dx = p.x - cx, dy = p.y - cy;
+        p.x = cx + (dx * cos - dy * sin) * sx;
+        p.y = cy + (dx * sin + dy * cos) * sy;
+      }
+    }
+    for (const p of pts) {
+      p.x += t.tx || 0;
+      p.y += t.ty || 0;
+    }
+    return pts;
+  }
+
+  function getInstanceExpandedShapesForThumb(instance, allShapes) {
+    const comp = components && components[instance.componentId];
+    if (!comp) return [];
+    const t = instance.transform || { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 };
+    const result = [];
+    for (const cs of comp.shapes) {
+      const cloned = JSON.parse(JSON.stringify(cs));
+      const ct = cloned.transform || { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 };
+      cloned.transform = {
+        tx: (ct.tx || 0) + (t.tx || 0),
+        ty: (ct.ty || 0) + (t.ty || 0),
+        rotation: (ct.rotation || 0) + (t.rotation || 0),
+        scaleX: (ct.scaleX || 1) * (t.scaleX || 1),
+        scaleY: (ct.scaleY || 1) * (t.scaleY || 1)
+      };
+      if (instance.overrides) {
+        if (instance.overrides.fillColor && cloned.fill) {
+          if (typeof cloned.fill === 'string') cloned.fill = instance.overrides.fillColor;
+          else if (cloned.fill.type === 'solid') cloned.fill.color = instance.overrides.fillColor;
+        }
+        if (instance.overrides.strokeColor) cloned.stroke = instance.overrides.strokeColor;
+      }
+      cloned._isExpandedInstance = true;
+      result.push(cloned);
+    }
+    return result;
+  }
+
+  function loadSnapshotsFromStorage() {
+    try {
+      const key = snapshotStorageKey();
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        snapshotSystem.snapshots = JSON.parse(raw);
+      } else {
+        snapshotSystem.snapshots = [];
+      }
+    } catch (e) {
+      console.warn('Failed to load snapshots:', e);
+      snapshotSystem.snapshots = [];
+    }
+    snapshotSystem.selectedSnapshotIds.clear();
+    renderHistoryPanel();
+  }
+
+  function saveSnapshotsToStorage() {
+    try {
+      const key = snapshotStorageKey();
+      const toSave = snapshotSystem.snapshots.map(s => ({
+        id: s.id,
+        name: s.name,
+        createdAt: s.createdAt,
+        thumbnail: s.thumbnail,
+        state: s.state
+      }));
+      localStorage.setItem(key, JSON.stringify(toSave));
+    } catch (e) {
+      console.warn('Failed to save snapshots:', e);
+      showToast('Snapshot storage full', 'error');
+    }
+  }
+
+  function createSnapshot(name) {
+    if (snapshotSystem.isCompareMode) {
+      showToast('Cannot create snapshot in compare mode', 'warning');
+      return null;
+    }
+
+    const state = deepCloneSnapshotState();
+    const thumbnail = generateSnapshotThumbnail(state.shapes);
+
+    const snapshot = {
+      id: 'snap-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6),
+      name: name || ('Snapshot ' + (snapshotSystem.snapshots.length + 1)),
+      createdAt: Date.now(),
+      thumbnail: thumbnail,
+      state: state
+    };
+
+    snapshotSystem.snapshots.unshift(snapshot);
+
+    while (snapshotSystem.snapshots.length > MAX_SNAPSHOTS_PER_PAGE) {
+      snapshotSystem.snapshots.pop();
+    }
+
+    saveSnapshotsToStorage();
+    renderHistoryPanel();
+    showToast('Snapshot "' + snapshot.name + '" created', 'success');
+    return snapshot;
+  }
+
+  function deleteSnapshot(snapshotId) {
+    const idx = snapshotSystem.snapshots.findIndex(s => s.id === snapshotId);
+    if (idx === -1) return;
+
+    if (snapshotSystem.previewingSnapshotId === snapshotId) {
+      exitPreviewMode(false);
+    }
+
+    snapshotSystem.snapshots.splice(idx, 1);
+    snapshotSystem.selectedSnapshotIds.delete(snapshotId);
+    saveSnapshotsToStorage();
+    renderHistoryPanel();
+  }
+
+  function enterPreviewMode(snapshotId) {
+    const snapshot = snapshotSystem.snapshots.find(s => s.id === snapshotId);
+    if (!snapshot) return;
+
+    if (snapshotSystem.isCompareMode) {
+      exitCompareMode();
+    }
+
+    if (!snapshotSystem.isPreviewMode) {
+      snapshotSystem.prePreviewState = deepCloneState();
+      snapshotSystem.isPreviewMode = true;
+    }
+
+    snapshotSystem.previewingSnapshotId = snapshotId;
+    restoreSnapshotState(snapshot.state);
+
+    selectedIds.clear();
+    selectedVertex = null;
+    selectedConstraintIdx = -1;
+    constraintSelection = [];
+    constraintMode = null;
+    selectedDimensionId = null;
+    dimToolSelection = [];
+    dimToolType = null;
+    isNodeEditMode = false;
+
+    updateToolbar();
+    updateTextPanel();
+    updateDimensionPanel();
+    updateFillPanel();
+    updateMotionPathPanel();
+    updateDOFDisplay();
+    renderLayers();
+    renderConstraintList();
+    renderParams();
+    renderComponentsList();
+    renderTimelineTracks();
+    render();
+    scheduleSave();
+
+    const banner = document.getElementById('preview-banner');
+    const bannerText = document.getElementById('preview-banner-text');
+    if (banner) banner.classList.remove('hidden');
+    if (bannerText) bannerText.textContent = 'Previewing: ' + snapshot.name;
+
+    renderHistoryPanel();
+  }
+
+  function exitPreviewMode(shouldRestore) {
+    if (!snapshotSystem.isPreviewMode) return;
+
+    if (shouldRestore !== false && snapshotSystem.prePreviewState) {
+      restoreState(snapshotSystem.prePreviewState);
+    }
+
+    snapshotSystem.isPreviewMode = false;
+    snapshotSystem.previewingSnapshotId = null;
+    snapshotSystem.prePreviewState = null;
+
+    const banner = document.getElementById('preview-banner');
+    if (banner) banner.classList.add('hidden');
+
+    if (restoreState !== false) {
+      selectedIds.clear();
+      selectedVertex = null;
+      selectedConstraintIdx = -1;
+      constraintSelection = [];
+      constraintMode = null;
+      selectedDimensionId = null;
+      dimToolSelection = [];
+      dimToolType = null;
+      isNodeEditMode = false;
+      updateToolbar();
+      updateTextPanel();
+      updateDimensionPanel();
+      updateFillPanel();
+      updateMotionPathPanel();
+      updateDOFDisplay();
+      renderLayers();
+      renderConstraintList();
+      renderParams();
+      renderComponentsList();
+      renderTimelineTracks();
+      render();
+    }
+
+    renderHistoryPanel();
+  }
+
+  function restoreSnapshot(snapshotId) {
+    const snapshot = snapshotSystem.snapshots.find(s => s.id === snapshotId);
+    if (!snapshot) return;
+
+    pushHistory();
+
+    const wasPreview = snapshotSystem.isPreviewMode;
+    const preState = snapshotSystem.prePreviewState;
+
+    restoreSnapshotState(snapshot.state);
+
+    snapshotSystem.isPreviewMode = false;
+    snapshotSystem.previewingSnapshotId = null;
+    snapshotSystem.prePreviewState = null;
+
+    const banner = document.getElementById('preview-banner');
+    if (banner) banner.classList.add('hidden');
+
+    selectedIds.clear();
+    selectedVertex = null;
+    selectedConstraintIdx = -1;
+    constraintSelection = [];
+    constraintMode = null;
+    selectedDimensionId = null;
+    dimToolSelection = [];
+    dimToolType = null;
+    isNodeEditMode = false;
+
+    updateToolbar();
+    updateTextPanel();
+    updateDimensionPanel();
+    updateFillPanel();
+    updateMotionPathPanel();
+    updateDOFDisplay();
+    renderLayers();
+    renderConstraintList();
+    renderParams();
+    renderComponentsList();
+    renderTimelineTracks();
+    render();
+    scheduleSave();
+
+    showToast('Restored: ' + snapshot.name, 'success');
+    renderHistoryPanel();
+  }
+
+  function getShapesBounds(shapesArr) {
+    let allX = [], allY = [];
+    for (const s of shapesArr) {
+      if (!s.visible || s.maskOf !== undefined) continue;
+      let renderShapes = [s];
+      if (s.type === 'component-instance') {
+        const comp = components && components[s.componentId];
+        if (comp) {
+          renderShapes = comp.shapes.map(cs => {
+            const cloned = JSON.parse(JSON.stringify(cs));
+            const t = cloned.transform || { tx:0, ty:0, rotation:0, scaleX:1, scaleY:1 };
+            const it = s.transform || { tx:0, ty:0, rotation:0, scaleX:1, scaleY:1 };
+            cloned.transform = {
+              tx: (t.tx||0)+(it.tx||0), ty: (t.ty||0)+(it.ty||0),
+              rotation: (t.rotation||0)+(it.rotation||0),
+              scaleX: (t.scaleX||1)*(it.scaleX||1),
+              scaleY: (t.scaleY||1)*(it.scaleY||1)
+            };
+            return cloned;
+          });
+        }
+      }
+      for (const rs of renderShapes) {
+        const pts = localWorldPointsOfForThumb(rs);
+        if (pts) {
+          for (const p of pts) {
+            allX.push(p.x); allY.push(p.y);
+          }
+        }
+      }
+    }
+    if (allX.length === 0) return { minX: -100, minY: -100, maxX: 100, maxY: 100 };
+    return {
+      minX: Math.min(...allX) - 50,
+      minY: Math.min(...allY) - 50,
+      maxX: Math.max(...allX) + 50,
+      maxY: Math.max(...allY) + 50
+    };
+  }
+
+  function shapeSignature(s) {
+    const keyPts = (s.points || []).slice(0, Math.min(4, (s.points||[]).length))
+      .map(p => Math.round(p.x) + ',' + Math.round(p.y)).join('|');
+    const t = s.transform || {};
+    return s.type + '|' + s.name + '|' + keyPts + '|' +
+      Math.round(t.tx||0) + ',' + Math.round(t.ty||0) + ',' +
+      Math.round((t.rotation||0)*10)/10;
+  }
+
+  function shapeDeepEqual(s1, s2) {
+    try {
+      const obj1 = JSON.parse(JSON.stringify(s1));
+      const obj2 = JSON.parse(JSON.stringify(s2));
+      for (const o of [obj1, obj2]) {
+        delete o.id;
+        if (o.transform) {
+          o.transform.tx = Math.round(o.transform.tx * 10) / 10;
+          o.transform.ty = Math.round(o.transform.ty * 10) / 10;
+          o.transform.rotation = Math.round(o.transform.rotation * 10) / 10;
+          o.transform.scaleX = Math.round(o.transform.scaleX * 1000) / 1000;
+          o.transform.scaleY = Math.round(o.transform.scaleY * 1000) / 1000;
+        }
+        if (o.points) {
+          o.points = o.points.map(p => ({
+            x: Math.round(p.x * 10) / 10,
+            y: Math.round(p.y * 10) / 10
+          }));
+        }
+      }
+      return JSON.stringify(obj1) === JSON.stringify(obj2);
+    } catch(e) {
+      return false;
+    }
+  }
+
+  function computeShapeDiff(oldShapes, newShapes) {
+    const oldMap = new Map();
+    const newMap = new Map();
+
+    for (const s of oldShapes) {
+      if (s.maskOf !== undefined) continue;
+      oldMap.set(shapeSignature(s), s);
+    }
+    for (const s of newShapes) {
+      if (s.maskOf !== undefined) continue;
+      newMap.set(shapeSignature(s), s);
+    }
+
+    const added = [];
+    const removed = [];
+    const modified = [];
+
+    for (const [sig, s] of newMap) {
+      if (!oldMap.has(sig)) {
+        let foundModified = false;
+        for (const [oldSig, os] of oldMap) {
+          if (os.type === s.type && os.name === s.name) {
+            if (!shapeDeepEqual(os, s)) {
+              modified.push({ oldShape: os, newShape: s });
+              oldMap.delete(oldSig);
+              foundModified = true;
+              break;
+            }
+          }
+        }
+        if (!foundModified) {
+          added.push(s);
+        }
+      } else {
+        const oldS = oldMap.get(sig);
+        if (!shapeDeepEqual(oldS, s)) {
+          modified.push({ oldShape: oldS, newShape: s });
+        }
+        oldMap.delete(sig);
+      }
+    }
+
+    for (const [sig, s] of oldMap) {
+      removed.push(s);
+    }
+
+    return { added, removed, modified };
+  }
+
+  function renderCompareShapesToCanvas(canvas, shapesArr, viewportSetup, highlightInfo, isOld) {
+    const w = canvas.width, h = canvas.height;
+    const c = canvas.getContext('2d');
+
+    c.fillStyle = '#f0f0f0';
+    c.fillRect(0, 0, w, h);
+
+    c.save();
+    c.translate(viewportSetup.cx, viewportSetup.cy);
+    c.scale(viewportSetup.scale, viewportSetup.scale);
+    c.translate(-viewportSetup.x, -viewportSetup.y);
+
+    for (const s of shapesArr) {
+      if (!s.visible || s.maskOf !== undefined) continue;
+      let renderShapes = [s];
+      if (s.type === 'component-instance') {
+        try {
+          renderShapes = getInstanceExpandedShapesForThumb(s, shapesArr);
+        } catch(e) { renderShapes = [s]; }
+      }
+      for (const rs of renderShapes) {
+        const pts = localWorldPointsOfForThumb(rs);
+        if (!pts || pts.length < 3) continue;
+        const fill = ensureFillStructure(rs.fill);
+        const fillColor = getFillDisplayColor(fill);
+        c.beginPath();
+        c.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) c.lineTo(pts[i].x, pts[i].y);
+        c.closePath();
+        c.fillStyle = fillColor;
+        c.globalAlpha = (rs.opacity !== undefined ? rs.opacity : 1) * 0.9;
+        c.fill();
+        c.globalAlpha = 1;
+        c.lineWidth = 2 / viewportSetup.scale;
+        c.strokeStyle = rs.stroke || '#000';
+        c.stroke();
+      }
+    }
+
+    c.restore();
+    return null;
+  }
+
+  function applyCompareHighlights(canvas, shapesArr, viewportSetup, diff, isOld) {
+    const c = canvas.getContext('2d');
+    c.save();
+    c.translate(viewportSetup.cx, viewportSetup.cy);
+    c.scale(viewportSetup.scale, viewportSetup.scale);
+    c.translate(-viewportSetup.x, -viewportSetup.y);
+
+    const lw = 3 / viewportSetup.scale;
+
+    if (isOld) {
+      for (const s of diff.removed) {
+        const pts = localWorldPointsOfForThumb(s);
+        if (pts && pts.length >= 3) {
+          c.beginPath();
+          c.moveTo(pts[0].x, pts[0].y);
+          for (let i = 1; i < pts.length; i++) c.lineTo(pts[i].x, pts[i].y);
+          c.closePath();
+          c.fillStyle = 'rgba(244, 67, 54, 0.4)';
+          c.fill();
+          c.lineWidth = lw;
+          c.strokeStyle = '#f44336';
+          c.setLineDash([6 / viewportSetup.scale, 4 / viewportSetup.scale]);
+          c.stroke();
+          c.setLineDash([]);
+        }
+      }
+      for (const m of diff.modified) {
+        const pts = localWorldPointsOfForThumb(m.oldShape);
+        if (pts && pts.length >= 3) {
+          c.beginPath();
+          c.moveTo(pts[0].x, pts[0].y);
+          for (let i = 1; i < pts.length; i++) c.lineTo(pts[i].x, pts[i].y);
+          c.closePath();
+          c.lineWidth = lw;
+          c.strokeStyle = '#ff9800';
+          c.setLineDash([4 / viewportSetup.scale, 3 / viewportSetup.scale]);
+          c.stroke();
+          c.setLineDash([]);
+        }
+      }
+    } else {
+      for (const s of diff.added) {
+        const pts = localWorldPointsOfForThumb(s);
+        if (pts && pts.length >= 3) {
+          c.beginPath();
+          c.moveTo(pts[0].x, pts[0].y);
+          for (let i = 1; i < pts.length; i++) c.lineTo(pts[i].x, pts[i].y);
+          c.closePath();
+          c.fillStyle = 'rgba(76, 175, 80, 0.25)';
+          c.fill();
+          c.lineWidth = lw;
+          c.strokeStyle = '#4caf50';
+          c.stroke();
+        }
+      }
+      for (const m of diff.modified) {
+        const pts = localWorldPointsOfForThumb(m.newShape);
+        if (pts && pts.length >= 3) {
+          c.beginPath();
+          c.moveTo(pts[0].x, pts[0].y);
+          for (let i = 1; i < pts.length; i++) c.lineTo(pts[i].x, pts[i].y);
+          c.closePath();
+          c.lineWidth = lw;
+          c.strokeStyle = '#ff9800';
+          c.stroke();
+        }
+      }
+    }
+
+    c.restore();
+  }
+
+  function enterCompareMode(snap1Id, snap2Id) {
+    const snap1 = snapshotSystem.snapshots.find(s => s.id === snap1Id);
+    const snap2 = snapshotSystem.snapshots.find(s => s.id === snap2Id);
+    if (!snap1 || !snap2) return;
+
+    if (snapshotSystem.isPreviewMode) {
+      exitPreviewMode(true);
+    }
+
+    snapshotSystem.isCompareMode = true;
+    snapshotSystem.compareDividerX = 0.5;
+
+    const overlay = document.getElementById('compare-overlay');
+    const leftLabel = document.getElementById('compare-left-label');
+    const rightLabel = document.getElementById('compare-right-label');
+    if (overlay) overlay.classList.remove('hidden');
+    if (leftLabel) leftLabel.textContent = snap1.name;
+    if (rightLabel) rightLabel.textContent = snap2.name;
+
+    setTimeout(() => setupCompareCanvases(snap1, snap2), 30);
+  }
+
+  function setupCompareCanvases(snap1, snap2) {
+    const container = document.getElementById('compare-container');
+    const leftCanvas = document.getElementById('compare-left-canvas');
+    const rightCanvas = document.getElementById('compare-right-canvas');
+    const divider = document.getElementById('compare-divider');
+    if (!container || !leftCanvas || !rightCanvas) return;
+
+    const rect = container.getBoundingClientRect();
+    const w = rect.width;
+    const h = rect.height;
+
+    const dividerX = w * snapshotSystem.compareDividerX;
+
+    leftCanvas.width = Math.floor(dividerX);
+    leftCanvas.height = h;
+    leftCanvas.style.width = Math.floor(dividerX) + 'px';
+    leftCanvas.style.height = h + 'px';
+    leftCanvas.style.clipPath = 'inset(0)';
+
+    rightCanvas.width = w - Math.floor(dividerX);
+    rightCanvas.height = h;
+    rightCanvas.style.width = (w - Math.floor(dividerX)) + 'px';
+    rightCanvas.style.height = h + 'px';
+
+    if (divider) {
+      divider.style.left = dividerX + 'px';
+    }
+
+    const bounds1 = getShapesBounds(snap1.state.shapes);
+    const bounds2 = getShapesBounds(snap2.state.shapes);
+    const bounds = {
+      minX: Math.min(bounds1.minX, bounds2.minX),
+      minY: Math.min(bounds1.minY, bounds2.minY),
+      maxX: Math.max(bounds1.maxX, bounds2.maxX),
+      maxY: Math.max(bounds1.maxY, bounds2.maxY)
+    };
+    const bW = bounds.maxX - bounds.minX;
+    const bH = bounds.maxY - bounds.minY;
+
+    const scale = Math.min(w / bW, h / bH) * 0.9;
+    const vpSetup = {
+      scale: scale,
+      x: (bounds.minX + bounds.maxX) / 2,
+      y: (bounds.minY + bounds.maxY) / 2,
+      cx: w / 2,
+      cy: h / 2
+    };
+
+    const vpLeft = { ...vpSetup, cx: leftCanvas.width / 2 };
+    const vpRight = { ...vpSetup, cx: rightCanvas.width / 2 };
+
+    const diff = computeShapeDiff(snap1.state.shapes, snap2.state.shapes);
+
+    renderCompareShapesToCanvas(leftCanvas, snap1.state.shapes, vpLeft, diff, true);
+    applyCompareHighlights(leftCanvas, snap1.state.shapes, vpLeft, diff, true);
+
+    renderCompareShapesToCanvas(rightCanvas, snap2.state.shapes, vpRight, diff, false);
+    applyCompareHighlights(rightCanvas, snap2.state.shapes, vpRight, diff, false);
+  }
+
+  function updateCompareLayout() {
+    const ids = Array.from(snapshotSystem.selectedSnapshotIds);
+    if (ids.length !== 2) return;
+    const snap1 = snapshotSystem.snapshots.find(s => s.id === ids[0]);
+    const snap2 = snapshotSystem.snapshots.find(s => s.id === ids[1]);
+    if (!snap1 || !snap2) return;
+    setupCompareCanvases(snap1, snap2);
+  }
+
+  function exitCompareMode() {
+    snapshotSystem.isCompareMode = false;
+    snapshotSystem.isDraggingDivider = false;
+    const overlay = document.getElementById('compare-overlay');
+    if (overlay) overlay.classList.add('hidden');
+    renderHistoryPanel();
+  }
+
+  function formatTime(ts) {
+    const d = new Date(ts);
+    const now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    if (sameDay) {
+      return hh + ':' + mm;
+    }
+    const mon = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return mon + '/' + day + ' ' + hh + ':' + mm;
+  }
+
+  function renderHistoryPanel() {
+    const listEl = document.getElementById('history-list');
+    const countEl = document.getElementById('history-count');
+    const compareBtn = document.getElementById('snapshot-compare-btn');
+    if (!listEl) return;
+
+    if (countEl) countEl.textContent = snapshotSystem.snapshots.length;
+    if (compareBtn) {
+      compareBtn.disabled = snapshotSystem.selectedSnapshotIds.size !== 2;
+      compareBtn.title = snapshotSystem.selectedSnapshotIds.size === 2
+        ? 'Compare selected snapshots'
+        : 'Select 2 snapshots to compare';
+    }
+
+    if (snapshotSystem.snapshots.length === 0) {
+      listEl.innerHTML = `
+        <div class="empty-history">
+          <div class="empty-history-icon">📸</div>
+          No snapshots yet.
+          Click + above to create one.
+        </div>`;
+      return;
+    }
+
+    listEl.innerHTML = '';
+
+    for (const snap of snapshotSystem.snapshots) {
+      const item = document.createElement('div');
+      item.className = 'history-item';
+      item.dataset.snapshotId = snap.id;
+
+      if (snapshotSystem.selectedSnapshotIds.has(snap.id)) {
+        item.classList.add('selected');
+      }
+      if (snapshotSystem.previewingSnapshotId === snap.id) {
+        item.classList.add('previewing');
+      }
+
+      const thumb = document.createElement('div');
+      thumb.className = 'snapshot-thumb';
+      if (snap.thumbnail) {
+        const img = document.createElement('canvas');
+        img.width = THUMB_WIDTH;
+        img.height = THUMB_HEIGHT;
+        const ictx = img.getContext('2d');
+        const image = new Image();
+        image.onload = function() {
+          try { ictx.drawImage(image, 0, 0, THUMB_WIDTH, THUMB_HEIGHT); } catch(e) {}
+        };
+        image.src = snap.thumbnail;
+        thumb.appendChild(img);
+      } else {
+        const empty = document.createElement('span');
+        empty.className = 'snapshot-thumb-empty';
+        empty.textContent = '▢';
+        thumb.appendChild(empty);
+      }
+
+      const info = document.createElement('div');
+      info.className = 'snapshot-info';
+      const nameEl = document.createElement('div');
+      nameEl.className = 'snapshot-name';
+      nameEl.textContent = snap.name;
+      nameEl.title = snap.name;
+      const timeEl = document.createElement('div');
+      timeEl.className = 'snapshot-time';
+      timeEl.textContent = formatTime(snap.createdAt);
+      timeEl.title = new Date(snap.createdAt).toLocaleString();
+      info.appendChild(nameEl);
+      info.appendChild(timeEl);
+
+      const actions = document.createElement('div');
+      actions.className = 'snapshot-actions';
+      const delBtn = document.createElement('button');
+      delBtn.className = 'snapshot-action-btn';
+      delBtn.title = 'Delete snapshot';
+      delBtn.innerHTML = '×';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (confirm('Delete snapshot "' + snap.name + '"?')) {
+          deleteSnapshot(snap.id);
+        }
+      });
+      actions.appendChild(delBtn);
+
+      item.appendChild(thumb);
+      item.appendChild(info);
+      item.appendChild(actions);
+
+      item.addEventListener('click', (e) => {
+        if (e.shiftKey || e.metaKey || e.ctrlKey) {
+          if (snapshotSystem.selectedSnapshotIds.has(snap.id)) {
+            snapshotSystem.selectedSnapshotIds.delete(snap.id);
+          } else {
+            snapshotSystem.selectedSnapshotIds.add(snap.id);
+          }
+          renderHistoryPanel();
+        } else {
+          if (snapshotSystem.previewingSnapshotId === snap.id) {
+            exitPreviewMode(true);
+          } else {
+            enterPreviewMode(snap.id);
+          }
+        }
+      });
+
+      item.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        if (snapshotSystem.selectedSnapshotIds.has(snap.id)) {
+          snapshotSystem.selectedSnapshotIds.delete(snap.id);
+        } else {
+          snapshotSystem.selectedSnapshotIds.add(snap.id);
+        }
+        renderHistoryPanel();
+      });
+
+      listEl.appendChild(item);
+    }
+  }
+
+  function initSnapshotSystem() {
+    const createBtn = document.getElementById('snapshot-create-btn');
+    const compareBtn = document.getElementById('snapshot-compare-btn');
+    const nameDialog = document.getElementById('snapshot-name-dialog');
+    const nameInput = document.getElementById('snapshot-name-input');
+    const nameOk = document.getElementById('snapshot-name-ok');
+    const nameCancel = document.getElementById('snapshot-name-cancel');
+    const nameClose = document.getElementById('snapshot-name-close');
+    const previewRestoreBtn = document.getElementById('preview-restore-btn');
+    const previewExitBtn = document.getElementById('preview-exit-btn');
+    const compareExitBtn = document.getElementById('compare-exit-btn');
+    const compareDivider = document.getElementById('compare-divider');
+    const compareContainer = document.getElementById('compare-container');
+
+    if (createBtn) {
+      createBtn.addEventListener('click', () => {
+        if (snapshotSystem.isCompareMode) {
+          showToast('Cannot create snapshot in compare mode', 'warning');
+          return;
+        }
+        if (nameDialog) {
+          nameDialog.classList.remove('hidden');
+          if (nameInput) {
+            nameInput.value = 'Snapshot ' + (snapshotSystem.snapshots.length + 1);
+            setTimeout(() => { nameInput.focus(); nameInput.select(); }, 50);
+          }
+        } else {
+          createSnapshot();
+        }
+      });
+    }
+
+    const closeNameDialog = () => {
+      if (nameDialog) nameDialog.classList.add('hidden');
+    };
+
+    if (nameOk) nameOk.addEventListener('click', () => {
+      const n = nameInput ? nameInput.value.trim() : '';
+      closeNameDialog();
+      createSnapshot(n);
+    });
+    if (nameCancel) nameCancel.addEventListener('click', closeNameDialog);
+    if (nameClose) nameClose.addEventListener('click', closeNameDialog);
+    if (nameInput) {
+      nameInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          const n = nameInput.value.trim();
+          closeNameDialog();
+          createSnapshot(n);
+        } else if (e.key === 'Escape') {
+          closeNameDialog();
+        }
+      });
+    }
+
+    if (compareBtn) {
+      compareBtn.addEventListener('click', () => {
+        const ids = Array.from(snapshotSystem.selectedSnapshotIds);
+        if (ids.length === 2) {
+          enterCompareMode(ids[0], ids[1]);
+        }
+      });
+    }
+
+    if (previewRestoreBtn) {
+      previewRestoreBtn.addEventListener('click', () => {
+        if (snapshotSystem.previewingSnapshotId) {
+          restoreSnapshot(snapshotSystem.previewingSnapshotId);
+        }
+      });
+    }
+    if (previewExitBtn) {
+      previewExitBtn.addEventListener('click', () => exitPreviewMode(true));
+    }
+
+    if (compareExitBtn) {
+      compareExitBtn.addEventListener('click', exitCompareMode);
+    }
+
+    if (compareDivider && compareContainer) {
+      compareDivider.addEventListener('mousedown', (e) => {
+        snapshotSystem.isDraggingDivider = true;
+        e.preventDefault();
+      });
+      window.addEventListener('mousemove', (e) => {
+        if (!snapshotSystem.isDraggingDivider || !snapshotSystem.isCompareMode) return;
+        const rect = compareContainer.getBoundingClientRect();
+        let x = (e.clientX - rect.left) / rect.width;
+        x = Math.max(0.1, Math.min(0.9, x));
+        snapshotSystem.compareDividerX = x;
+        updateCompareLayout();
+      });
+      window.addEventListener('mouseup', () => {
+        snapshotSystem.isDraggingDivider = false;
+      });
+      window.addEventListener('resize', () => {
+        if (snapshotSystem.isCompareMode) {
+          setTimeout(updateCompareLayout, 50);
+        }
+      });
+    }
+
+    loadSnapshotsFromStorage();
+  }
+
   initFillPanel();
   patchRenderShape();
   patchRender();
@@ -9642,4 +10650,44 @@
   }
 
   initTimeline();
+
+  initSnapshotSystem();
+
+  const origKeyDownHandler = window.onkeydown;
+  window.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+      if (snapshotSystem.isCompareMode) {
+        exitCompareMode();
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (snapshotSystem.isPreviewMode) {
+        exitPreviewMode(true);
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+    }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 's' || e.key === 'S')) {
+      e.preventDefault();
+      const createBtn = document.getElementById('snapshot-create-btn');
+      if (createBtn) createBtn.click();
+    }
+  }, true);
+
+  const _origLoadPageState = loadPageState;
+  loadPageState = function(pageId) {
+    if (snapshotSystem.isPreviewMode) {
+      exitPreviewMode(false);
+    }
+    if (snapshotSystem.isCompareMode) {
+      exitCompareMode();
+    }
+    const result = _origLoadPageState(pageId);
+    if (result !== false) {
+      setTimeout(function() { loadSnapshotsFromStorage(); }, 0);
+    }
+    return result;
+  };
 })();
