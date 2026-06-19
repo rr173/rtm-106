@@ -10786,10 +10786,15 @@
 
   let effectsDragIdx = -1;
 
-  function getShapeEffects(shape) {
+  function getShapeEffects(shape, createWritable) {
     if (!shape) return [];
     if (isComponentInstance(shape)) {
       if (shape.overrides && shape.overrides.effects !== undefined) {
+        return shape.overrides.effects;
+      }
+      if (createWritable) {
+        if (!shape.overrides) shape.overrides = {};
+        shape.overrides.effects = [];
         return shape.overrides.effects;
       }
       return [];
@@ -10809,9 +10814,12 @@
     });
   }
 
-  function getAnimatedEffectParams(shapeId, effect, frame) {
+  function getAnimatedEffectParams(shapeId, effect, frame, fallbackShapeId) {
     const result = {};
-    const anim = animationController.getShapeAnimation(shapeId, false);
+    let anim = animationController.getShapeAnimation(shapeId, false);
+    if (!anim && fallbackShapeId) {
+      anim = animationController.getShapeAnimation(fallbackShapeId, false);
+    }
     if (!anim) return result;
     const effectPrefix = 'effect_' + effect.id + '_';
     for (const paramName in effect.params) {
@@ -10822,6 +10830,164 @@
       }
     }
     return result;
+  }
+
+  function getExpandedShapeActiveEffects(expandedShape, frame) {
+    if (!expandedShape || !expandedShape.effects || expandedShape.effects.length === 0) return [];
+    const fallbackId = expandedShape._originalId;
+    return expandedShape.effects.filter(e => e.enabled !== false).map(e => {
+      if (frame !== undefined && frame > 0) {
+        const animated = getAnimatedEffectParams(expandedShape.id, e, frame, fallbackId);
+        return { ...e, params: { ...e.params, ...animated } };
+      }
+      return e;
+    });
+  }
+
+  function applyEffectsToCtxFromList(context, effectList) {
+    const filterStr = buildCanvasFilterString(effectList.filter(e => e.type !== 'inner-glow'));
+    if (filterStr) {
+      context.filter = filterStr;
+    }
+  }
+
+  function computeCombinedBoundsOfShapes(shapes) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const s of shapes) {
+      const pts = s.points || [];
+      for (const p of pts) {
+        if (p.x < minX) minX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y > maxY) maxY = p.y;
+      }
+    }
+    if (minX === Infinity) { minX = -50; minY = -50; maxX = 50; maxY = 50; }
+    return { minX, minY, maxX, maxY };
+  }
+
+  function computeEffectsPadding(effectList) {
+    let pad = 0;
+    for (const e of effectList || []) {
+      const p = e.params || {};
+      if (e.type === 'gaussian-blur') pad = Math.max(pad, (p.radius || 0) * 3);
+      if (e.type === 'drop-shadow') pad = Math.max(pad, (p.blurRadius || 0) * 3 + Math.abs(p.offsetX || 0) + Math.abs(p.offsetY || 0));
+      if (e.type === 'inner-glow') pad = Math.max(pad, (p.spread || 0) * 2);
+    }
+    return Math.max(pad, 20);
+  }
+
+  function renderExpandedShapeSelf(es, instanceShape, useAnimation, currentFrame) {
+    const ePts = es.points;
+    const eHoles = es.holes || [];
+    const selfEffects = getExpandedShapeActiveEffects(es, useAnimation ? currentFrame : undefined);
+    const hasInnerGlow = selfEffects.some(e => e.type === 'inner-glow');
+    const hasSelfEffects = selfEffects.length > 0;
+
+    let fillColor = es.fill;
+    let opacity = 1;
+    if (useAnimation && instanceShape) {
+      const animProps = getAnimatedShapeProps(instanceShape, currentFrame);
+      if (animProps && animProps.fill !== undefined) fillColor = animProps.fill;
+      if (animProps && animProps.opacity !== undefined) opacity = animProps.opacity;
+    }
+
+    if (!hasSelfEffects) {
+      ctx.save();
+      ctx.globalAlpha = opacity;
+      drawPolygonPath(ePts, eHoles);
+      const esFill = ensureFillStructure(fillColor);
+      if (typeof esFill === 'string') {
+        ctx.fillStyle = esFill;
+      } else {
+        ctx.fillStyle = getCanvasFillStyle(ctx, esFill, { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }, ePts);
+      }
+      ctx.fill('evenodd');
+      ctx.lineWidth = (es.strokeWidth || 2) / viewport.scale;
+      ctx.strokeStyle = es.stroke || '#000';
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+
+    if (hasInnerGlow) {
+      const bbox = computeCombinedBoundsOfShapes([{points: ePts}]);
+      const pad = computeEffectsPadding(selfEffects);
+      const offW = Math.max(1, Math.ceil((bbox.maxX - bbox.minX) + pad * 2));
+      const offH = Math.max(1, Math.ceil((bbox.maxY - bbox.minY) + pad * 2));
+      const offC = document.createElement('canvas');
+      offC.width = offW;
+      offC.height = offH;
+      const octx = offC.getContext('2d');
+      const scale = viewport.scale;
+      octx.scale(scale, scale);
+      octx.translate(-bbox.minX + pad / scale, -bbox.minY + pad / scale);
+
+      const origCtx = ctx;
+      ctx = octx;
+      drawPolygonPath(ePts, eHoles);
+      const esFill0 = ensureFillStructure(fillColor);
+      if (typeof esFill0 === 'string') {
+        octx.fillStyle = esFill0;
+      } else {
+        octx.fillStyle = getCanvasFillStyle(octx, esFill0, { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }, ePts);
+      }
+      octx.fill('evenodd');
+      octx.lineWidth = (es.strokeWidth || 2) / scale;
+      octx.strokeStyle = es.stroke || '#000';
+      octx.stroke();
+
+      for (const e of selfEffects) {
+        if (e.type !== 'inner-glow') continue;
+        const spread = e.params.spread || 0;
+        if (spread <= 0) continue;
+        const glowC = document.createElement('canvas');
+        glowC.width = offW;
+        glowC.height = offH;
+        const gctx = glowC.getContext('2d');
+        gctx.scale(scale, scale);
+        gctx.translate(-bbox.minX + pad / scale, -bbox.minY + pad / scale);
+        gctx.globalCompositeOperation = 'source-over';
+        gctx.filter = 'blur(' + (spread / viewport.scale) + 'px)';
+        drawPolygonPath(ePts, eHoles);
+        gctx.fillStyle = e.params.color;
+        gctx.fill('evenodd');
+        gctx.filter = 'none';
+        gctx.globalCompositeOperation = 'source-atop';
+        gctx.drawImage(offC, 0, 0);
+        gctx.globalCompositeOperation = 'source-over';
+        octx.drawImage(glowC, 0, 0);
+      }
+      ctx = origCtx;
+
+      origCtx.save();
+      origCtx.globalAlpha = opacity;
+      const nonInner = selfEffects.filter(e => e.type !== 'inner-glow');
+      applyEffectsToCtxFromList(origCtx, nonInner);
+      origCtx.drawImage(offC,
+        (bbox.minX - pad / scale) * viewport.scale + viewport.offsetX,
+        (bbox.minY - pad / scale) * viewport.scale + viewport.offsetY,
+        offW, offH);
+      origCtx.filter = 'none';
+      origCtx.restore();
+    } else {
+      ctx.save();
+      ctx.globalAlpha = opacity;
+      applyEffectsToCtxFromList(ctx, selfEffects);
+      drawPolygonPath(ePts, eHoles);
+      const esFill2 = ensureFillStructure(fillColor);
+      if (typeof esFill2 === 'string') {
+        ctx.fillStyle = esFill2;
+      } else {
+        ctx.fillStyle = getCanvasFillStyle(ctx, esFill2, { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }, ePts);
+      }
+      ctx.fill('evenodd');
+      ctx.lineWidth = (es.strokeWidth || 2) / viewport.scale;
+      ctx.strokeStyle = es.stroke || '#000';
+      ctx.stroke();
+      ctx.filter = 'none';
+      ctx.restore();
+    }
   }
 
   function buildCanvasFilterString(effects) {
@@ -11041,53 +11207,39 @@
           const animProps = useAnimation ? getAnimatedShapeProps(s, currentFrame) : null;
           const opacity = useAnimation && animProps ? animProps.opacity : 1;
 
+          const combinedBBox = computeCombinedBoundsOfShapes(expanded);
+          const pad = computeEffectsPadding(getActiveEffects(s, useAnimation ? currentFrame : undefined));
+          const offW = Math.max(1, Math.ceil((combinedBBox.maxX - combinedBBox.minX) + pad * 2));
+          const offH = Math.max(1, Math.ceil((combinedBBox.maxY - combinedBBox.minY) + pad * 2));
+          const offCanvas = document.createElement('canvas');
+          offCanvas.width = offW;
+          offCanvas.height = offH;
+          const offCtx = offCanvas.getContext('2d');
+          const scale = viewport.scale;
+          offCtx.scale(scale, scale);
+          offCtx.translate(-combinedBBox.minX + pad / scale, -combinedBBox.minY + pad / scale);
+
+          const origCtx = ctx;
+          ctx = offCtx;
           for (const es of expanded) {
-            const ePts = es.points;
-            const eHoles = es.holes || [];
-            ctx.save();
-            ctx.globalAlpha = opacity;
-            applyEffectsToCtx(ctx, s, useAnimation ? currentFrame : undefined);
-            const esFill = ensureFillStructure(es.fill);
-            if (typeof esFill === 'string') {
-              ctx.fillStyle = esFill;
-            } else {
-              ctx.fillStyle = getCanvasFillStyle(ctx, esFill, { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }, ePts);
-            }
-            drawPolygonPath(ePts, eHoles);
-            ctx.fill('evenodd');
-            ctx.lineWidth = (es.strokeWidth || 2) / viewport.scale;
-            ctx.strokeStyle = es.stroke || '#000';
-            ctx.stroke();
-            ctx.filter = 'none';
-            ctx.restore();
+            renderExpandedShapeSelf(es, s, useAnimation, currentFrame);
           }
+          ctx = origCtx;
+
+          origCtx.save();
+          origCtx.globalAlpha = opacity;
+          applyEffectsToCtxFromList(origCtx, instanceEffects);
+          origCtx.drawImage(offCanvas,
+            (combinedBBox.minX - pad / scale) * viewport.scale + viewport.offsetX,
+            (combinedBBox.minY - pad / scale) * viewport.scale + viewport.offsetY,
+            offW, offH);
+          origCtx.filter = 'none';
+          origCtx.restore();
           return;
         }
 
         for (const es of expanded) {
-          const ePts = es.points;
-          const eHoles = es.holes || [];
-          ctx.save();
-          let fillColor = es.fill;
-          let opacity = 1;
-          if (useAnimation) {
-            const animProps = getAnimatedShapeProps(s, currentFrame);
-            fillColor = animProps.fill;
-            opacity = animProps.opacity;
-          }
-          ctx.globalAlpha = opacity;
-          drawPolygonPath(ePts, eHoles);
-          const esFill = ensureFillStructure(fillColor);
-          if (typeof esFill === 'string') {
-            ctx.fillStyle = esFill;
-          } else {
-            ctx.fillStyle = getCanvasFillStyle(ctx, esFill, { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }, ePts);
-          }
-          ctx.fill('evenodd');
-          ctx.lineWidth = (es.strokeWidth || 2) / viewport.scale;
-          ctx.strokeStyle = es.stroke || '#000';
-          ctx.stroke();
-          ctx.restore();
+          renderExpandedShapeSelf(es, s, useAnimation, currentFrame);
         }
         return;
       }
@@ -11190,7 +11342,7 @@
     panel.classList.add('visible');
     list.innerHTML = '';
 
-    const effects = getShapeEffects(shape);
+    const effects = getShapeEffects(shape, true);
     if (effects.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'effects-empty';
@@ -11408,8 +11560,8 @@
           params: JSON.parse(JSON.stringify(EFFECT_DEFAULTS[type]))
         };
 
-        if (!shape.effects) shape.effects = [];
-        shape.effects.push(newEffect);
+        const effects = getShapeEffects(shape, true);
+        effects.push(newEffect);
 
         addSelect.value = '';
         updateEffectsPanel();
@@ -11502,37 +11654,76 @@
 
         const filterId = 'filter_' + shapeId;
         let filterContent = '';
+        let lastResult = 'SourceGraphic';
 
-        for (const effect of active) {
+        for (let i = 0; i < active.length; i++) {
+          const effect = active[i];
           const p = effect.params;
+          const prevResult = lastResult;
+
           switch (effect.type) {
-            case 'gaussian-blur':
-              filterContent += '<feGaussianBlur in="SourceGraphic" stdDeviation="' + p.radius + '" result="blur_' + effect.id + '"/>';
+            case 'gaussian-blur': {
+              const out = 'blur_' + effect.id;
+              filterContent += '<feGaussianBlur in="' + prevResult + '" stdDeviation="' + p.radius + '" result="' + out + '"/>';
+              lastResult = out;
               break;
-            case 'drop-shadow':
-              filterContent += '<feGaussianBlur in="SourceAlpha" stdDeviation="' + p.blurRadius + '" result="shadow_blur_' + effect.id + '"/>';
-              filterContent += '<feOffset in="shadow_blur_' + effect.id + '" dx="' + p.offsetX + '" dy="' + p.offsetY + '" result="shadow_offset_' + effect.id + '"/>';
-              filterContent += '<feFlood flood-color="' + p.color + '" result="shadow_color_' + effect.id + '"/>';
-              filterContent += '<feComposite in="shadow_color_' + effect.id + '" in2="shadow_offset_' + effect.id + '" operator="in" result="shadow_' + effect.id + '"/>';
-              filterContent += '<feMerge result="merge_' + effect.id + '"><feMergeNode in="shadow_' + effect.id + '"/><feMergeNode in="SourceGraphic"/></feMerge>';
+            }
+            case 'drop-shadow': {
+              const shadowAlpha = 'shadowAlpha_' + effect.id;
+              const shadowBlur = 'shadowBlur_' + effect.id;
+              const shadowOffset = 'shadowOffset_' + effect.id;
+              const shadowColor = 'shadowColor_' + effect.id;
+              const shadowCut = 'shadowCut_' + effect.id;
+              const merged = 'shadowMerged_' + effect.id;
+
+              filterContent += '<feColorMatrix in="' + prevResult + '" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0" result="' + shadowAlpha + '"/>';
+              filterContent += '<feGaussianBlur in="' + shadowAlpha + '" stdDeviation="' + p.blurRadius + '" result="' + shadowBlur + '"/>';
+              filterContent += '<feOffset in="' + shadowBlur + '" dx="' + p.offsetX + '" dy="' + p.offsetY + '" result="' + shadowOffset + '"/>';
+              filterContent += '<feFlood flood-color="' + p.color + '" result="' + shadowColor + '"/>';
+              filterContent += '<feComposite in="' + shadowColor + '" in2="' + shadowOffset + '" operator="in" result="' + shadowCut + '"/>';
+              filterContent += '<feMerge result="' + merged + '"><feMergeNode in="' + shadowCut + '"/><feMergeNode in="' + prevResult + '"/></feMerge>';
+
+              lastResult = merged;
               break;
-            case 'inner-glow':
-              filterContent += '<feGaussianBlur in="SourceAlpha" stdDeviation="' + p.spread + '" result="glow_blur_' + effect.id + '"/>';
-              filterContent += '<feFlood flood-color="' + p.color + '" result="glow_color_' + effect.id + '"/>';
-              filterContent += '<feComposite in="glow_color_' + effect.id + '" in2="glow_blur_' + effect.id + '" operator="in" result="glow_inner_' + effect.id + '"/>';
-              filterContent += '<feComposite in="glow_inner_' + effect.id + '" in2="SourceAlpha" operator="in" result="glow_clipped_' + effect.id + '"/>';
-              filterContent += '<feMerge result="merge_' + effect.id + '"><feMergeNode in="SourceGraphic"/><feMergeNode in="glow_clipped_' + effect.id + '"/></feMerge>';
+            }
+            case 'inner-glow': {
+              const srcAlpha = 'srcAlpha_' + effect.id;
+              const invertAlpha = 'invertAlpha_' + effect.id;
+              const glowBlur = 'glowBlur_' + effect.id;
+              const glowOffset = 'glowOffset_' + effect.id;
+              const glowColor = 'glowColor_' + effect.id;
+              const glowComposite = 'glowComp_' + effect.id;
+              const glowCut = 'glowCut_' + effect.id;
+              const merged = 'glowMerged_' + effect.id;
+
+              filterContent += '<feColorMatrix in="' + prevResult + '" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0" result="' + srcAlpha + '"/>';
+              filterContent += '<feComponentTransfer in="' + srcAlpha + '" result="' + invertAlpha + '"><feFuncA type="table" tableValues="1 0"/></feComponentTransfer>';
+              filterContent += '<feGaussianBlur in="' + invertAlpha + '" stdDeviation="' + p.spread + '" result="' + glowBlur + '"/>';
+              filterContent += '<feOffset in="' + glowBlur + '" dx="0" dy="0" result="' + glowOffset + '"/>';
+              filterContent += '<feFlood flood-color="' + p.color + '" result="' + glowColor + '"/>';
+              filterContent += '<feComposite in="' + glowColor + '" in2="' + glowOffset + '" operator="in" result="' + glowComposite + '"/>';
+              filterContent += '<feComposite in="' + glowComposite + '" in2="' + srcAlpha + '" operator="in" result="' + glowCut + '"/>';
+              filterContent += '<feMerge result="' + merged + '"><feMergeNode in="' + prevResult + '"/><feMergeNode in="' + glowCut + '"/></feMerge>';
+
+              lastResult = merged;
               break;
-            case 'hue-rotate':
-              filterContent += '<feColorMatrix type="hueRotate" values="' + p.angle + '" result="hue_' + effect.id + '"/>';
+            }
+            case 'hue-rotate': {
+              const out = 'hue_' + effect.id;
+              filterContent += '<feColorMatrix in="' + prevResult + '" type="hueRotate" values="' + p.angle + '" result="' + out + '"/>';
+              lastResult = out;
               break;
+            }
             case 'brightness-contrast': {
+              const brightOut = 'bright_' + effect.id;
+              const contrastOut = 'contrast_' + effect.id;
               const b = 1 + p.brightness / 100;
-              const intercept = 0.5 - 0.5 * b;
-              filterContent += '<feComponentTransfer result="bright_' + effect.id + '"><feFuncR type="linear" slope="' + b + '" intercept="' + intercept + '"/><feFuncG type="linear" slope="' + b + '" intercept="' + intercept + '"/><feFuncB type="linear" slope="' + b + '" intercept="' + intercept + '"/></feComponentTransfer>';
+              const bIntercept = 0.5 - 0.5 * b;
+              filterContent += '<feComponentTransfer in="' + prevResult + '" result="' + brightOut + '"><feFuncR type="linear" slope="' + b + '" intercept="' + bIntercept + '"/><feFuncG type="linear" slope="' + b + '" intercept="' + bIntercept + '"/><feFuncB type="linear" slope="' + b + '" intercept="' + bIntercept + '"/></feComponentTransfer>';
               const c = 1 + p.contrast / 100;
               const cIntercept = 0.5 - 0.5 * c;
-              filterContent += '<feComponentTransfer in="bright_' + effect.id + '" result="contrast_' + effect.id + '"><feFuncR type="linear" slope="' + c + '" intercept="' + cIntercept + '"/><feFuncG type="linear" slope="' + c + '" intercept="' + cIntercept + '"/><feFuncB type="linear" slope="' + c + '" intercept="' + cIntercept + '"/></feComponentTransfer>';
+              filterContent += '<feComponentTransfer in="' + brightOut + '" result="' + contrastOut + '"><feFuncR type="linear" slope="' + c + '" intercept="' + cIntercept + '"/><feFuncG type="linear" slope="' + c + '" intercept="' + cIntercept + '"/><feFuncB type="linear" slope="' + c + '" intercept="' + cIntercept + '"/></feComponentTransfer>';
+              lastResult = contrastOut;
               break;
             }
           }
@@ -11540,27 +11731,8 @@
 
         if (!filterContent) return null;
 
-        let hasMerge = filterContent.indexOf('<feMerge') >= 0;
-        if (!hasMerge && active.length > 1) {
-          const mergeParts = active.map(function(e, i) {
-            return '<feMergeNode in="' + getEffectResultName(e, i) + '"/>';
-          });
-          filterContent += '<feMerge>' + mergeParts.join('') + '</feMerge>';
-        }
-
         filterDefs.push('<filter id="' + filterId + '" x="-50%" y="-50%" width="200%" height="200%">' + filterContent + '</filter>');
         return filterId;
-      }
-
-      function getEffectResultName(effect, idx) {
-        switch (effect.type) {
-          case 'gaussian-blur': return 'blur_' + effect.id;
-          case 'drop-shadow': return 'merge_' + effect.id;
-          case 'inner-glow': return 'merge_' + effect.id;
-          case 'hue-rotate': return 'hue_' + effect.id;
-          case 'brightness-contrast': return 'contrast_' + effect.id;
-          default: return 'SourceGraphic';
-        }
       }
 
       for (const s of pageShapes) {
@@ -11568,7 +11740,13 @@
         if (s.maskOf !== undefined) continue;
         if (s.type === 'component-instance') {
           const expanded = getInstanceExpandedShapes(s);
+          const instanceEffects = getActiveEffects(s);
+          let instanceFilterId = null;
+          if (instanceEffects.length > 0) {
+            instanceFilterId = buildSVGFilterForEffects(instanceEffects, 'inst_' + s.id);
+          }
           for (const es of expanded) {
+            if (instanceFilterId) es._instanceFilterId = instanceFilterId;
             exportShapes.push(es);
             const pts = es.points;
             for (const p of pts) { allX.push(p.x); allY.push(p.y); }
@@ -11598,9 +11776,22 @@
       let svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="' + (minX - pad) + ' ' + (minY - pad) + ' ' + (maxX - minX + pad * 2) + ' ' + (maxY - minY + pad * 2) + '">';
 
       let defsContent = '';
+      let currentInstanceFilterId = null;
 
       for (let i = 0; i < exportShapes.length; i++) {
         const s = exportShapes[i];
+        const thisInstanceFilter = s._instanceFilterId || null;
+
+        if (thisInstanceFilter !== currentInstanceFilterId) {
+          if (currentInstanceFilterId !== null) {
+            svg += '</g>';
+          }
+          if (thisInstanceFilter !== null) {
+            svg += '<g filter="url(#' + thisInstanceFilter + ')">';
+          }
+          currentInstanceFilterId = thisInstanceFilter;
+        }
+
         const fill = ensureFillStructure(s.fill);
         const transform = s._isExpandedInstance
           ? { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }
@@ -11665,6 +11856,10 @@
         }
 
         svg += '<path d="' + d + '" fill="' + exportFill + '" stroke="' + (s.stroke || '#000') + '" stroke-width="' + (s.strokeWidth || 2) + '" fill-rule="evenodd"' + extraAttrs + '/>';
+      }
+
+      if (currentInstanceFilterId !== null) {
+        svg += '</g>';
       }
 
       if (Object.keys(defsMap).length > 0 || clipPathDefs.length > 0 || maskDefs.length > 0 || filterDefs.length > 0) {
@@ -11775,31 +11970,135 @@
         const animProps = getAnimatedShapeProps(s, frame);
         const instanceEffects = getActiveEffects(s, frame);
 
-        for (const es of expanded) {
+        function drawExpandedShapeSelfDFTC(c, es) {
           const ePts = es.points;
           const eHoles = es.holes || [];
-          targetCtx.save();
-          targetCtx.globalAlpha = animProps.opacity;
-
-          if (instanceEffects.length > 0) {
-            const filterStr = buildCanvasFilterString(instanceEffects);
-            if (filterStr !== 'none') targetCtx.filter = filterStr;
+          const fallbackId = es._originalId;
+          let selfEffects = (es.effects || []).filter(function(e) { return e.enabled !== false; });
+          if (frame > 0) {
+            selfEffects = selfEffects.map(function(e) {
+              const animated = {};
+              const animS = animationController.getShapeAnimation(es.id, false);
+              const animF = fallbackId ? animationController.getShapeAnimation(fallbackId, false) : null;
+              const animToUse = animS || animF;
+              if (animToUse) {
+                const prefix = 'effect_' + e.id + '_';
+                for (const pn in e.params) {
+                  const tn = prefix + pn;
+                  const tr = animToUse.getTrack(tn, false);
+                  if (tr && tr.hasKeyframes()) {
+                    animated[pn] = tr.getValueAt(frame, e.params[pn]);
+                  }
+                }
+              }
+              return { ...e, params: { ...e.params, ...animated } };
+            });
           }
 
-          const rawFill = ensureFillStructure(animProps.fill);
-          if (typeof rawFill === 'string') {
-            targetCtx.fillStyle = rawFill;
+          const esFill = ensureFillStructure(animProps.fill || es.fill);
+          const fillTrans = { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 };
+
+          if (selfEffects.length > 0) {
+            const hasInnerGlow = selfEffects.some(function(e) { return e.type === 'inner-glow'; });
+            if (hasInnerGlow) {
+              const glowEffect = selfEffects.find(function(e) { return e.type === 'inner-glow'; });
+              const gp = glowEffect.params;
+              const shapeBounds = getBounds(ePts);
+              const pad = (gp.spread || 0) + 20;
+              const x = shapeBounds.minX - pad;
+              const y = shapeBounds.minY - pad;
+              const w = shapeBounds.maxX - shapeBounds.minX + pad * 2;
+              const h = shapeBounds.maxY - shapeBounds.minY + pad * 2;
+
+              const offscreen = document.createElement('canvas');
+              offscreen.width = Math.max(1, Math.ceil(w));
+              offscreen.height = Math.max(1, Math.ceil(h));
+              const octx = offscreen.getContext('2d');
+              octx.translate(-x, -y);
+
+              const otherEffects = selfEffects.filter(function(e) { return e.type !== 'inner-glow'; });
+              if (otherEffects.length > 0) {
+                octx.filter = buildCanvasFilterString(otherEffects);
+              }
+
+              drawPolygonPathLocal(octx, ePts, eHoles);
+              if (typeof esFill === 'string') {
+                octx.fillStyle = esFill;
+              } else {
+                octx.fillStyle = getCanvasFillStyle(octx, esFill, fillTrans, ePts);
+              }
+              octx.fill('evenodd');
+              octx.lineWidth = es.strokeWidth || 2;
+              octx.strokeStyle = es.stroke || '#000';
+              octx.stroke();
+
+              if (gp.spread > 0) {
+                octx.globalCompositeOperation = 'source-atop';
+                octx.shadowColor = gp.color;
+                octx.shadowBlur = gp.spread;
+                octx.shadowOffsetX = 0;
+                octx.shadowOffsetY = 0;
+                octx.beginPath();
+                octx.rect(x, y, w, h);
+                octx.fillStyle = gp.color;
+                octx.fill();
+              }
+
+              c.drawImage(offscreen, x, y, w, h);
+              return;
+            }
+
+            const filterStr = buildCanvasFilterString(selfEffects);
+            if (filterStr !== 'none') c.filter = filterStr;
+          }
+
+          drawPolygonPathLocal(c, ePts, eHoles);
+          if (typeof esFill === 'string') {
+            c.fillStyle = esFill;
           } else {
-            targetCtx.fillStyle = getCanvasFillStyle(targetCtx, rawFill, { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }, ePts);
+            c.fillStyle = getCanvasFillStyle(c, esFill, fillTrans, ePts);
           }
-          targetCtx.strokeStyle = es.stroke || '#000';
-          targetCtx.lineWidth = es.strokeWidth || 2;
-          drawPolygonPathLocal(targetCtx, ePts, eHoles);
-          targetCtx.fill('evenodd');
-          targetCtx.stroke();
+          c.fill('evenodd');
+          c.strokeStyle = es.stroke || '#000';
+          c.lineWidth = es.strokeWidth || 2;
+          c.stroke();
+          c.filter = 'none';
+        }
+
+        if (instanceEffects.length > 0) {
+          const esBounds = computeCombinedBoundsOfShapes(expanded);
+          const pad = computeEffectsPadding(instanceEffects);
+          const x = esBounds.minX - pad;
+          const y = esBounds.minY - pad;
+          const w = esBounds.maxX - esBounds.minX + pad * 2;
+          const h = esBounds.maxY - esBounds.minY + pad * 2;
+
+          const offscreen = document.createElement('canvas');
+          offscreen.width = Math.max(1, Math.ceil(w));
+          offscreen.height = Math.max(1, Math.ceil(h));
+          const octx = offscreen.getContext('2d');
+          octx.translate(-x, -y);
+          octx.globalAlpha = animProps.opacity;
+
+          for (const es of expanded) {
+            drawExpandedShapeSelfDFTC(octx, es);
+          }
+
+          targetCtx.save();
+          const instFilter = buildCanvasFilterString(instanceEffects);
+          if (instFilter !== 'none') targetCtx.filter = instFilter;
+          targetCtx.drawImage(offscreen, x, y, w, h);
           targetCtx.filter = 'none';
           targetCtx.restore();
+          continue;
         }
+
+        targetCtx.save();
+        targetCtx.globalAlpha = animProps.opacity;
+        for (const es of expanded) {
+          drawExpandedShapeSelfDFTC(targetCtx, es);
+        }
+        targetCtx.restore();
         continue;
       }
 
