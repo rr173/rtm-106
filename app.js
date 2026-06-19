@@ -144,6 +144,759 @@
   let dimToolSelection = [];
   let dimToolType = null;
 
+  let pages = [];
+  let currentPageId = null;
+  let nextPageId = 1;
+  let clipboardShapes = null;
+  let isDraggingPageTab = false;
+  let draggedPageId = null;
+
+  function createPageData(name) {
+    return {
+      id: nextPageId++,
+      name: name || ('Page ' + (pages.length + 1)),
+      shapes: [],
+      constraints: [],
+      paramsData: {},
+      viewport: { x: 0, y: 0, scale: 1 },
+      animationData: null,
+      motionPathData: null,
+      dimensionData: null
+    };
+  }
+
+  function getCurrentPage() {
+    return pages.find(p => p.id === currentPageId) || null;
+  }
+
+  function getPageById(id) {
+    return pages.find(p => p.id === id) || null;
+  }
+
+  function saveCurrentPageState() {
+    const page = getCurrentPage();
+    if (!page) return;
+
+    page.shapes = JSON.parse(JSON.stringify(shapes));
+    page.constraints = JSON.parse(JSON.stringify(constraints.map(c => serializeConstraint(c))));
+    page.paramsData = JSON.parse(JSON.stringify(paramsData));
+    page.viewport = JSON.parse(JSON.stringify(viewport));
+    page.animationData = animationController.serialize();
+    page.motionPathData = motionPathManager.serialize();
+    page.dimensionData = dimensionSystem.serialize();
+  }
+
+  function loadPageState(pageId) {
+    const page = getPageById(pageId);
+    if (!page) return false;
+
+    saveCurrentPageState();
+
+    currentPageId = pageId;
+
+    shapes = JSON.parse(JSON.stringify(page.shapes));
+    constraints = page.constraints.map(d => deserializeConstraint(d));
+    paramsData = JSON.parse(JSON.stringify(page.paramsData));
+    viewport = JSON.parse(JSON.stringify(page.viewport));
+
+    animationController.deserialize(page.animationData || {});
+    motionPathManager.deserialize(page.motionPathData || {});
+    dimensionSystem.deserialize(page.dimensionData || {});
+
+    for (const s of shapes) {
+      if (s.opacity === undefined) s.opacity = 1;
+      if (s.type === 'motion-path') {
+        motionPathManager.invalidatePathCache(s.id);
+      }
+    }
+
+    selectedIds.clear();
+    selectedVertex = null;
+    selectedConstraintIdx = -1;
+    constraintSelection = [];
+    constraintMode = null;
+    selectedDimensionId = null;
+    dimToolSelection = [];
+    dimToolType = null;
+    isNodeEditMode = false;
+
+    undoStack = [];
+    redoStack = [];
+
+    rebuildSolverAndParams();
+    initialSolve();
+    dimensionSystem.updateFromShapes(getShapePointsForDim, getShapeHolesForDim);
+    updateToolbar();
+    updateTextPanel();
+    updateDimensionPanel();
+    updateFillPanel();
+    updateMotionPathPanel();
+    updateDOFDisplay();
+    renderLayers();
+    renderConstraintList();
+    renderParams();
+    renderComponentsList();
+    renderTimelineTracks();
+    render();
+    scheduleSave();
+
+    return true;
+  }
+
+  function addNewPage(switchTo) {
+    const newPage = createPageData();
+    pages.push(newPage);
+    if (switchTo !== false) {
+      loadPageState(newPage.id);
+    }
+    renderPageTabs();
+    scheduleSave();
+    return newPage;
+  }
+
+  function deletePage(pageId) {
+    if (pages.length <= 1) {
+      showToast('Cannot delete the last page', 'error');
+      return false;
+    }
+
+    const pageIndex = pages.findIndex(p => p.id === pageId);
+    if (pageIndex === -1) return false;
+
+    pages.splice(pageIndex, 1);
+
+    if (currentPageId === pageId) {
+      const newIndex = Math.min(pageIndex, pages.length - 1);
+      loadPageState(pages[newIndex].id);
+    }
+
+    renderPageTabs();
+    scheduleSave();
+    return true;
+  }
+
+  function renamePage(pageId, newName) {
+    const page = getPageById(pageId);
+    if (!page) return false;
+    page.name = newName || ('Page ' + pageId);
+    renderPageTabs();
+    scheduleSave();
+    return true;
+  }
+
+  function reorderPages(draggedId, targetId, insertAfter) {
+    const draggedIdx = pages.findIndex(p => p.id === draggedId);
+    const targetIdx = pages.findIndex(p => p.id === targetId);
+    if (draggedIdx === -1 || targetIdx === -1 || draggedIdx === targetIdx) return false;
+
+    const [draggedPage] = pages.splice(draggedIdx, 1);
+    let newTargetIdx = pages.findIndex(p => p.id === targetId);
+    if (insertAfter) newTargetIdx++;
+    pages.splice(newTargetIdx, 0, draggedPage);
+
+    renderPageTabs();
+    scheduleSave();
+    return true;
+  }
+
+  function renderPageTabs() {
+    const container = document.getElementById('pages-tabs-container');
+    if (!container) return;
+
+    container.innerHTML = '';
+
+    for (const page of pages) {
+      const tab = document.createElement('div');
+      tab.className = 'page-tab';
+      tab.dataset.pageId = page.id;
+      if (page.id === currentPageId) {
+        tab.classList.add('active');
+      }
+
+      const nameEl = document.createElement('span');
+      nameEl.className = 'page-tab-name';
+      nameEl.textContent = page.name;
+      nameEl.title = 'Double-click to rename';
+
+      const closeBtn = document.createElement('button');
+      closeBtn.className = 'page-tab-close';
+      closeBtn.innerHTML = '×';
+      closeBtn.title = 'Delete page';
+      closeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (confirm('Delete page "' + page.name + '"?')) {
+          deletePage(page.id);
+        }
+      });
+
+      nameEl.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'page-tab-name-input';
+        input.value = page.name;
+        input.addEventListener('blur', () => {
+          renamePage(page.id, input.value.trim());
+        });
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            renamePage(page.id, input.value.trim());
+          } else if (e.key === 'Escape') {
+            renderPageTabs();
+          }
+        });
+        nameEl.replaceWith(input);
+        input.focus();
+        input.select();
+      });
+
+      tab.addEventListener('click', () => {
+        if (page.id !== currentPageId) {
+          loadPageState(page.id);
+          renderPageTabs();
+        }
+      });
+
+      tab.draggable = true;
+      tab.addEventListener('dragstart', (e) => {
+        isDraggingPageTab = true;
+        draggedPageId = page.id;
+        tab.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', page.id.toString());
+      });
+      tab.addEventListener('dragend', () => {
+        isDraggingPageTab = false;
+        draggedPageId = null;
+        tab.classList.remove('dragging');
+        document.querySelectorAll('.page-tab.drag-over').forEach(el => el.classList.remove('drag-over'));
+      });
+      tab.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        if (draggedPageId === page.id) return;
+        e.dataTransfer.dropEffect = 'move';
+        document.querySelectorAll('.page-tab.drag-over').forEach(el => el.classList.remove('drag-over'));
+        tab.classList.add('drag-over');
+      });
+      tab.addEventListener('dragleave', () => {
+        tab.classList.remove('drag-over');
+      });
+      tab.addEventListener('drop', (e) => {
+        e.preventDefault();
+        tab.classList.remove('drag-over');
+        const rect = tab.getBoundingClientRect();
+        const insertAfter = (e.clientX - rect.left) > rect.width / 2;
+        reorderPages(draggedPageId, page.id, insertAfter);
+      });
+
+      tab.appendChild(nameEl);
+      tab.appendChild(closeBtn);
+      container.appendChild(tab);
+    }
+  }
+
+  function copySelectedShapes() {
+    const selected = getSelectedShapes();
+    if (selected.length === 0) {
+      showToast('Nothing selected to copy', 'warning');
+      return false;
+    }
+
+    const idsToCopy = collectAllMaskedIds(selected.map(s => s.id));
+    const shapesToCopy = shapes.filter(s => idsToCopy.has(s.id));
+
+    const originalIdMap = {};
+    clipboardShapes = shapesToCopy.map(s => {
+      const clone = JSON.parse(JSON.stringify(s));
+      clone._originalId = s.id;
+      originalIdMap[s.id] = clone;
+      return clone;
+    });
+
+    const newIdMap = {};
+    for (const s of clipboardShapes) {
+      newIdMap[s._originalId] = nextId;
+      s.id = nextId++;
+      s.transform = { ...s.transform };
+      s.transform.tx += 20;
+      s.transform.ty += 20;
+    }
+
+    for (const s of clipboardShapes) {
+      if (s.maskOf !== undefined && newIdMap[s.maskOf] !== undefined) {
+        s.maskOf = newIdMap[s.maskOf];
+      }
+    }
+
+    showToast('Copied ' + selected.length + ' shape(s)', 'success');
+    return true;
+  }
+
+  function pasteShapes() {
+    if (!clipboardShapes || clipboardShapes.length === 0) {
+      showToast('Nothing to paste', 'warning');
+      return false;
+    }
+
+    pushHistory();
+
+    const idMap = {};
+    const pastedShapes = clipboardShapes.map(s => {
+      const clone = JSON.parse(JSON.stringify(s));
+      clone.id = nextId++;
+      idMap[s.id] = clone.id;
+      if (clone.type === 'component-instance') {
+        clone.localShapeId = clone.id;
+      }
+      return clone;
+    });
+
+    for (const s of pastedShapes) {
+      if (s.maskOf !== undefined && idMap[s.maskOf] !== undefined) {
+        s.maskOf = idMap[s.maskOf];
+      }
+      shapes.push(s);
+    }
+
+    selectedIds.clear();
+    for (const s of pastedShapes) {
+      if (!isMaskShape(s)) {
+        selectedIds.add(s.id);
+      }
+    }
+
+    rebuildSolverAndParams();
+    initialSolve();
+    updateToolbar();
+    renderLayers();
+    renderConstraintList();
+    render();
+    scheduleSave();
+
+    showToast('Pasted ' + pastedShapes.length + ' shape(s)', 'success');
+    return true;
+  }
+
+  function generateSVGForPage(pageData) {
+    const pageShapes = pageData.shapes;
+    const allX = [];
+    const allY = [];
+    const exportShapes = [];
+    const defsMap = {};
+    const clipPathDefs = [];
+    const maskDefs = [];
+
+    function pointsToPathD(pts, holes) {
+      let d = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ') + 'Z';
+      for (const hole of holes) {
+        d += ' ' + hole.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ') + 'Z';
+      }
+      return d;
+    }
+
+    function localWorldPointsOf(s) {
+      const pts = s.points.map(p => ({ x: p.x, y: p.y }));
+      const t = s.transform;
+      if (t.rotation !== 0 || t.scaleX !== 1 || t.scaleY !== 1) {
+        const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+        const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+        const rad = t.rotation * Math.PI / 180;
+        const cos = Math.cos(rad), sin = Math.sin(rad);
+        for (const p of pts) {
+          const dx = p.x - cx, dy = p.y - cy;
+          p.x = cx + (dx * cos - dy * sin) * t.scaleX;
+          p.y = cy + (dx * sin + dy * cos) * t.scaleY;
+        }
+      }
+      for (const p of pts) {
+        p.x += t.tx;
+        p.y += t.ty;
+      }
+      return pts;
+    }
+
+    function localWorldHolesOf(s) {
+      if (!s.holes || s.holes.length === 0) return [];
+      const worldHoles = [];
+      for (const hole of s.holes) {
+        const pts = hole.map(p => ({ x: p.x, y: p.y }));
+        const t = s.transform;
+        if (t.rotation !== 0 || t.scaleX !== 1 || t.scaleY !== 1) {
+          const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+          const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+          const rad = t.rotation * Math.PI / 180;
+          const cos = Math.cos(rad), sin = Math.sin(rad);
+          for (const p of pts) {
+            const dx = p.x - cx, dy = p.y - cy;
+            p.x = cx + (dx * cos - dy * sin) * t.scaleX;
+            p.y = cy + (dx * sin + dy * cos) * t.scaleY;
+          }
+        }
+        for (const p of pts) {
+          p.x += t.tx;
+          p.y += t.ty;
+        }
+        worldHoles.push(pts);
+      }
+      return worldHoles;
+    }
+
+    function localGetMasksOfShape(shapeId) {
+      return pageShapes.filter(s => s.maskOf === shapeId);
+    }
+
+    function localGetMaskType(maskShape) {
+      return maskShape.maskType || 'clip';
+    }
+
+    for (const s of pageShapes) {
+      if (!s.visible) continue;
+      if (s.maskOf !== undefined) continue;
+      if (s.type === 'component-instance') {
+        const expanded = getInstanceExpandedShapes(s);
+        for (const es of expanded) {
+          exportShapes.push(es);
+          const pts = es.points;
+          for (const p of pts) { allX.push(p.x); allY.push(p.y); }
+          const holes = es.holes || [];
+          for (const hole of holes) {
+            for (const p of hole) { allX.push(p.x); allY.push(p.y); }
+          }
+        }
+      } else {
+        exportShapes.push(s);
+        const pts = localWorldPointsOf(s);
+        for (const p of pts) { allX.push(p.x); allY.push(p.y); }
+        const holes = localWorldHolesOf(s);
+        for (const hole of holes) {
+          for (const p of hole) { allX.push(p.x); allY.push(p.y); }
+        }
+      }
+    }
+
+    if (allX.length === 0) {
+      return null;
+    }
+
+    const minX = Math.min(...allX);
+    const minY = Math.min(...allY);
+    const maxX = Math.max(...allX);
+    const maxY = Math.max(...allY);
+    const pad = 20;
+    let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${minX - pad} ${minY - pad} ${maxX - minX + pad * 2} ${maxY - minY + pad * 2}">`;
+
+    let defsContent = '';
+
+    for (let i = 0; i < exportShapes.length; i++) {
+      const s = exportShapes[i];
+      const fill = ensureFillStructure(s.fill);
+      const transform = s._isExpandedInstance
+        ? { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }
+        : s.transform;
+      const fillRef = exportFillToSVGDefs(fill, defsMap, `shape${i}`, transform);
+      const exportFill = fillRef || getFillDisplayColor(fill);
+
+      const pts = s._isExpandedInstance ? s.points : localWorldPointsOf(s);
+      const holes = s._isExpandedInstance ? (s.holes || []) : localWorldHolesOf(s);
+      const d = pointsToPathD(pts, holes);
+
+      let extraAttrs = '';
+
+      if (!s._isExpandedInstance && s.id !== undefined) {
+        const masks = localGetMasksOfShape(s.id);
+        if (masks.length > 0) {
+          const clipMasks = masks.filter(m => localGetMaskType(m) === 'clip');
+          const alphaMasks = masks.filter(m => localGetMaskType(m) === 'alpha');
+
+          if (clipMasks.length > 0) {
+            const clipPathId = `clipPath-${s.id}`;
+            let clipPathContent = '';
+            for (let j = 0; j < clipMasks.length; j++) {
+              const mask = clipMasks[j];
+              const maskPts = localWorldPointsOf(mask);
+              const maskHoles = localWorldHolesOf(mask);
+              const maskD = pointsToPathD(maskPts, maskHoles);
+              clipPathContent += `<path d="${maskD}" fill-rule="evenodd"/>`;
+            }
+            clipPathDefs.push(`<clipPath id="${clipPathId}">${clipPathContent}</clipPath>`);
+            extraAttrs += ` clip-path="url(#${clipPathId})"`;
+          }
+
+          if (alphaMasks.length > 0) {
+            const maskId = `mask-${s.id}`;
+            let maskContent = '';
+            
+            const filterId = `luminance-filter-${s.id}`;
+            maskDefs.push(`<filter id="${filterId}" x="0" y="0" width="100%" height="100%"><feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0.2126 0.7152 0.0722 0 0"/></filter>`);
+            
+            for (let j = 0; j < alphaMasks.length; j++) {
+              const mask = alphaMasks[j];
+              const maskPts = localWorldPointsOf(mask);
+              const maskHoles = localWorldHolesOf(mask);
+              const maskD = pointsToPathD(maskPts, maskHoles);
+              
+              const maskFill = ensureFillStructure(mask.fill);
+              const maskFillColor = getFillDisplayColor(maskFill);
+              
+              if (j === 0) {
+                maskContent += `<path d="${maskD}" fill="${maskFillColor}" fill-rule="evenodd" filter="url(#${filterId})"/>`;
+              } else {
+                maskContent += `<path d="${maskD}" fill="${maskFillColor}" fill-rule="evenodd" filter="url(#${filterId})" style="mix-blend-mode: multiply"/>`;
+              }
+            }
+            maskDefs.push(`<mask id="${maskId}" maskUnits="userSpaceOnUse">${maskContent}</mask>`);
+            extraAttrs += ` mask="url(#${maskId})"`;
+          }
+        }
+      }
+
+      svg += `<path d="${d}" fill="${exportFill}" stroke="${s.stroke || '#000'}" stroke-width="${s.strokeWidth || 2}" fill-rule="evenodd"${extraAttrs}/>`;
+    }
+
+    if (Object.keys(defsMap).length > 0 || clipPathDefs.length > 0 || maskDefs.length > 0) {
+      defsContent = '<defs>';
+      if (Object.keys(defsMap).length > 0) {
+        defsContent += generateSVGDefs(defsMap);
+      }
+      for (const cp of clipPathDefs) {
+        defsContent += cp;
+      }
+      for (const m of maskDefs) {
+        defsContent += m;
+      }
+      defsContent += '</defs>';
+      svg = svg.replace('>', '>' + defsContent);
+    }
+
+    svg += '</svg>';
+    return svg;
+  }
+
+  function exportCurrentPageSVG() {
+    saveCurrentPageState();
+    const currentPage = pages.find(p => p.id === currentPageId);
+    if (!currentPage) {
+      showToast('No page selected', 'error');
+      return;
+    }
+
+    const svg = generateSVGForPage(currentPage);
+    if (!svg) {
+      showToast('No shapes to export', 'warning');
+      return;
+    }
+
+    const blob = new Blob([svg], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = currentPage.name + '.svg';
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('Exported: ' + currentPage.name + '.svg', 'success');
+  }
+
+  function exportAllPagesSVG() {
+    saveCurrentPageState();
+
+    const validPages = [];
+    for (const page of pages) {
+      const svg = generateSVGForPage(page);
+      if (svg) {
+        validPages.push({ name: page.name, svg: svg });
+      }
+    }
+
+    if (validPages.length === 0) {
+      showToast('No shapes to export in any page', 'warning');
+      return;
+    }
+
+    if (validPages.length === 1) {
+      const blob = new Blob([validPages[0].svg], { type: 'image/svg+xml' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = validPages[0].name + '.svg';
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('Exported: ' + validPages[0].name + '.svg', 'success');
+      return;
+    }
+
+    const zipContent = [];
+    zipContent.push('PK\x03\x04\x14\x00\x00\x00\x00\x00');
+    
+    let centralDir = [];
+    let offset = 0;
+
+    const usedNames = {};
+
+    for (const page of validPages) {
+      let fileName = page.name.replace(/[<>:"/\\|?*]/g, '_') + '.svg';
+      if (usedNames[fileName]) {
+        usedNames[fileName]++;
+        const ext = '.svg';
+        const baseName = fileName.slice(0, -4);
+        fileName = baseName + ' (' + usedNames[fileName] + ')' + ext;
+      } else {
+        usedNames[fileName] = 1;
+      }
+
+      const fileData = new TextEncoder().encode(page.svg);
+      const fileNameBytes = new TextEncoder().encode(fileName);
+      
+      const crc32 = crc32Buffer(fileData);
+      const compressedSize = fileData.length;
+      const uncompressedSize = fileData.length;
+      
+      const localHeader = new ArrayBuffer(30 + fileNameBytes.length);
+      const view = new DataView(localHeader);
+      
+      view.setUint32(0, 0x04034b50, true);
+      view.setUint16(4, 20, true);
+      view.setUint16(6, 0, true);
+      view.setUint16(8, 0, true);
+      view.setUint16(10, 0, true);
+      view.setUint32(12, crc32, true);
+      view.setUint32(16, compressedSize, true);
+      view.setUint32(20, uncompressedSize, true);
+      view.setUint16(24, fileNameBytes.length, true);
+      view.setUint16(26, 0, true);
+      
+      for (let i = 0; i < fileNameBytes.length; i++) {
+        view.setUint8(28 + i, fileNameBytes[i]);
+      }
+      
+      const headerBytes = new Uint8Array(localHeader);
+      const fullEntry = new Uint8Array(headerBytes.length + fileData.length);
+      fullEntry.set(headerBytes, 0);
+      fullEntry.set(fileData, headerBytes.length);
+      
+      const cdEntry = new ArrayBuffer(46 + fileNameBytes.length);
+      const cdView = new DataView(cdEntry);
+      
+      cdView.setUint32(0, 0x02014b50, true);
+      cdView.setUint16(4, 20, true);
+      cdView.setUint16(6, 20, true);
+      cdView.setUint16(8, 0, true);
+      cdView.setUint16(10, 0, true);
+      cdView.setUint16(12, 0, true);
+      cdView.setUint32(14, crc32, true);
+      cdView.setUint32(18, compressedSize, true);
+      cdView.setUint32(22, uncompressedSize, true);
+      cdView.setUint16(26, fileNameBytes.length, true);
+      cdView.setUint16(28, 0, true);
+      cdView.setUint16(30, 0, true);
+      cdView.setUint16(32, 0, true);
+      cdView.setUint16(34, 0, true);
+      cdView.setUint32(36, 0, true);
+      cdView.setUint32(40, offset, true);
+      
+      for (let i = 0; i < fileNameBytes.length; i++) {
+        cdView.setUint8(44 + i, fileNameBytes[i]);
+      }
+      
+      centralDir.push(new Uint8Array(cdEntry));
+      offset += fullEntry.length;
+      
+      zipContent.push(fullEntry);
+    }
+
+    const cdLength = centralDir.reduce((sum, entry) => sum + entry.length, 0);
+    const eocd = new ArrayBuffer(22);
+    const eocdView = new DataView(eocd);
+    
+    eocdView.setUint32(0, 0x06054b50, true);
+    eocdView.setUint16(4, 0, true);
+    eocdView.setUint16(6, 0, true);
+    eocdView.setUint16(8, validPages.length, true);
+    eocdView.setUint16(10, validPages.length, true);
+    eocdView.setUint32(12, cdLength, true);
+    eocdView.setUint32(16, offset, true);
+    eocdView.setUint16(20, 0, true);
+    
+    const totalLength = zipContent.slice(1).reduce((sum, arr) => sum + arr.length, 0) + cdLength + eocd.byteLength;
+    const result = new Uint8Array(totalLength);
+    
+    let pos = 0;
+    for (let i = 1; i < zipContent.length; i++) {
+      result.set(zipContent[i], pos);
+      pos += zipContent[i].length;
+    }
+    
+    for (const entry of centralDir) {
+      result.set(entry, pos);
+      pos += entry.length;
+    }
+    
+    result.set(new Uint8Array(eocd), pos);
+    
+    const blob = new Blob([result], { type: 'application/zip' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'pages_export.zip';
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('Exported ' + validPages.length + ' pages as ZIP', 'success');
+  }
+
+  function crc32Buffer(buffer) {
+    const crcTable = (function() {
+      const table = new Uint32Array(256);
+      for (let n = 0; n < 256; n++) {
+        let c = n;
+        for (let k = 0; k < 8; k++) {
+          c = ((c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1));
+        }
+        table[n] = c;
+      }
+      return table;
+    })();
+
+    let crc = 0 ^ (-1);
+    for (let i = 0; i < buffer.length; i++) {
+      crc = (crc >>> 8) ^ crcTable[(crc ^ buffer[i]) & 0xFF];
+    }
+    return (crc ^ (-1)) >>> 0;
+  }
+
+  function showExportDialog() {
+    const dialog = document.getElementById('export-dialog');
+    if (!dialog) return;
+    dialog.style.display = 'flex';
+
+    const confirmBtn = document.getElementById('export-confirm-btn');
+    const cancelBtn = document.getElementById('export-cancel-btn');
+    const currentPageRadio = document.getElementById('export-current-page');
+    const allPagesRadio = document.getElementById('export-all-pages');
+    const pageCountSpan = document.getElementById('export-page-count');
+
+    if (pageCountSpan) {
+      pageCountSpan.textContent = '(' + pages.length + ' pages)';
+    }
+
+    const handleConfirm = () => {
+      if (currentPageRadio && currentPageRadio.checked) {
+        exportCurrentPageSVG();
+      } else if (allPagesRadio && allPagesRadio.checked) {
+        exportAllPagesSVG();
+      }
+      handleCancel();
+    };
+
+    const handleCancel = () => {
+      dialog.style.display = 'none';
+      confirmBtn.removeEventListener('click', handleConfirm);
+      cancelBtn.removeEventListener('click', handleCancel);
+    };
+
+    confirmBtn.addEventListener('click', handleConfirm);
+    cancelBtn.addEventListener('click', handleCancel);
+  }
+
   function getShapePointsForDim(shapeId) {
     const shape = shapes.find(s => s.id === shapeId);
     if (!shape) return [];
@@ -923,20 +1676,14 @@
   let saveStateTimer = null;
   function saveStateToStorage() {
     try {
-      const animationData = animationController.serialize();
-      const motionPathData = motionPathManager.serialize();
-      const dimensionData = dimensionSystem.serialize();
+      saveCurrentPageState();
       const state = {
-        shapes,
-        constraints: constraints.map(c => serializeConstraint(c)),
-        paramsData,
-        components,
+        pages: JSON.parse(JSON.stringify(pages)),
+        currentPageId,
+        nextPageId,
         nextId,
-        nextComponentId,
-        viewport,
-        animationData,
-        motionPathData,
-        dimensionData
+        components,
+        nextComponentId
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch (e) {
@@ -954,29 +1701,88 @@
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return false;
       const state = JSON.parse(raw);
-      if (state.shapes) shapes = state.shapes;
-      if (state.constraints) constraints = state.constraints.map(d => deserializeConstraint(d));
-      if (state.paramsData) paramsData = state.paramsData;
-      if (state.components) components = state.components;
-      if (state.nextId) nextId = state.nextId;
-      if (state.nextComponentId) nextComponentId = state.nextComponentId;
-      if (state.viewport) viewport = state.viewport;
-      if (state.animationData) {
-        animationController.deserialize(state.animationData);
-      }
-      if (state.motionPathData) {
-        motionPathManager.deserialize(state.motionPathData);
-      }
-      if (state.dimensionData) {
-        dimensionSystem.deserialize(state.dimensionData);
-      }
-      for (const s of shapes) {
-        if (s.opacity === undefined) s.opacity = 1;
-        if (s.type === 'motion-path') {
-          motionPathManager.invalidatePathCache(s.id);
+
+      if (state.pages && Array.isArray(state.pages) && state.pages.length > 0) {
+        pages = JSON.parse(JSON.stringify(state.pages));
+        currentPageId = state.currentPageId || (pages[0]?.id || null);
+        nextPageId = state.nextPageId || (pages.length + 1);
+        nextId = state.nextId || 1;
+        if (state.components) components = state.components;
+        if (state.nextComponentId) nextComponentId = state.nextComponentId;
+
+        for (const page of pages) {
+          if (page.nextId !== undefined) {
+            delete page.nextId;
+          }
         }
+
+        const currentPage = getCurrentPage();
+        if (currentPage) {
+          shapes = JSON.parse(JSON.stringify(currentPage.shapes || []));
+          constraints = (currentPage.constraints || []).map(d => deserializeConstraint(d));
+          paramsData = JSON.parse(JSON.stringify(currentPage.paramsData || {}));
+          viewport = JSON.parse(JSON.stringify(currentPage.viewport || { x: 0, y: 0, scale: 1 }));
+
+          animationController.deserialize(currentPage.animationData || {});
+          motionPathManager.deserialize(currentPage.motionPathData || {});
+          dimensionSystem.deserialize(currentPage.dimensionData || {});
+
+          for (const s of shapes) {
+            if (s.opacity === undefined) s.opacity = 1;
+            if (s.type === 'motion-path') {
+              motionPathManager.invalidatePathCache(s.id);
+            }
+          }
+
+          if (shapes.length > 0) {
+            const maxShapeId = Math.max(...shapes.map(s => s.id));
+            nextId = Math.max(nextId, maxShapeId + 1);
+          }
+        }
+        return true;
       }
-      return true;
+
+      if (state.shapes) {
+        const page = createPageData('Page 1');
+        page.shapes = JSON.parse(JSON.stringify(state.shapes));
+        page.constraints = (state.constraints || []).map(d => serializeConstraint(deserializeConstraint(d)));
+        page.paramsData = JSON.parse(JSON.stringify(state.paramsData || {}));
+        page.viewport = JSON.parse(JSON.stringify(state.viewport || { x: 0, y: 0, scale: 1 }));
+        page.animationData = state.animationData || null;
+        page.motionPathData = state.motionPathData || null;
+        page.dimensionData = state.dimensionData || null;
+
+        pages = [page];
+        currentPageId = page.id;
+        nextPageId = 2;
+        nextId = state.nextId || 1;
+        if (state.components) components = state.components;
+        if (state.nextComponentId) nextComponentId = state.nextComponentId;
+
+        shapes = JSON.parse(JSON.stringify(page.shapes));
+        constraints = page.constraints.map(d => deserializeConstraint(d));
+        paramsData = JSON.parse(JSON.stringify(page.paramsData));
+        viewport = JSON.parse(JSON.stringify(page.viewport));
+
+        animationController.deserialize(page.animationData || {});
+        motionPathManager.deserialize(page.motionPathData || {});
+        dimensionSystem.deserialize(page.dimensionData || {});
+
+        for (const s of shapes) {
+          if (s.opacity === undefined) s.opacity = 1;
+          if (s.type === 'motion-path') {
+            motionPathManager.invalidatePathCache(s.id);
+          }
+        }
+
+        if (shapes.length > 0) {
+          const maxShapeId = Math.max(...shapes.map(s => s.id));
+          nextId = Math.max(nextId, maxShapeId + 1);
+        }
+        return true;
+      }
+
+      return false;
     } catch (e) {
       console.warn('Failed to load state:', e);
       return false;
@@ -5327,6 +6133,34 @@
     if (e.key === 'Shift') keys.shift = true;
     if (e.key === 'Alt' || e.key === 'Option') keys.alt = true;
 
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === 'c') {
+      e.preventDefault();
+      copySelectedShapes();
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === 'v') {
+      e.preventDefault();
+      pasteShapes();
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.altKey && (e.key === 'n' || e.key === 'N')) {
+      e.preventDefault();
+      addNewPage(true);
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+      e.preventDefault();
+      const currentIdx = pages.findIndex(p => p.id === currentPageId);
+      if (e.key === 'ArrowLeft' && currentIdx > 0) {
+        loadPageState(pages[currentIdx - 1].id);
+        renderPageTabs();
+      } else if (e.key === 'ArrowRight' && currentIdx < pages.length - 1) {
+        loadPageState(pages[currentIdx + 1].id);
+        renderPageTabs();
+      }
+      return;
+    }
+
     if (e.key === 'Escape') {
       if (editingComponentId !== null) {
         exitComponentEditMode();
@@ -5914,76 +6748,7 @@
   });
 
   document.getElementById('export-svg').addEventListener('click', () => {
-    const allX = [];
-    const allY = [];
-    const exportShapes = [];
-
-    for (const s of shapes) {
-      if (!s.visible) continue;
-      if (isComponentInstance(s)) {
-        const expanded = getInstanceExpandedShapes(s);
-        for (const es of expanded) {
-          exportShapes.push(es);
-          const pts = es.points;
-          for (const p of pts) { allX.push(p.x); allY.push(p.y); }
-          const holes = es.holes || [];
-          for (const hole of holes) {
-            for (const p of hole) { allX.push(p.x); allY.push(p.y); }
-          }
-        }
-      } else {
-        exportShapes.push(s);
-        const pts = worldPointsOf(s);
-        for (const p of pts) { allX.push(p.x); allY.push(p.y); }
-        const holes = worldHolesOf(s);
-        for (const hole of holes) {
-          for (const p of hole) { allX.push(p.x); allY.push(p.y); }
-        }
-      }
-    }
-    if (allX.length === 0) { showToast('No shapes to export'); return; }
-    const minX = Math.min(...allX);
-    const minY = Math.min(...allY);
-    const maxX = Math.max(...allX);
-    const maxY = Math.max(...allY);
-    const pad = 20;
-    let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${minX - pad} ${minY - pad} ${maxX - minX + pad * 2} ${maxY - minY + pad * 2}">`;
-    for (const s of exportShapes) {
-      const pts = s._isExpandedInstance ? s.points : worldPointsOf(s);
-      const holes = s._isExpandedInstance ? (s.holes || []) : worldHolesOf(s);
-      let d = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ') + 'Z';
-      for (const hole of holes) {
-        d += ' ' + hole.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ') + 'Z';
-      }
-      svg += `<path d="${d}" fill="${s.fill}" stroke="${s.stroke || '#000'}" stroke-width="${s.strokeWidth || 2}" fill-rule="evenodd"/>`;
-    }
-    const getShapePointsFn = (shapeId) => {
-      const shape = shapes.find(s => s.id === shapeId);
-      if (!shape) return [];
-      if (isComponentInstance(shape)) {
-        const expanded = getInstanceExpandedShapes(shape);
-        if (expanded.length > 0) return expanded[0].points;
-      }
-      return worldPointsOf(shape);
-    };
-    const getShapeHolesFn = (shapeId) => {
-      const shape = shapes.find(s => s.id === shapeId);
-      if (!shape) return [];
-      if (isComponentInstance(shape)) {
-        const expanded = getInstanceExpandedShapes(shape);
-        if (expanded.length > 0) return expanded[0].holes || [];
-      }
-      return worldHolesOf(shape);
-    };
-    svg = dimensionSystem.exportToSVG(svg, getShapePointsFn, getShapeHolesFn, pad, minX, minY);
-    svg += '</svg>';
-    const blob = new Blob([svg], { type: 'image/svg+xml' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'drawing.svg';
-    a.click();
-    URL.revokeObjectURL(url);
+    showExportDialog();
   });
 
   function runBooleanOp(operation) {
@@ -6335,6 +7100,12 @@
   }
 
   function initDemo() {
+    if (pages.length === 0) {
+      const page = createPageData('Page 1');
+      pages.push(page);
+      currentPageId = page.id;
+    }
+
     const r1pts = [
       { x: -200, y: -100 }, { x: -50, y: -100 }, { x: -50, y: 50 }, { x: -200, y: 50 }
     ];
@@ -6354,6 +7125,7 @@
 
     rebuildSolverAndParams();
     updateDOFDisplay();
+    renderPageTabs();
     renderLayers();
     renderConstraintList();
     renderParams();
@@ -8337,144 +9109,7 @@
     exportBtn.parentNode.replaceChild(oldListeners, exportBtn);
 
     document.getElementById('export-svg').addEventListener('click', () => {
-      const allX = [];
-      const allY = [];
-      const exportShapes = [];
-      const defsMap = {};
-      const clipPathDefs = [];
-      const maskDefs = [];
-
-      function pointsToPathD(pts, holes) {
-        let d = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ') + 'Z';
-        for (const hole of holes) {
-          d += ' ' + hole.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ') + 'Z';
-        }
-        return d;
-      }
-
-      for (const s of shapes) {
-        if (!s.visible) continue;
-        if (isMaskShape(s)) continue;
-        if (isComponentInstance(s)) {
-          const expanded = getInstanceExpandedShapes(s);
-          for (const es of expanded) {
-            exportShapes.push(es);
-            const pts = es.points;
-            for (const p of pts) { allX.push(p.x); allY.push(p.y); }
-            const holes = es.holes || [];
-            for (const hole of holes) {
-              for (const p of hole) { allX.push(p.x); allY.push(p.y); }
-            }
-          }
-        } else {
-          exportShapes.push(s);
-          const pts = worldPointsOf(s);
-          for (const p of pts) { allX.push(p.x); allY.push(p.y); }
-          const holes = worldHolesOf(s);
-          for (const hole of holes) {
-            for (const p of hole) { allX.push(p.x); allY.push(p.y); }
-          }
-        }
-      }
-      if (allX.length === 0) { showToast('No shapes to export'); return; }
-      const minX = Math.min(...allX);
-      const minY = Math.min(...allY);
-      const maxX = Math.max(...allX);
-      const maxY = Math.max(...allY);
-      const pad = 20;
-      let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${minX - pad} ${minY - pad} ${maxX - minX + pad * 2} ${maxY - minY + pad * 2}">`;
-
-      let defsContent = '';
-
-      for (let i = 0; i < exportShapes.length; i++) {
-        const s = exportShapes[i];
-        const fill = ensureFillStructure(s.fill);
-        const transform = s._isExpandedInstance
-          ? { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 }
-          : s.transform;
-        const fillRef = exportFillToSVGDefs(fill, defsMap, `shape${i}`, transform);
-        const exportFill = fillRef || getFillDisplayColor(fill);
-
-        const pts = s._isExpandedInstance ? s.points : worldPointsOf(s);
-        const holes = s._isExpandedInstance ? (s.holes || []) : worldHolesOf(s);
-        const d = pointsToPathD(pts, holes);
-
-        let extraAttrs = '';
-
-        if (!s._isExpandedInstance && s.id !== undefined) {
-          const masks = getMasksOfShape(s.id);
-          if (masks.length > 0) {
-            const clipMasks = masks.filter(m => getMaskType(m) === 'clip');
-            const alphaMasks = masks.filter(m => getMaskType(m) === 'alpha');
-
-            if (clipMasks.length > 0) {
-              const clipPathId = `clipPath-${s.id}`;
-              let clipPathContent = '';
-              for (let j = 0; j < clipMasks.length; j++) {
-                const mask = clipMasks[j];
-                const maskPts = worldPointsOf(mask);
-                const maskHoles = worldHolesOf(mask);
-                const maskD = pointsToPathD(maskPts, maskHoles);
-                clipPathContent += `<path d="${maskD}" fill-rule="evenodd"/>`;
-              }
-              clipPathDefs.push(`<clipPath id="${clipPathId}">${clipPathContent}</clipPath>`);
-              extraAttrs += ` clip-path="url(#${clipPathId})"`;
-            }
-
-            if (alphaMasks.length > 0) {
-              const maskId = `mask-${s.id}`;
-              let maskContent = '';
-              
-              const filterId = `luminance-filter-${s.id}`;
-              maskDefs.push(`<filter id="${filterId}" x="0" y="0" width="100%" height="100%"><feColorMatrix type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0.2126 0.7152 0.0722 0 0"/></filter>`);
-              
-              for (let j = 0; j < alphaMasks.length; j++) {
-                const mask = alphaMasks[j];
-                const maskPts = worldPointsOf(mask);
-                const maskHoles = worldHolesOf(mask);
-                const maskD = pointsToPathD(maskPts, maskHoles);
-                
-                const maskFill = ensureFillStructure(mask.fill);
-                const maskFillColor = getFillDisplayColor(maskFill);
-                
-                if (j === 0) {
-                  maskContent += `<path d="${maskD}" fill="${maskFillColor}" fill-rule="evenodd" filter="url(#${filterId})"/>`;
-                } else {
-                  maskContent += `<path d="${maskD}" fill="${maskFillColor}" fill-rule="evenodd" filter="url(#${filterId})" style="mix-blend-mode: multiply"/>`;
-                }
-              }
-              maskDefs.push(`<mask id="${maskId}" maskUnits="userSpaceOnUse">${maskContent}</mask>`);
-              extraAttrs += ` mask="url(#${maskId})"`;
-            }
-          }
-        }
-
-        svg += `<path d="${d}" fill="${exportFill}" stroke="${s.stroke || '#000'}" stroke-width="${s.strokeWidth || 2}" fill-rule="evenodd"${extraAttrs}/>`;
-      }
-
-      if (Object.keys(defsMap).length > 0 || clipPathDefs.length > 0 || maskDefs.length > 0) {
-        defsContent = '<defs>';
-        if (Object.keys(defsMap).length > 0) {
-          defsContent += generateSVGDefs(defsMap);
-        }
-        for (const cp of clipPathDefs) {
-          defsContent += cp;
-        }
-        for (const m of maskDefs) {
-          defsContent += m;
-        }
-        defsContent += '</defs>';
-        svg = svg.replace('>', '>' + defsContent);
-      }
-
-      svg += '</svg>';
-      const blob = new Blob([svg], { type: 'image/svg+xml' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'drawing.svg';
-      a.click();
-      URL.revokeObjectURL(url);
+      showExportDialog();
     });
   }
 
@@ -8777,6 +9412,12 @@
   window.addEventListener('beforeunload', saveStateToStorage);
 
   resize();
+
+  const addPageBtn = document.getElementById('add-page-btn');
+  if (addPageBtn) {
+    addPageBtn.addEventListener('click', () => addNewPage(true));
+  }
+
   const loaded = loadStateFromStorage();
   if (loaded) {
     rebuildSolverAndParams();
@@ -8787,6 +9428,7 @@
     updateFillPanel();
     updateMotionPathPanel();
     updateDOFDisplay();
+    renderPageTabs();
     renderLayers();
     renderConstraintList();
     renderParams();

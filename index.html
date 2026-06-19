@@ -470,6 +470,35 @@
 
 <div id="toast" class="toast hidden"></div>
 
+<div id="pages-bar">
+  <div id="pages-tabs-container"></div>
+  <div class="pages-actions">
+    <button id="add-page-btn" class="page-action-btn" title="New Page (Ctrl+Alt+N)">
+      <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+    </button>
+  </div>
+</div>
+
+<div id="export-dialog" class="export-dialog">
+  <div class="export-dialog-content">
+    <h3 class="export-dialog-title">Export SVG</h3>
+    <div class="export-dialog-options">
+      <label class="export-dialog-option">
+        <input type="radio" name="export-option" id="export-current-page" checked>
+        <span>Current Page Only</span>
+      </label>
+      <label class="export-dialog-option">
+        <input type="radio" name="export-option" id="export-all-pages">
+        <span>All Pages <span id="export-page-count" class="page-count">(0 pages)</span></span>
+      </label>
+    </div>
+    <div class="export-dialog-buttons">
+      <button class="export-dialog-btn" id="export-cancel-btn">Cancel</button>
+      <button class="export-dialog-btn primary" id="export-confirm-btn">Export</button>
+    </div>
+  </div>
+</div>
+
 <div id="timeline-panel">
   <div class="timeline-header">
     <div class="timeline-title">
