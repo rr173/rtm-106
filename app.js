@@ -154,7 +154,7 @@
   function createPageData(name) {
     return {
       id: nextPageId++,
-      name: name || ('Page ' + (pages.length + 1)),
+      name: name || generateNextPageName(),
       shapes: [],
       constraints: [],
       paramsData: {},
@@ -163,6 +163,18 @@
       motionPathData: null,
       dimensionData: null
     };
+  }
+
+  function generateNextPageName() {
+    let maxNum = 0;
+    for (const page of pages) {
+      const match = page.name.match(/^Page (\d+)$/);
+      if (match) {
+        const num = parseInt(match[1], 10);
+        if (num > maxNum) maxNum = num;
+      }
+    }
+    return 'Page ' + (maxNum + 1);
   }
 
   function getCurrentPage() {
@@ -177,13 +189,53 @@
     const page = getCurrentPage();
     if (!page) return;
 
-    page.shapes = JSON.parse(JSON.stringify(shapes));
-    page.constraints = JSON.parse(JSON.stringify(constraints.map(c => serializeConstraint(c))));
-    page.paramsData = JSON.parse(JSON.stringify(paramsData));
-    page.viewport = JSON.parse(JSON.stringify(viewport));
-    page.animationData = animationController.serialize();
-    page.motionPathData = motionPathManager.serialize();
-    page.dimensionData = dimensionSystem.serialize();
+    try {
+      page.shapes = JSON.parse(JSON.stringify(shapes || []));
+    } catch (e) {
+      console.warn('Failed to save shapes:', e);
+      page.shapes = page.shapes || [];
+    }
+
+    try {
+      page.constraints = JSON.parse(JSON.stringify((constraints || []).map(c => serializeConstraint(c)).filter(Boolean)));
+    } catch (e) {
+      console.warn('Failed to save constraints:', e);
+      page.constraints = page.constraints || [];
+    }
+
+    try {
+      page.paramsData = JSON.parse(JSON.stringify(paramsData || {}));
+    } catch (e) {
+      console.warn('Failed to save paramsData:', e);
+      page.paramsData = page.paramsData || {};
+    }
+
+    try {
+      page.viewport = JSON.parse(JSON.stringify(viewport || { x: 0, y: 0, scale: 1 }));
+    } catch (e) {
+      console.warn('Failed to save viewport:', e);
+    }
+
+    try {
+      page.animationData = animationController.serialize();
+    } catch (e) {
+      console.warn('Failed to save animationData:', e);
+      page.animationData = page.animationData || null;
+    }
+
+    try {
+      page.motionPathData = motionPathManager.serialize();
+    } catch (e) {
+      console.warn('Failed to save motionPathData:', e);
+      page.motionPathData = page.motionPathData || null;
+    }
+
+    try {
+      page.dimensionData = dimensionSystem.serialize();
+    } catch (e) {
+      console.warn('Failed to save dimensionData:', e);
+      page.dimensionData = page.dimensionData || null;
+    }
   }
 
   function loadPageState(pageId) {
@@ -192,55 +244,102 @@
 
     saveCurrentPageState();
 
-    currentPageId = pageId;
+    const oldPageId = currentPageId;
+    const oldShapes = shapes;
+    const oldConstraints = constraints;
+    const oldParamsData = paramsData;
+    const oldViewport = viewport;
 
-    shapes = JSON.parse(JSON.stringify(page.shapes));
-    constraints = page.constraints.map(d => deserializeConstraint(d));
-    paramsData = JSON.parse(JSON.stringify(page.paramsData));
-    viewport = JSON.parse(JSON.stringify(page.viewport));
+    try {
+      currentPageId = pageId;
 
-    animationController.deserialize(page.animationData || {});
-    motionPathManager.deserialize(page.motionPathData || {});
-    dimensionSystem.deserialize(page.dimensionData || {});
+      shapes = JSON.parse(JSON.stringify(page.shapes || []));
+      constraints = (page.constraints || []).map(d => deserializeConstraint(d)).filter(Boolean);
+      paramsData = JSON.parse(JSON.stringify(page.paramsData || {}));
+      viewport = JSON.parse(JSON.stringify(page.viewport || { x: 0, y: 0, scale: 1 }));
 
-    for (const s of shapes) {
-      if (s.opacity === undefined) s.opacity = 1;
-      if (s.type === 'motion-path') {
-        motionPathManager.invalidatePathCache(s.id);
+      try {
+        animationController.deserialize(page.animationData || {});
+      } catch (e) {
+        console.warn('Failed to deserialize animationData:', e);
       }
+
+      try {
+        motionPathManager.deserialize(page.motionPathData || {});
+      } catch (e) {
+        console.warn('Failed to deserialize motionPathData:', e);
+      }
+
+      try {
+        dimensionSystem.deserialize(page.dimensionData || {});
+      } catch (e) {
+        console.warn('Failed to deserialize dimensionData:', e);
+      }
+
+      for (const s of shapes) {
+        if (s.opacity === undefined) s.opacity = 1;
+        if (s.type === 'motion-path') {
+          try {
+            motionPathManager.invalidatePathCache(s.id);
+          } catch (e) {
+            // ignore
+          }
+        }
+      }
+
+      selectedIds.clear();
+      selectedVertex = null;
+      selectedConstraintIdx = -1;
+      constraintSelection = [];
+      constraintMode = null;
+      selectedDimensionId = null;
+      dimToolSelection = [];
+      dimToolType = null;
+      isNodeEditMode = false;
+
+      undoStack = [];
+      redoStack = [];
+
+      try {
+        rebuildSolverAndParams();
+        initialSolve();
+      } catch (e) {
+        console.warn('Failed to rebuild solver:', e);
+      }
+
+      try {
+        dimensionSystem.updateFromShapes(getShapePointsForDim, getShapeHolesForDim);
+      } catch (e) {
+        console.warn('Failed to update dimension system:', e);
+      }
+
+      updateToolbar();
+      updateTextPanel();
+      updateDimensionPanel();
+      updateFillPanel();
+      updateMotionPathPanel();
+      updateDOFDisplay();
+      renderLayers();
+      renderConstraintList();
+      renderParams();
+      renderComponentsList();
+      renderTimelineTracks();
+      render();
+      scheduleSave();
+
+      return true;
+    } catch (e) {
+      console.warn('Failed to load page state, rolling back:', e);
+      currentPageId = oldPageId;
+      shapes = oldShapes;
+      constraints = oldConstraints;
+      paramsData = oldParamsData;
+      viewport = oldViewport;
+      showToast('Failed to load page', 'error');
+      renderPageTabs();
+      render();
+      return false;
     }
-
-    selectedIds.clear();
-    selectedVertex = null;
-    selectedConstraintIdx = -1;
-    constraintSelection = [];
-    constraintMode = null;
-    selectedDimensionId = null;
-    dimToolSelection = [];
-    dimToolType = null;
-    isNodeEditMode = false;
-
-    undoStack = [];
-    redoStack = [];
-
-    rebuildSolverAndParams();
-    initialSolve();
-    dimensionSystem.updateFromShapes(getShapePointsForDim, getShapeHolesForDim);
-    updateToolbar();
-    updateTextPanel();
-    updateDimensionPanel();
-    updateFillPanel();
-    updateMotionPathPanel();
-    updateDOFDisplay();
-    renderLayers();
-    renderConstraintList();
-    renderParams();
-    renderComponentsList();
-    renderTimelineTracks();
-    render();
-    scheduleSave();
-
-    return true;
   }
 
   function addNewPage(switchTo) {
@@ -404,20 +503,20 @@
     }
 
     const idsToCopy = collectAllMaskedIds(selected.map(s => s.id));
-    const shapesToCopy = shapes.filter(s => idsToCopy.has(s.id));
+    const idsSet = new Set(idsToCopy);
+    const shapesToCopy = shapes.filter(s => idsSet.has(s.id));
 
-    const originalIdMap = {};
+    const newIdMap = {};
     clipboardShapes = shapesToCopy.map(s => {
       const clone = JSON.parse(JSON.stringify(s));
-      clone._originalId = s.id;
-      originalIdMap[s.id] = clone;
+      newIdMap[s.id] = clone.id;
       return clone;
     });
 
-    const newIdMap = {};
     for (const s of clipboardShapes) {
-      newIdMap[s._originalId] = nextId;
+      const oldId = s.id;
       s.id = nextId++;
+      newIdMap[oldId] = s.id;
       s.transform = { ...s.transform };
       s.transform.tx += 20;
       s.transform.ty += 20;
@@ -7100,37 +7199,64 @@
   }
 
   function initDemo() {
-    if (pages.length === 0) {
-      const page = createPageData('Page 1');
-      pages.push(page);
-      currentPageId = page.id;
+    try {
+      if (pages.length === 0) {
+        const page = createPageData('Page 1');
+        pages.push(page);
+        currentPageId = page.id;
+      }
+
+      const r1pts = [
+        { x: -200, y: -100 }, { x: -50, y: -100 }, { x: -50, y: 50 }, { x: -200, y: 50 }
+      ];
+      const r1 = createShape(r1pts, '#bbdefb');
+      shapes.push(r1);
+
+      const r2pts = [
+        { x: 50, y: -80 }, { x: 200, y: -80 }, { x: 200, y: 70 }, { x: 50, y: 70 }
+      ];
+      const r2 = createShape(r2pts, '#c8e6c9');
+      shapes.push(r2);
+
+      try {
+        paramsData.width = { value: 150, expression: null };
+        paramManager.addParam('width', 150);
+        paramsData.height = { value: 130, expression: null };
+        paramManager.addParam('height', 130);
+
+        rebuildSolverAndParams();
+        initialSolve();
+      } catch (e) {
+        console.warn('Constraint setup failed in initDemo:', e);
+      }
+
+      updateDOFDisplay();
+    } catch (e) {
+      console.warn('initDemo partially failed:', e);
     }
 
-    const r1pts = [
-      { x: -200, y: -100 }, { x: -50, y: -100 }, { x: -50, y: 50 }, { x: -200, y: 50 }
-    ];
-    const r1 = createShape(r1pts, '#bbdefb');
-    shapes.push(r1);
+    try {
+      saveCurrentPageState();
+    } catch (e) {
+      console.warn('saveCurrentPageState failed in initDemo:', e);
+    }
 
-    const r2pts = [
-      { x: 50, y: -80 }, { x: 200, y: -80 }, { x: 200, y: 70 }, { x: 50, y: 70 }
-    ];
-    const r2 = createShape(r2pts, '#c8e6c9');
-    shapes.push(r2);
+    try {
+      renderPageTabs();
+      renderLayers();
+      renderConstraintList();
+      renderParams();
+      renderComponentsList();
+      render();
+    } catch (e) {
+      console.warn('Render failed in initDemo:', e);
+    }
 
-    paramsData.width = { value: 150, expression: null };
-    paramManager.addParam('width', 150);
-    paramsData.height = { value: 130, expression: null };
-    paramManager.addParam('height', 130);
-
-    rebuildSolverAndParams();
-    updateDOFDisplay();
-    renderPageTabs();
-    renderLayers();
-    renderConstraintList();
-    renderParams();
-    renderComponentsList();
-    render();
+    try {
+      scheduleSave();
+    } catch (e) {
+      console.warn('scheduleSave failed in initDemo:', e);
+    }
   }
 
   function saveOriginalShapes() {
