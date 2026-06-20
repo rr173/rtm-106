@@ -1904,9 +1904,15 @@
         if (overrides) {
           if (overrides.fill) clone.fill = overrides.fill;
           if (overrides.stroke) clone.stroke = overrides.stroke;
+          if (overrides.strokeWidth !== undefined) clone.strokeWidth = overrides.strokeWidth;
+          if (overrides.opacity !== undefined) clone.opacity = overrides.opacity;
+          if (overrides.effects) clone.effects = JSON.parse(JSON.stringify(overrides.effects));
           if (localOverrides) {
             if (localOverrides.fill) clone.fill = localOverrides.fill;
             if (localOverrides.stroke) clone.stroke = localOverrides.stroke;
+            if (localOverrides.strokeWidth !== undefined) clone.strokeWidth = localOverrides.strokeWidth;
+            if (localOverrides.opacity !== undefined) clone.opacity = localOverrides.opacity;
+            if (localOverrides.effects) clone.effects = JSON.parse(JSON.stringify(localOverrides.effects));
           }
         }
         result.push(clone);
@@ -10793,11 +10799,16 @@
         scaleY: (ct.scaleY || 1) * (t.scaleY || 1)
       };
       if (instance.overrides) {
-        if (instance.overrides.fillColor && cloned.fill) {
+        if (instance.overrides.fill) cloned.fill = JSON.parse(JSON.stringify(instance.overrides.fill));
+        else if (instance.overrides.fillColor && cloned.fill) {
           if (typeof cloned.fill === 'string') cloned.fill = instance.overrides.fillColor;
           else if (cloned.fill.type === 'solid') cloned.fill.color = instance.overrides.fillColor;
         }
-        if (instance.overrides.strokeColor) cloned.stroke = instance.overrides.strokeColor;
+        if (instance.overrides.stroke) cloned.stroke = instance.overrides.stroke;
+        else if (instance.overrides.strokeColor) cloned.stroke = instance.overrides.strokeColor;
+        if (instance.overrides.strokeWidth !== undefined) cloned.strokeWidth = instance.overrides.strokeWidth;
+        if (instance.overrides.opacity !== undefined) cloned.opacity = instance.overrides.opacity;
+        if (instance.overrides.effects) cloned.effects = JSON.parse(JSON.stringify(instance.overrides.effects));
       }
       cloned._isExpandedInstance = true;
       result.push(cloned);
@@ -14803,19 +14814,11 @@
     }
   }
 
-  function extractStyleFromShape(shape) {
-    if (!shape) return null;
-    return {
-      fill: JSON.parse(JSON.stringify(ensureFillStructure(shape.fill))),
-      stroke: shape.stroke || '#000000',
-      strokeWidth: shape.strokeWidth !== undefined ? shape.strokeWidth : 2,
-      opacity: shape.opacity !== undefined ? shape.opacity : 1,
-      effects: shape.effects ? JSON.parse(JSON.stringify(shape.effects)) : []
-    };
-  }
-
   function applyStyleToShape(shape, styleData) {
     if (!shape || !styleData) return false;
+    if (isComponentInstance(shape)) {
+      return applyStyleToComponentInstance(shape, styleData);
+    }
     if (styleData.fill !== undefined) {
       shape.fill = JSON.parse(JSON.stringify(styleData.fill));
     }
@@ -14834,6 +14837,53 @@
     return true;
   }
 
+  function applyStyleToComponentInstance(instance, styleData) {
+    if (!instance || !styleData) return false;
+    if (!instance.overrides) instance.overrides = {};
+    if (styleData.fill !== undefined) {
+      instance.overrides.fill = JSON.parse(JSON.stringify(styleData.fill));
+      delete instance.overrides.fillColor;
+    }
+    if (styleData.stroke !== undefined) {
+      instance.overrides.stroke = styleData.stroke;
+      delete instance.overrides.strokeColor;
+    }
+    if (styleData.strokeWidth !== undefined) {
+      instance.overrides.strokeWidth = styleData.strokeWidth;
+    }
+    if (styleData.opacity !== undefined) {
+      instance.overrides.opacity = styleData.opacity;
+    }
+    if (styleData.effects !== undefined) {
+      instance.overrides.effects = JSON.parse(JSON.stringify(styleData.effects));
+    }
+    return true;
+  }
+
+  function extractStyleFromShape(shape) {
+    if (!shape) return null;
+    if (isComponentInstance(shape) && shape.overrides) {
+      const o = shape.overrides;
+      const fill = o.fill || (o.fillColor ? { type: 'solid', color: o.fillColor } : null);
+      const stroke = o.stroke || o.strokeColor || null;
+      const fillToUse = fill ? JSON.parse(JSON.stringify(fill)) : ensureFillStructure(null);
+      return {
+        fill: fill ? JSON.parse(JSON.stringify(ensureFillStructure(fill))) : JSON.parse(JSON.stringify(ensureFillStructure(null))),
+        stroke: stroke || '#000000',
+        strokeWidth: o.strokeWidth !== undefined ? o.strokeWidth : 2,
+        opacity: o.opacity !== undefined ? o.opacity : 1,
+        effects: o.effects ? JSON.parse(JSON.stringify(o.effects)) : []
+      };
+    }
+    return {
+      fill: JSON.parse(JSON.stringify(ensureFillStructure(shape.fill))),
+      stroke: shape.stroke || '#000000',
+      strokeWidth: shape.strokeWidth !== undefined ? shape.strokeWidth : 2,
+      opacity: shape.opacity !== undefined ? shape.opacity : 1,
+      effects: shape.effects ? JSON.parse(JSON.stringify(shape.effects)) : []
+    };
+  }
+
   function applyStyleToSelectedShapes(styleData) {
     const selected = getSelectedShapes();
     if (selected.length === 0) {
@@ -14845,7 +14895,6 @@
     for (const s of selected) {
       if (isMaskShape(s)) continue;
       if (s.type === 'motion-path') continue;
-      if (isComponentInstance(s)) continue;
       applyStyleToShape(s, styleData);
       count++;
     }
@@ -14944,8 +14993,6 @@
       }
       tctx.fillStyle = grad;
     } else if (fill.type === 'pattern') {
-      drawPatternTile(tctx, fill.pattern || 'diagonal', 24, fill.fgColor || '#000', fill.bgColor || '#fff');
-      const pattern = tctx.createPattern(tctx.canvas.createImageData(1,1), 'repeat');
       tctx.fillStyle = fill.bgColor || '#fff';
       tctx.fillRect(x, y, pw, ph);
       const tmp2 = document.createElement('canvas');
@@ -15219,7 +15266,7 @@
     }
     let validShape = null;
     for (const s of selected) {
-      if (!isMaskShape(s) && s.type !== 'motion-path' && !isComponentInstance(s)) {
+      if (!isMaskShape(s) && s.type !== 'motion-path') {
         validShape = s;
         break;
       }
@@ -15849,7 +15896,7 @@
         showToast('Drop onto a shape to apply style', 'info');
         return;
       }
-      if (isComponentInstance(targetShape) || targetShape.type === 'motion-path') {
+      if (targetShape.type === 'motion-path') {
         showToast('Cannot apply style to this type of shape', 'warning');
         return;
       }
