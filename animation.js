@@ -157,6 +157,15 @@
           const t = (frame - kf1.frame) / (kf2.frame - kf1.frame);
           if (this.propName === 'fill') {
             return interpolateColor(kf1.value, kf2.value, t, kf1.easing);
+          } else if (this.propName === 'deformation') {
+            const et = kf1.easing === EASING_EASE_IN_OUT ? easeInOut(t) : t;
+            let def1 = null, def2 = null;
+            try { if (typeof kf1.value === 'string') def1 = JSON.parse(kf1.value); else def1 = kf1.value; } catch(e) {}
+            try { if (typeof kf2.value === 'string') def2 = JSON.parse(kf2.value); else def2 = kf2.value; } catch(e) {}
+            if (window.DeformationSystem && window.DeformationSystem.interpolateDeformation) {
+              return window.DeformationSystem.interpolateDeformation(def1, def2, et);
+            }
+            return et < 0.5 ? kf1.value : kf2.value;
           } else if (typeof kf1.value === 'string') {
             return t < 0.5 ? kf1.value : kf2.value;
           } else {

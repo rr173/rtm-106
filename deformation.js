@@ -49,6 +49,8 @@
     this.controlPoints = [];
     this.handleIn = [];
     this.handleOut = [];
+    this.handleTop = [];
+    this.handleBottom = [];
     this._initGrid();
   }
 
@@ -59,14 +61,19 @@
     this.controlPoints = [];
     this.handleIn = [];
     this.handleOut = [];
+    this.handleTop = [];
+    this.handleBottom = [];
     for (var r = 0; r < rows; r++) {
       for (var c = 0; c < cols; c++) {
         var x = lerp(b.minX, b.maxX, c / (cols - 1));
         var y = lerp(b.minY, b.maxY, r / (rows - 1));
         this.controlPoints.push({ x: x, y: y });
-        var hLen = Math.min(b.maxX - b.minX, b.maxY - b.minY) / (Math.max(rows, cols) * 3);
-        this.handleIn.push({ x: x - hLen, y: y });
-        this.handleOut.push({ x: x + hLen, y: y });
+        var hLenX = Math.min(b.maxX - b.minX, b.maxY - b.minY) / (Math.max(rows, cols) * 3);
+        var hLenY = Math.min(b.maxX - b.minX, b.maxY - b.minY) / (Math.max(rows, cols) * 3);
+        this.handleIn.push({ x: x - hLenX, y: y });
+        this.handleOut.push({ x: x + hLenX, y: y });
+        this.handleTop.push({ x: x, y: y - hLenY });
+        this.handleBottom.push({ x: x, y: y + hLenY });
       }
     }
   };
@@ -83,6 +90,14 @@
     return this.handleOut[row * this.cols + col];
   };
 
+  FreeDeformation.prototype.getHandleTop = function(row, col) {
+    return this.handleTop[row * this.cols + col];
+  };
+
+  FreeDeformation.prototype.getHandleBottom = function(row, col) {
+    return this.handleBottom[row * this.cols + col];
+  };
+
   FreeDeformation.prototype.setPoint = function(row, col, x, y) {
     this.controlPoints[row * this.cols + col] = { x: x, y: y };
   };
@@ -93,6 +108,14 @@
 
   FreeDeformation.prototype.setHandleOut = function(row, col, x, y) {
     this.handleOut[row * this.cols + col] = { x: x, y: y };
+  };
+
+  FreeDeformation.prototype.setHandleTop = function(row, col, x, y) {
+    this.handleTop[row * this.cols + col] = { x: x, y: y };
+  };
+
+  FreeDeformation.prototype.setHandleBottom = function(row, col, x, y) {
+    this.handleBottom[row * this.cols + col] = { x: x, y: y };
   };
 
   FreeDeformation.prototype.worldToGrid = function(px, py) {
@@ -128,6 +151,56 @@
     }
   };
 
+  FreeDeformation.prototype._evalHandleRow = function(row, handleArr, u) {
+    var cols = this.cols;
+    var p0 = handleArr[row * cols + 0];
+    var h0o = this.getHandleOut(row, 0);
+    var p1 = handleArr[row * cols + 1];
+    var h1i = this.getHandleIn(row, 1);
+    var h1o = this.getHandleOut(row, 1);
+    var p2 = handleArr[row * cols + 2];
+    var h2i = this.getHandleIn(row, 2);
+    var h2o = this.getHandleOut(row, 2);
+    var p3 = handleArr[row * cols + 3];
+
+    var seg = u * 3;
+    if (seg <= 1) {
+      var t = seg;
+      return cubicBezier(p0, h0o, h1i, p1, t);
+    } else if (seg <= 2) {
+      var t = seg - 1;
+      return cubicBezier(p1, h1o, h2i, p2, t);
+    } else {
+      var t = seg - 2;
+      return cubicBezier(p2, h2o, p3, p3, t);
+    }
+  };
+
+  FreeDeformation.prototype._evalBezierCol = function(colPts, colTopHandles, colBotHandles, v) {
+    var p0 = colPts[0];
+    var h0b = colBotHandles[0];
+    var p1 = colPts[1];
+    var h1t = colTopHandles[1];
+    var h1b = colBotHandles[1];
+    var p2 = colPts[2];
+    var h2t = colTopHandles[2];
+    var h2b = colBotHandles[2];
+    var p3 = colPts[3];
+    var h3t = colTopHandles[3];
+
+    var seg = v * 3;
+    if (seg <= 1) {
+      var t = seg;
+      return cubicBezier(p0, h0b, h1t, p1, t);
+    } else if (seg <= 2) {
+      var t = seg - 1;
+      return cubicBezier(p1, h1b, h2t, p2, t);
+    } else {
+      var t = seg - 2;
+      return cubicBezier(p2, h2b, h3t, p3, t);
+    }
+  };
+
   FreeDeformation.prototype.deformPoint = function(px, py) {
     var gv = this.worldToGrid(px, py);
     var u = gv.u;
@@ -135,20 +208,15 @@
 
     var rows = this.rows;
     var pRows = [];
+    var topHandlesRow = [];
+    var botHandlesRow = [];
     for (var r = 0; r < rows; r++) {
       pRows.push(this._evalBezierRow(r, u));
+      topHandlesRow.push(this._evalHandleRow(r, this.handleTop, u));
+      botHandlesRow.push(this._evalHandleRow(r, this.handleBottom, u));
     }
 
-    var seg = v * (rows - 1);
-    var ri = Math.min(Math.floor(seg), rows - 2);
-    var t = seg - ri;
-
-    var a = pRows[ri];
-    var b = pRows[ri + 1];
-    return {
-      x: lerp(a.x, b.x, t),
-      y: lerp(a.y, b.y, t)
-    };
+    return this._evalBezierCol(pRows, topHandlesRow, botHandlesRow, v);
   };
 
   FreeDeformation.prototype.deformPoints = function(points) {
@@ -167,7 +235,9 @@
       cols: this.cols,
       controlPoints: this.controlPoints.map(function(p) { return { x: p.x, y: p.y }; }),
       handleIn: this.handleIn.map(function(p) { return { x: p.x, y: p.y }; }),
-      handleOut: this.handleOut.map(function(p) { return { x: p.x, y: p.y }; })
+      handleOut: this.handleOut.map(function(p) { return { x: p.x, y: p.y }; }),
+      handleTop: this.handleTop.map(function(p) { return { x: p.x, y: p.y }; }),
+      handleBottom: this.handleBottom.map(function(p) { return { x: p.x, y: p.y }; })
     };
   };
 
@@ -178,6 +248,12 @@
     fd.controlPoints = data.controlPoints.map(function(p) { return { x: p.x, y: p.y }; });
     fd.handleIn = data.handleIn.map(function(p) { return { x: p.x, y: p.y }; });
     fd.handleOut = data.handleOut.map(function(p) { return { x: p.x, y: p.y }; });
+    if (data.handleTop) {
+      fd.handleTop = data.handleTop.map(function(p) { return { x: p.x, y: p.y }; });
+    }
+    if (data.handleBottom) {
+      fd.handleBottom = data.handleBottom.map(function(p) { return { x: p.x, y: p.y }; });
+    }
     return fd;
   };
 
@@ -191,6 +267,9 @@
           y: lerp(b.minY, b.maxY, r / (this.rows - 1))
         };
         if (dist(this.controlPoints[idx], expected) > 0.5) return false;
+        var hLen = Math.min(b.maxX - b.minX, b.maxY - b.minY) / (Math.max(this.rows, this.cols) * 3);
+        if (this.handleTop && dist(this.handleTop[idx], { x: expected.x, y: expected.y - hLen }) > 0.5) return false;
+        if (this.handleBottom && dist(this.handleBottom[idx], { x: expected.x, y: expected.y + hLen }) > 0.5) return false;
       }
     }
     return true;
@@ -381,12 +460,87 @@
     return null;
   }
 
+  function interpolatePoint(a, b, t) {
+    return {
+      x: lerp(a.x, b.x, t),
+      y: lerp(a.y, b.y, t)
+    };
+  }
+
+  function interpolatePointArray(arrA, arrB, t) {
+    var result = [];
+    var n = Math.min(arrA.length, arrB.length);
+    for (var i = 0; i < n; i++) {
+      result.push(interpolatePoint(arrA[i], arrB[i], t));
+    }
+    return result;
+  }
+
+  function interpolateEnvelopeCurve(curveA, curveB, t) {
+    var result = [];
+    var n = Math.min(curveA.length, curveB.length);
+    for (var i = 0; i < n; i++) {
+      result.push({
+        x: lerp(curveA[i].x, curveB[i].x, t),
+        y: lerp(curveA[i].y, curveB[i].y, t),
+        inHandle: interpolatePoint(curveA[i].inHandle, curveB[i].inHandle, t),
+        outHandle: interpolatePoint(curveA[i].outHandle, curveB[i].outHandle, t)
+      });
+    }
+    return result;
+  }
+
+  function interpolateDeformation(defA, defB, t) {
+    if (!defA && !defB) return null;
+    if (!defA) return JSON.parse(JSON.stringify(defB));
+    if (!defB) return JSON.parse(JSON.stringify(defA));
+    if (defA.type !== defB.type) return t < 0.5 ? JSON.parse(JSON.stringify(defA)) : JSON.parse(JSON.stringify(defB));
+
+    if (defA.type === 'free') {
+      var result = {
+        type: 'free',
+        bounds: {
+          minX: lerp(defA.bounds.minX, defB.bounds.minX, t),
+          minY: lerp(defA.bounds.minY, defB.bounds.minY, t),
+          maxX: lerp(defA.bounds.maxX, defB.bounds.maxX, t),
+          maxY: lerp(defA.bounds.maxY, defB.bounds.maxY, t)
+        },
+        rows: defA.rows,
+        cols: defA.cols,
+        controlPoints: interpolatePointArray(defA.controlPoints, defB.controlPoints, t),
+        handleIn: interpolatePointArray(defA.handleIn, defB.handleIn, t),
+        handleOut: interpolatePointArray(defA.handleOut, defB.handleOut, t)
+      };
+      if (defA.handleTop && defB.handleTop) {
+        result.handleTop = interpolatePointArray(defA.handleTop, defB.handleTop, t);
+      }
+      if (defA.handleBottom && defB.handleBottom) {
+        result.handleBottom = interpolatePointArray(defA.handleBottom, defB.handleBottom, t);
+      }
+      return result;
+    } else if (defA.type === 'envelope') {
+      return {
+        type: 'envelope',
+        bounds: {
+          minX: lerp(defA.bounds.minX, defB.bounds.minX, t),
+          minY: lerp(defA.bounds.minY, defB.bounds.minY, t),
+          maxX: lerp(defA.bounds.maxX, defB.bounds.maxX, t),
+          maxY: lerp(defA.bounds.maxY, defB.bounds.maxY, t)
+        },
+        topCurve: interpolateEnvelopeCurve(defA.topCurve, defB.topCurve, t),
+        bottomCurve: interpolateEnvelopeCurve(defA.bottomCurve, defB.bottomCurve, t)
+      };
+    }
+    return t < 0.5 ? JSON.parse(JSON.stringify(defA)) : JSON.parse(JSON.stringify(defB));
+  }
+
   global.DeformationSystem = {
     FreeDeformation: FreeDeformation,
     EnvelopeDeformation: EnvelopeDeformation,
     createDeformation: createDeformation,
     deserializeDeformation: deserializeDeformation,
-    cubicBezier: cubicBezier
+    cubicBezier: cubicBezier,
+    interpolateDeformation: interpolateDeformation
   };
 
 })(window);

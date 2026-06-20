@@ -1829,10 +1829,24 @@
       } else {
         const clone = JSON.parse(JSON.stringify(s));
         clone.transform = { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 };
-        clone.points = applyTransform(s.points, combined.tx, combined.ty, combined.rotation, combined.scaleX, combined.scaleY);
-        clone.holes = (s.holes || []).map(h => applyTransform(h, combined.tx, combined.ty, combined.rotation, combined.scaleX, combined.scaleY));
+
+        let shapePoints = s.points;
+        let shapeHoles = s.holes || [];
+        if (s.deformation) {
+          try {
+            const deformer = DefSys.deserializeDeformation(s.deformation);
+            if (deformer) {
+              shapePoints = deformer.deformPoints(shapePoints);
+              shapeHoles = shapeHoles.map(h => deformer.deformPoints(h));
+            }
+          } catch(e) {}
+        }
+
+        clone.points = applyTransform(shapePoints, combined.tx, combined.ty, combined.rotation, combined.scaleX, combined.scaleY);
+        clone.holes = shapeHoles.map(h => applyTransform(h, combined.tx, combined.ty, combined.rotation, combined.scaleX, combined.scaleY));
         clone._originalId = origShape.localShapeId || origShape.id;
         clone._isExpandedInstance = true;
+        delete clone.deformation;
 
         if (overrides) {
           if (overrides.fill) clone.fill = overrides.fill;
@@ -3171,6 +3185,8 @@
     var cps = defData.controlPoints;
     var hIns = defData.handleIn;
     var hOuts = defData.handleOut;
+    var hTops = defData.handleTop;
+    var hBots = defData.handleBottom;
     var sc = viewport.scale;
 
     ctx.save();
@@ -3208,6 +3224,17 @@
       ctx.lineTo(p.x, p.y);
       ctx.lineTo(ho.x, ho.y);
       ctx.stroke();
+      if (hTops && hBots) {
+        var ht = hTops[i];
+        var hb = hBots[i];
+        ctx.strokeStyle = 'rgba(156, 39, 176, 0.6)';
+        ctx.beginPath();
+        ctx.moveTo(ht.x, ht.y);
+        ctx.lineTo(p.x, p.y);
+        ctx.lineTo(hb.x, hb.y);
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(103, 58, 183, 0.6)';
+      }
       ctx.fillStyle = '#fff';
       ctx.strokeStyle = '#673ab7';
       ctx.lineWidth = 1.5 / sc;
@@ -3220,6 +3247,20 @@
       ctx.arc(ho.x, ho.y, hr, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
+      if (hTops && hBots) {
+        var ht = hTops[i];
+        var hb = hBots[i];
+        ctx.fillStyle = '#fff';
+        ctx.strokeStyle = '#9c27b0';
+        ctx.beginPath();
+        ctx.arc(ht.x, ht.y, hr, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(hb.x, hb.y, hr, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
     }
 
     ctx.fillStyle = '#673ab7';
@@ -3333,6 +3374,8 @@
         var cps = defData.controlPoints;
         var hIns = defData.handleIn;
         var hOuts = defData.handleOut;
+        var hTops = defData.handleTop;
+        var hBots = defData.handleBottom;
         for (var i = 0; i < cps.length; i++) {
           var r = Math.floor(i / defData.cols);
           var c = i % defData.cols;
@@ -3344,6 +3387,12 @@
           }
           if (dist({ x: wx, y: wy }, hOuts[i]) < threshold) {
             return { shapeId: s.id, type: 'handle', row: r, col: c, handleType: 'out' };
+          }
+          if (hTops && dist({ x: wx, y: wy }, hTops[i]) < threshold) {
+            return { shapeId: s.id, type: 'handle', row: r, col: c, handleType: 'top' };
+          }
+          if (hBots && dist({ x: wx, y: wy }, hBots[i]) < threshold) {
+            return { shapeId: s.id, type: 'handle', row: r, col: c, handleType: 'bottom' };
           }
         }
       } else if (defData.type === 'envelope') {
@@ -3384,10 +3433,20 @@
         defData.controlPoints[idx] = { x: wx, y: wy };
         defData.handleIn[idx] = { x: deformDragOriginal.handleIn[idx].x + dx, y: deformDragOriginal.handleIn[idx].y + dy };
         defData.handleOut[idx] = { x: deformDragOriginal.handleOut[idx].x + dx, y: deformDragOriginal.handleOut[idx].y + dy };
+        if (deformDragOriginal.handleTop) {
+          defData.handleTop[idx] = { x: deformDragOriginal.handleTop[idx].x + dx, y: deformDragOriginal.handleTop[idx].y + dy };
+        }
+        if (deformDragOriginal.handleBottom) {
+          defData.handleBottom[idx] = { x: deformDragOriginal.handleBottom[idx].x + dx, y: deformDragOriginal.handleBottom[idx].y + dy };
+        }
       } else if (hitInfo.handleType === 'in') {
         defData.handleIn[idx] = { x: wx, y: wy };
       } else if (hitInfo.handleType === 'out') {
         defData.handleOut[idx] = { x: wx, y: wy };
+      } else if (hitInfo.handleType === 'top') {
+        defData.handleTop[idx] = { x: wx, y: wy };
+      } else if (hitInfo.handleType === 'bottom') {
+        defData.handleBottom[idx] = { x: wx, y: wy };
       }
     } else if (defData.type === 'envelope') {
       var curve = hitInfo.curveIdx === 0 ? defData.topCurve : defData.bottomCurve;
