@@ -88,6 +88,10 @@
     <span>Release</span>
   </button>
   <div class="sep"></div>
+  <button id="pixel-check-toggle" class="tool-btn" title="Pixel Alignment Check (Ctrl+Shift+P)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="currentColor" stroke-width="2" d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/><circle cx="7.5" cy="7.5" r="2" fill="none" stroke="#e53935" stroke-width="2"/><circle cx="16.5" cy="16.5" r="2" fill="#e53935" opacity="0.5"/></svg>
+    <span>Pixel Check</span>
+  </button>
   <button id="export-svg" class="tool-btn" title="Export SVG">
     <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M12 3v12l-4-4-1.4 1.4L12 17.8l5.4-5.4L16 10l-4 4V3zM5 19h14v2H5z"/></svg>
     <span>Export SVG</span>
@@ -554,6 +558,68 @@
     <span>Layers</span>
   </div>
   <div id="layers-list"></div>
+</div>
+
+<div id="pixel-check-panel" class="hidden">
+  <div class="panel-header">
+    <span>Pixel Alignment</span>
+    <span id="pixel-check-count" class="pixel-count-badge">0</span>
+    <button id="pixel-check-close" class="mini-btn" title="Close panel">×</button>
+  </div>
+  <div class="pixel-check-toolbar">
+    <button id="pixel-check-refresh" class="mini-btn fill-btn" title="Re-scan all shapes">
+      <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+      Rescan
+    </button>
+    <button id="pixel-check-fix-all" class="mini-btn fill-btn primary" title="Snap all sub-pixel points to nearest integer">
+      <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+      Fix All
+    </button>
+  </div>
+  <div class="pixel-check-settings">
+    <div class="form-row">
+      <label>Tolerance:</label>
+      <input type="number" id="pixel-check-tolerance" min="0.001" max="0.5" step="0.01" value="0.01" />
+      <span class="unit">px</span>
+    </div>
+    <div class="form-row">
+      <label>Highlight size:</label>
+      <input type="range" id="pixel-check-highlight-size" min="3" max="15" step="1" value="7" />
+      <span id="pixel-check-highlight-size-value" class="unit">7px</span>
+    </div>
+    <div class="form-row">
+      <label>Show coords:</label>
+      <input type="checkbox" id="pixel-check-show-coords" checked />
+    </div>
+  </div>
+  <div id="pixel-check-list" class="pixel-check-list"></div>
+  <div id="pixel-check-empty" class="empty-list pixel-check-empty">
+    <svg viewBox="0 0 24 24" width="40" height="40"><path fill="none" stroke="#ccc" stroke-width="1.5" d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/><circle cx="16.5" cy="16.5" r="2" fill="#4caf50"/></svg>
+    <div class="empty-text">All pixels aligned perfectly!</div>
+  </div>
+</div>
+
+<div id="pixel-constraint-warning-dialog" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header">
+      <span>Constraint Warning</span>
+      <button class="modal-close" id="pixel-warning-close">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="pixel-warning-icon">
+        <svg viewBox="0 0 24 24" width="48" height="48"><path fill="#ff9800" d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>
+      </div>
+      <div class="pixel-warning-message">
+        <strong>The following constraints may be violated after snapping:</strong>
+      </div>
+      <div id="pixel-warning-list" class="pixel-warning-list"></div>
+      <div class="pixel-warning-question">Do you want to proceed anyway?</div>
+    </div>
+    <div class="modal-footer">
+      <button class="modal-btn" id="pixel-warning-cancel">Cancel</button>
+      <button class="modal-btn primary" id="pixel-warning-ok">Proceed</button>
+    </div>
+  </div>
 </div>
 
 <div id="component-edit-indicator" class="hidden">

@@ -13709,4 +13709,825 @@
       bodyEl.appendChild(effectsSection);
     };
   }
+
+  /* ============================================================
+   * PIXEL ALIGNMENT CHECK SYSTEM
+   * ============================================================ */
+
+  const PixelCheck = {
+    enabled: false,
+    tolerance: 0.01,
+    highlightSize: 7,
+    showCoords: true,
+    issues: [],
+    expandedShapes: new Set(),
+    pendingWarningCallback: null,
+    warningIssues: null
+  };
+
+  function isSubPixelValue(v, tol) {
+    const rounded = Math.round(v);
+    return Math.abs(v - rounded) > (tol !== undefined ? tol : PixelCheck.tolerance);
+  }
+
+  function isSubPixelPoint(p, tol) {
+    return isSubPixelValue(p.x, tol) || isSubPixelValue(p.y, tol);
+  }
+
+  function snapValue(v) {
+    return Math.round(v);
+  }
+
+  function snapPoint(p) {
+    return { x: snapValue(p.x), y: snapValue(p.y) };
+  }
+
+  function scanShapeForPixelIssues(shape, tol) {
+    if (!shape || !shape.visible || shape.locked) return null;
+    if (isComponentInstance(shape)) {
+      const expanded = getInstanceExpandedShapes(shape);
+      const allIssues = [];
+      for (const es of expanded) {
+        const sub = scanShapeForPixelIssues(es, tol);
+        if (sub && sub.points) allIssues.push(...sub.points);
+      }
+      if (allIssues.length === 0) return null;
+      return {
+        shapeId: shape.id,
+        shapeName: shape.name,
+        shapeColor: getFillDisplayColor(shape.fill),
+        points: allIssues,
+        hasConstraintWarning: false
+      };
+    }
+
+    const points = shape.points || [];
+    const holes = shape.holes || [];
+    const shapeTransform = shape.transform || {};
+    const hasNonIdentityTransform = shapeTransform.tx !== 0 || shapeTransform.ty !== 0 ||
+      shapeTransform.rotation !== 0 || shapeTransform.scaleX !== 1 || shapeTransform.scaleY !== 1;
+
+    const issues = [];
+
+    function checkPointArray(pts, isHole, holeIndex) {
+      for (let i = 0; i < pts.length; i++) {
+        const rawPoint = pts[i];
+        if (isSubPixelPoint(rawPoint, tol)) {
+          issues.push({
+            pointIndex: i,
+            isHole: isHole,
+            holeIndex: isHole ? holeIndex : -1,
+            originalX: rawPoint.x,
+            originalY: rawPoint.y,
+            suggestedX: snapValue(rawPoint.x),
+            suggestedY: snapValue(rawPoint.y),
+            usedTransform: false
+          });
+        }
+      }
+    }
+
+    checkPointArray(points, false, -1);
+    for (let hi = 0; hi < holes.length; hi++) {
+      checkPointArray(holes[hi], true, hi);
+    }
+
+    if (issues.length === 0) return null;
+
+    return {
+      shapeId: shape.id,
+      shapeName: shape.name,
+      shapeColor: getFillDisplayColor(shape.fill),
+      points: issues,
+      hasConstraintWarning: false,
+      hasNonIdentityTransform: hasNonIdentityTransform
+    };
+  }
+
+  function scanAllShapesForPixelIssues() {
+    const tol = PixelCheck.tolerance;
+    const allIssues = [];
+
+    if (editingComponentId !== null) {
+      const comp = getComponentById(editingComponentId);
+      if (comp) {
+        for (const s of comp.shapes) {
+          const issue = scanShapeForPixelIssues(s, tol);
+          if (issue) allIssues.push(issue);
+        }
+      }
+    } else {
+      for (const s of shapes) {
+        const issue = scanShapeForPixelIssues(s, tol);
+        if (issue) allIssues.push(issue);
+      }
+    }
+
+    for (const issue of allIssues) {
+      issue.hasConstraintWarning = checkShapeHasRelatedConstraints(issue.shapeId, issue.points);
+    }
+
+    PixelCheck.issues = allIssues;
+    return allIssues;
+  }
+
+  function checkShapeHasRelatedConstraints(shapeId, points) {
+    if (!constraints || constraints.length === 0) return false;
+
+    for (const c of constraints) {
+      const refPts = c.getReferencedPoints ? c.getReferencedPoints() : [];
+      for (const ptId of refPts) {
+        const parsed = parsePointId(ptId);
+        if (parsed && parsed.shapeId === shapeId) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function getPixelIssuePointWorldPos(issue, ptInfo) {
+    let shape;
+    if (editingComponentId !== null) {
+      const comp = getComponentById(editingComponentId);
+      shape = comp ? comp.shapes.find(s => s.id === issue.shapeId) : null;
+    } else {
+      shape = getShapeById(issue.shapeId);
+    }
+
+    if (!shape) return null;
+
+    if (isComponentInstance(shape)) {
+      const expanded = getInstanceExpandedShapes(shape);
+      if (expanded.length === 0) return null;
+      const srcShape = expanded[0];
+      const localPts = ptInfo.isHole && srcShape.holes && srcShape.holes[ptInfo.holeIndex]
+        ? srcShape.holes[ptInfo.holeIndex]
+        : srcShape.points;
+      const p = localPts && localPts[ptInfo.pointIndex] ? localPts[ptInfo.pointIndex] : null;
+      if (!p) return null;
+      const t = shape.transform;
+      return applyTransform([p], t.tx, t.ty, t.rotation, t.scaleX, t.scaleY)[0];
+    }
+
+    if (shape.deformation) {
+      const deformer = DefSys.deserializeDeformation(shape.deformation);
+      if (deformer) {
+        const rawPts = ptInfo.isHole && shape.holes && shape.holes[ptInfo.holeIndex]
+          ? shape.holes[ptInfo.holeIndex].slice()
+          : shape.points.slice();
+        const deformed = deformer.deformPoints([rawPts[ptInfo.pointIndex]]);
+        if (deformed && deformed[0]) {
+          const t = shape.transform;
+          return applyTransform(deformed, t.tx, t.ty, t.rotation, t.scaleX, t.scaleY)[0];
+        }
+      }
+    }
+
+    const localPts = ptInfo.isHole && shape.holes && shape.holes[ptInfo.holeIndex]
+      ? shape.holes[ptInfo.holeIndex]
+      : shape.points;
+    const p = localPts && localPts[ptInfo.pointIndex] ? localPts[ptInfo.pointIndex] : null;
+    if (!p) return null;
+    const t = shape.transform;
+    return applyTransform([p], t.tx, t.ty, t.rotation, t.scaleX, t.scaleY)[0];
+  }
+
+  function renderPixelCheckOverlay() {
+    if (!PixelCheck.enabled) return;
+    if (PixelCheck.issues.length === 0) return;
+
+    const listEl = document.getElementById('pixel-check-list');
+    const selectedIssueId = listEl ? listEl.dataset.selectedShapeId : null;
+    const selectedPointKey = listEl ? listEl.dataset.selectedPointKey : null;
+
+    for (const issue of PixelCheck.issues) {
+      const isShapeSelected = String(issue.shapeId) === String(selectedIssueId);
+
+      for (const ptInfo of issue.points) {
+        const worldPos = getPixelIssuePointWorldPos(issue, ptInfo);
+        if (!worldPos) continue;
+
+        const ptKey = issue.shapeId + '_' + (ptInfo.isHole ? ('h' + ptInfo.holeIndex + '_') : '') + ptInfo.pointIndex;
+        const isPtSelected = isShapeSelected && ptKey === selectedPointKey;
+
+        const size = (isPtSelected ? PixelCheck.highlightSize + 3 : PixelCheck.highlightSize) / viewport.scale;
+        const pulseSize = size * 1.6;
+
+        ctx.save();
+
+        ctx.beginPath();
+        ctx.arc(worldPos.x, worldPos.y, pulseSize, 0, Math.PI * 2);
+        ctx.fillStyle = ptInfo.isHole
+          ? 'rgba(156, 39, 176, 0.12)'
+          : 'rgba(229, 57, 53, 0.12)';
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(worldPos.x, worldPos.y, size, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff';
+        ctx.fill();
+        ctx.lineWidth = 2 / viewport.scale;
+        ctx.strokeStyle = ptInfo.isHole ? '#9c27b0' : '#e53935';
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(worldPos.x, worldPos.y, size * 0.4, 0, Math.PI * 2);
+        ctx.fillStyle = ptInfo.isHole ? '#9c27b0' : '#e53935';
+        ctx.fill();
+
+        if (PixelCheck.showCoords || isPtSelected) {
+          const labelText = `(${ptInfo.originalX.toFixed(2)}, ${ptInfo.originalY.toFixed(2)})`;
+          const fontSize = (isPtSelected ? 12 : 10) / viewport.scale;
+          ctx.font = `${fontSize}px -apple-system, BlinkMacSystemFont, sans-serif`;
+
+          const metrics = ctx.measureText(labelText);
+          const textW = metrics.width + 8 / viewport.scale;
+          const textH = fontSize + 6 / viewport.scale;
+
+          let labelX = worldPos.x + size * 1.5;
+          let labelY = worldPos.y - size * 1.5;
+
+          if (labelX + textW > viewport.x + window.innerWidth / viewport.scale) {
+            labelX = worldPos.x - size * 1.5 - textW;
+          }
+          if (labelY - textH < viewport.y - window.innerHeight / viewport.scale) {
+            labelY = worldPos.y + size * 1.5 + textH;
+          }
+
+          ctx.fillStyle = isPtSelected ? 'rgba(27, 94, 32, 0.95)' : 'rgba(229, 57, 53, 0.95)';
+          ctx.fillRect(labelX, labelY - textH, textW, textH);
+
+          ctx.fillStyle = '#fff';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(labelText, labelX + 4 / viewport.scale, labelY - textH / 2);
+        }
+
+        if (isPtSelected) {
+          ctx.beginPath();
+          ctx.arc(worldPos.x, worldPos.y, pulseSize * 1.4, 0, Math.PI * 2);
+          ctx.lineWidth = 2 / viewport.scale;
+          ctx.strokeStyle = 'rgba(27, 94, 32, 0.6)';
+          ctx.setLineDash([4 / viewport.scale, 3 / viewport.scale]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+
+        ctx.restore();
+      }
+    }
+  }
+
+  function formatCoord(x) {
+    if (Math.abs(x - Math.round(x)) < 0.001) return String(Math.round(x));
+    return x.toFixed(2);
+  }
+
+  function renderPixelCheckPanel() {
+    const panelEl = document.getElementById('pixel-check-panel');
+    if (!panelEl) return;
+
+    const badgeEl = document.getElementById('pixel-check-count');
+    const listEl = document.getElementById('pixel-check-list');
+    const emptyEl = document.getElementById('pixel-check-empty');
+
+    const totalCount = PixelCheck.issues.reduce((sum, i) => sum + i.points.length, 0);
+    if (badgeEl) {
+      badgeEl.textContent = String(totalCount);
+      badgeEl.dataset.count = String(totalCount);
+    }
+
+    if (!PixelCheck.enabled) {
+      panelEl.classList.add('hidden');
+      return;
+    }
+    panelEl.classList.remove('hidden');
+
+    if (PixelCheck.issues.length === 0) {
+      if (listEl) listEl.classList.add('hidden');
+      if (emptyEl) emptyEl.classList.add('visible');
+      return;
+    }
+    if (listEl) listEl.classList.remove('hidden');
+    if (emptyEl) emptyEl.classList.remove('visible');
+
+    if (!listEl) return;
+
+    let html = '';
+    for (const issue of PixelCheck.issues) {
+      const isExpanded = PixelCheck.expandedShapes.has(issue.shapeId);
+      const itemClass = 'pixel-issue-item' + (isExpanded ? ' expanded' : '') + (issue.hasConstraintWarning ? ' warning' : '');
+
+      html += `<div class="${itemClass}" data-shape-id="${issue.shapeId}">`;
+      html += `<div class="pixel-issue-header">`;
+      html += `<span class="pixel-issue-expand-icon">▶</span>`;
+      html += `<span class="pixel-issue-shape-color" style="background:${issue.shapeColor || '#ccc'}"></span>`;
+      html += `<span class="pixel-issue-shape-name" title="${escapeHtml(issue.shapeName || ('Shape ' + issue.shapeId))}">${escapeHtml(issue.shapeName || ('Shape ' + issue.shapeId))}</span>`;
+      if (issue.hasConstraintWarning) {
+        html += `<span class="pixel-issue-warning-icon" title="Has constraints - snapping may violate">⚠</span>`;
+      }
+      html += `<span class="pixel-issue-vertex-count">${issue.points.length}</span>`;
+      html += `</div>`;
+
+      if (isExpanded) {
+        html += `<div class="pixel-issue-body">`;
+        for (let pi = 0; pi < issue.points.length; pi++) {
+          const pt = issue.points[pi];
+          const ptKey = issue.shapeId + '_' + (pt.isHole ? ('h' + pt.holeIndex + '_') : '') + pt.pointIndex;
+
+          html += `<div class="pixel-point-item" data-point-key="${ptKey}">`;
+          html += `<span class="pixel-point-index">${pt.pointIndex}</span>`;
+          html += `<div class="pixel-point-coords">`;
+
+          html += `<div class="pixel-point-coords-row original">`;
+          if (pt.isHole) html += `<span class="pixel-hole-badge" title="Hole ${pt.holeIndex + 1}">H${pt.holeIndex + 1}</span>`;
+          html += `<span class="pixel-point-coords-label">now:</span>`;
+          html += `<span>(${formatCoord(pt.originalX)}, ${formatCoord(pt.originalY)})</span>`;
+          html += `</div>`;
+
+          html += `<div class="pixel-point-coords-row suggested">`;
+          html += `<span class="pixel-point-coords-label">snap:</span>`;
+          html += `<span>(${formatCoord(pt.suggestedX)}, ${formatCoord(pt.suggestedY)})</span>`;
+          html += `</div>`;
+
+          html += `</div>`;
+          html += `<div class="pixel-point-actions">`;
+          html += `<button class="pixel-fix-btn" data-shape-id="${issue.shapeId}" data-point-key="${ptKey}">Fix</button>`;
+          html += `</div>`;
+          html += `</div>`;
+        }
+        html += `</div>`;
+      }
+
+      html += `</div>`;
+    }
+
+    listEl.innerHTML = html;
+
+    listEl.querySelectorAll('.pixel-issue-header').forEach(h => {
+      h.addEventListener('click', () => {
+        const item = h.closest('.pixel-issue-item');
+        if (!item) return;
+        const sid = parseInt(item.dataset.shapeId, 10);
+        if (PixelCheck.expandedShapes.has(sid)) {
+          PixelCheck.expandedShapes.delete(sid);
+        } else {
+          PixelCheck.expandedShapes.add(sid);
+        }
+        renderPixelCheckPanel();
+        render();
+      });
+    });
+
+    listEl.querySelectorAll('.pixel-point-item').forEach(pi => {
+      pi.addEventListener('mouseenter', () => {
+        const key = pi.dataset.pointKey;
+        const item = pi.closest('.pixel-issue-item');
+        if (item && listEl) {
+          listEl.dataset.selectedShapeId = item.dataset.shapeId;
+          listEl.dataset.selectedPointKey = key;
+        }
+        render();
+      });
+      pi.addEventListener('mouseleave', () => {
+        if (listEl) {
+          delete listEl.dataset.selectedShapeId;
+          delete listEl.dataset.selectedPointKey;
+        }
+        render();
+      });
+    });
+
+    listEl.querySelectorAll('.pixel-fix-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const sid = parseInt(btn.dataset.shapeId, 10);
+        const pkey = btn.dataset.pointKey;
+        fixSinglePixelIssue(sid, pkey);
+      });
+    });
+  }
+
+  function escapeHtml(s) {
+    const div = document.createElement('div');
+    div.textContent = String(s == null ? '' : s);
+    return div.innerHTML;
+  }
+
+  function getPointLocationByKey(shapeId, pointKey) {
+    const parts = pointKey.split('_');
+    let idx = 1;
+    let isHole = false;
+    let holeIdx = -1;
+    if (parts[idx] && parts[idx].startsWith('h')) {
+      isHole = true;
+      holeIdx = parseInt(parts[idx].substring(1), 10);
+      idx++;
+    }
+    const pointIndex = parseInt(parts[idx], 10);
+    return { isHole, holeIndex: holeIdx, pointIndex };
+  }
+
+  function applyPointFixToShape(shape, loc, pt) {
+    if (isComponentInstance(shape)) {
+      const expanded = getInstanceExpandedShapes(shape);
+      if (expanded.length > 0) {
+        const target = expanded[0];
+        if (loc.isHole && target.holes && target.holes[loc.holeIndex]) {
+          target.holes[loc.holeIndex][loc.pointIndex] = { x: pt.suggestedX, y: pt.suggestedY };
+        } else if (target.points) {
+          target.points[loc.pointIndex] = { x: pt.suggestedX, y: pt.suggestedY };
+        }
+      }
+      return false;
+    }
+
+    if (loc.isHole && shape.holes && shape.holes[loc.holeIndex]) {
+      shape.holes[loc.holeIndex][loc.pointIndex] = { x: pt.suggestedX, y: pt.suggestedY };
+      return true;
+    } else if (shape.points) {
+      shape.points[loc.pointIndex] = { x: pt.suggestedX, y: pt.suggestedY };
+      return true;
+    }
+    return false;
+  }
+
+  function checkConstraintsAfterSnap(issuesToSnap) {
+    if (!constraints || constraints.length === 0) return { violated: false, warnings: [] };
+
+    const pointBefore = {};
+    const tmpShapeMap = {};
+    const warnings = [];
+
+    function collectPoints(shapeList) {
+      for (const s of shapeList) {
+        tmpShapeMap[s.id] = s;
+        for (let i = 0; i < (s.points || []).length; i++) {
+          const pid = makePointId(s.id, false, -1, i);
+          pointBefore[pid] = { x: s.points[i].x, y: s.points[i].y };
+        }
+        if (s.holes) {
+          for (let hi = 0; hi < s.holes.length; hi++) {
+            for (let i = 0; i < s.holes[hi].length; i++) {
+              const pid = makePointId(s.id, true, hi, i);
+              pointBefore[pid] = { x: s.holes[hi][i].x, y: s.holes[hi][i].y };
+            }
+          }
+        }
+      }
+    }
+
+    if (editingComponentId !== null) {
+      const comp = getComponentById(editingComponentId);
+      if (comp) collectPoints(comp.shapes);
+    } else {
+      collectPoints(shapes);
+    }
+
+    const pointAfter = {};
+    for (const k in pointBefore) pointAfter[k] = { ...pointBefore[k] };
+
+    for (const entry of issuesToSnap) {
+      const { issue, pt, loc } = entry;
+      const shape = tmpShapeMap[issue.shapeId];
+      if (!shape) continue;
+      if (isComponentInstance(shape)) continue;
+
+      if (loc.isHole) {
+        const pid = makePointId(issue.shapeId, true, loc.holeIndex, loc.pointIndex);
+        pointAfter[pid] = { x: pt.suggestedX, y: pt.suggestedY };
+      } else {
+        const pid = makePointId(issue.shapeId, false, -1, loc.pointIndex);
+        pointAfter[pid] = { x: pt.suggestedX, y: pt.suggestedY };
+      }
+    }
+
+    const warnTol = PixelCheck.tolerance * 100;
+    for (let ci = 0; ci < constraints.length; ci++) {
+      const c = constraints[ci];
+      try {
+        const before = c.evaluate(pointBefore, paramsData);
+        const after = c.evaluate(pointAfter, paramsData);
+        let violated = false;
+        for (let ei = 0; ei < before.length && ei < after.length; ei++) {
+          const bDiff = before[ei];
+          const aDiff = after[ei];
+          if (Math.abs(aDiff) > Math.abs(bDiff) + warnTol && Math.abs(aDiff) > warnTol) {
+            violated = true;
+            break;
+          }
+        }
+        if (violated) {
+          warnings.push({
+            index: ci,
+            type: c.type,
+            label: c.getLabel ? c.getLabel() : c.type
+          });
+        }
+      } catch (e) {}
+    }
+
+    return { violated: warnings.length > 0, warnings };
+  }
+
+  function fixSinglePixelIssue(shapeId, pointKey) {
+    const issue = PixelCheck.issues.find(i => i.shapeId === shapeId);
+    if (!issue) return;
+
+    const loc = getPointLocationByKey(shapeId, pointKey);
+    const pt = issue.points.find(p => {
+      return p.pointIndex === loc.pointIndex && p.isHole === loc.isHole && p.holeIndex === loc.holeIndex;
+    });
+    if (!pt) return;
+
+    const check = checkConstraintsAfterSnap([{ issue, pt, loc }]);
+
+    const doFix = () => {
+      pushHistory();
+      _applyPixelFix([{ issue, pt, loc }]);
+      _afterPixelFix();
+      showToast('Point snapped to pixel grid');
+    };
+
+    if (check.violated) {
+      showConstraintWarningDialog(check.warnings, doFix);
+    } else {
+      doFix();
+    }
+  }
+
+  function fixAllPixelIssues() {
+    if (PixelCheck.issues.length === 0) return;
+
+    const all = [];
+    for (const issue of PixelCheck.issues) {
+      for (const pt of issue.points) {
+        const loc = {
+          isHole: pt.isHole,
+          holeIndex: pt.holeIndex,
+          pointIndex: pt.pointIndex
+        };
+        all.push({ issue, pt, loc });
+      }
+    }
+
+    if (all.length === 0) return;
+
+    const check = checkConstraintsAfterSnap(all);
+
+    const doFix = () => {
+      pushHistory();
+      _applyPixelFix(all);
+      const n = all.length;
+      _afterPixelFix();
+      showToast('Snapped ' + n + ' point(s) to pixel grid');
+    };
+
+    if (check.violated) {
+      showConstraintWarningDialog(check.warnings, doFix);
+    } else {
+      doFix();
+    }
+  }
+
+  function _applyPixelFix(fixList) {
+    function applyToList(shapeList) {
+      for (const entry of fixList) {
+        const { issue, pt, loc } = entry;
+        const shape = shapeList.find(s => s.id === issue.shapeId);
+        if (!shape) continue;
+        applyPointFixToShape(shape, loc, pt);
+      }
+    }
+
+    if (editingComponentId !== null) {
+      const comp = getComponentById(editingComponentId);
+      if (comp) applyToList(comp.shapes);
+    } else {
+      applyToList(shapes);
+    }
+  }
+
+  function _afterPixelFix() {
+    rebuildSolverAndParams();
+    try { runSolver(); } catch (e) {}
+    try { initialSolve(); } catch (e) {}
+    rescanPixelIssues();
+    updateToolbar();
+    try {
+      dimensionSystem.updateFromShapes(getShapePointsForDim, getShapeHolesForDim);
+    } catch (e) {}
+    try {
+      liveAnnotationSystem.updateFromShapes(
+        (id) => { const s = getShapeById(id); return s ? worldPointsOf(s) : null; },
+        (id) => { const s = getShapeById(id); return s ? worldHolesOf(s) : null; }
+      );
+    } catch (e) {}
+    renderLayers();
+    renderConstraintList();
+    updateDOFDisplay();
+    render();
+    scheduleSave();
+  }
+
+  function rescanPixelIssues() {
+    if (PixelCheck.enabled) {
+      scanAllShapesForPixelIssues();
+      renderPixelCheckPanel();
+    }
+  }
+
+  function setPixelCheckEnabled(enabled) {
+    PixelCheck.enabled = !!enabled;
+    const btn = document.getElementById('pixel-check-toggle');
+    if (btn) btn.classList.toggle('active', PixelCheck.enabled);
+
+    const modeEl = document.getElementById('mode-indicator');
+    if (modeEl) {
+      let html = modeEl.innerHTML || '';
+      html = html.replace(/<span class="pixel-mode-indicator">.*?<\/span>/g, '');
+      if (PixelCheck.enabled) {
+        html += '<span class="pixel-mode-indicator">';
+        html += '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/><circle cx="16.5" cy="16.5" r="2" fill="#fff" opacity="0.6"/></svg>';
+        html += ' PIXEL CHECK';
+        html += '</span>';
+      }
+      modeEl.innerHTML = html;
+    }
+
+    if (PixelCheck.enabled) {
+      scanAllShapesForPixelIssues();
+    }
+    renderPixelCheckPanel();
+    render();
+  }
+
+  function togglePixelCheck() {
+    setPixelCheckEnabled(!PixelCheck.enabled);
+  }
+
+  function showConstraintWarningDialog(warnings, onProceed) {
+    const dialog = document.getElementById('pixel-constraint-warning-dialog');
+    const list = document.getElementById('pixel-warning-list');
+    if (!dialog || !list) {
+      if (onProceed) onProceed();
+      return;
+    }
+
+    let html = '';
+    for (const w of warnings) {
+      html += `<div class="pixel-warning-item">`;
+      html += `<span class="pixel-warning-icon-small">⚠</span>`;
+      html += `<span class="pixel-warning-text">Constraint #${w.index + 1} may be violated</span>`;
+      html += `<span class="pixel-warning-constraint-type">${w.label || w.type}</span>`;
+      html += `</div>`;
+    }
+    list.innerHTML = html;
+
+    dialog.classList.remove('hidden');
+
+    PixelCheck.pendingWarningCallback = onProceed;
+
+    const okBtn = document.getElementById('pixel-warning-ok');
+    const cancelBtn = document.getElementById('pixel-warning-cancel');
+    const closeBtn = document.getElementById('pixel-warning-close');
+
+    const cleanup = () => {
+      dialog.classList.add('hidden');
+      PixelCheck.pendingWarningCallback = null;
+      if (okBtn) okBtn.onclick = null;
+      if (cancelBtn) cancelBtn.onclick = null;
+      if (closeBtn) closeBtn.onclick = null;
+    };
+
+    if (okBtn) okBtn.onclick = () => {
+      const cb = PixelCheck.pendingWarningCallback;
+      cleanup();
+      if (cb) cb();
+    };
+    if (cancelBtn) cancelBtn.onclick = cleanup;
+    if (closeBtn) closeBtn.onclick = cleanup;
+  }
+
+  function initPixelCheckUI() {
+    const toggleBtn = document.getElementById('pixel-check-toggle');
+    if (toggleBtn) {
+      toggleBtn.addEventListener('click', togglePixelCheck);
+    }
+
+    const closeBtn = document.getElementById('pixel-check-close');
+    if (closeBtn) {
+      closeBtn.addEventListener('click', () => setPixelCheckEnabled(false));
+    }
+
+    const refreshBtn = document.getElementById('pixel-check-refresh');
+    if (refreshBtn) {
+      refreshBtn.addEventListener('click', () => {
+        rescanPixelIssues();
+        showToast('Re-scanned all shapes');
+      });
+    }
+
+    const fixAllBtn = document.getElementById('pixel-check-fix-all');
+    if (fixAllBtn) {
+      fixAllBtn.addEventListener('click', () => {
+        if (PixelCheck.issues.length === 0) {
+          showToast('No pixel issues to fix', 'info');
+          return;
+        }
+        fixAllPixelIssues();
+      });
+    }
+
+    const tolEl = document.getElementById('pixel-check-tolerance');
+    if (tolEl) {
+      tolEl.value = String(PixelCheck.tolerance);
+      tolEl.addEventListener('change', (e) => {
+        const v = parseFloat(e.target.value);
+        if (!isNaN(v) && v >= 0.001 && v <= 0.5) {
+          PixelCheck.tolerance = v;
+          rescanPixelIssues();
+        }
+      });
+    }
+
+    const sizeEl = document.getElementById('pixel-check-highlight-size');
+    const sizeVal = document.getElementById('pixel-check-highlight-size-value');
+    if (sizeEl) {
+      sizeEl.value = String(PixelCheck.highlightSize);
+      if (sizeVal) sizeVal.textContent = PixelCheck.highlightSize + 'px';
+      sizeEl.addEventListener('input', (e) => {
+        const v = parseInt(e.target.value, 10);
+        if (!isNaN(v) && v >= 3 && v <= 15) {
+          PixelCheck.highlightSize = v;
+          if (sizeVal) sizeVal.textContent = v + 'px';
+          if (PixelCheck.enabled) render();
+        }
+      });
+    }
+
+    const showCoordsEl = document.getElementById('pixel-check-show-coords');
+    if (showCoordsEl) {
+      showCoordsEl.checked = PixelCheck.showCoords;
+      showCoordsEl.addEventListener('change', (e) => {
+        PixelCheck.showCoords = !!e.target.checked;
+        if (PixelCheck.enabled) render();
+      });
+    }
+
+    window.addEventListener('keydown', (e) => {
+      if (e.ctrlKey && e.shiftKey && (e.key === 'p' || e.key === 'P')) {
+        e.preventDefault();
+        togglePixelCheck();
+      }
+    });
+  }
+
+  function wrapEditFunctionsForPixelRescan() {
+    const wrapFns = [
+      'deleteSelectedShapes',
+      'rebuildSolverAndParams'
+    ];
+
+    let rescanTimer = null;
+    const scheduleRescan = () => {
+      if (!PixelCheck.enabled) return;
+      if (rescanTimer) clearTimeout(rescanTimer);
+      rescanTimer = setTimeout(() => {
+        rescanPixelIssues();
+        rescanTimer = null;
+      }, 50);
+    };
+
+    const _origPushHistory = typeof pushHistory === 'function' ? pushHistory : null;
+    if (_origPushHistory) {
+      window._pixelOrigPushHistory = _origPushHistory;
+      pushHistory = function() {
+        const r = _origPushHistory.apply(this, arguments);
+        scheduleRescan();
+        return r;
+      };
+    }
+
+    const _origRender = typeof render === 'function' ? render : null;
+    if (_origRender) {
+      window._pixelOrigRender = _origRender;
+      render = function() {
+        _origRender.apply(this, arguments);
+        renderPixelCheckOverlay();
+      };
+    }
+
+    const mouseupHandler = () => {
+      if (isDraggingShape || isDraggingVertex || isTransforming || isDraggingDeformPoint || isMarquee || isDraggingGradientHandle) {
+        scheduleRescan();
+      }
+    };
+    canvas && canvas.addEventListener && canvas.addEventListener('mouseup', mouseupHandler);
+    document.addEventListener('mouseup', mouseupHandler);
+  }
+
+  initPixelCheckUI();
+  wrapEditFunctionsForPixelRescan();
+
 })();
