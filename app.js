@@ -14764,4 +14764,1210 @@
   initPixelCheckUI();
   wrapEditFunctionsForPixelRescan();
 
+  // ========================================
+  // Style Library System
+  // ========================================
+
+  const STYLES_STORAGE_KEY = 'rtm-106-styles-library';
+  let styleLibrary = [];
+  let nextStyleId = 1;
+  let pendingStyleToSave = null;
+  let editingStyleId = null;
+  let editingStyleWorkingCopy = null;
+  let isDraggingStyle = false;
+  let draggedStyleId = null;
+  let styleDropHighlightEl = null;
+
+  function loadStylesFromStorage() {
+    try {
+      const raw = localStorage.getItem(STYLES_STORAGE_KEY);
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      if (Array.isArray(data.styles)) {
+        styleLibrary = data.styles;
+        nextStyleId = data.nextStyleId || 1;
+      }
+    } catch (e) {
+      console.warn('Failed to load styles:', e);
+    }
+  }
+
+  function saveStylesToStorage() {
+    try {
+      localStorage.setItem(STYLES_STORAGE_KEY, JSON.stringify({
+        styles: styleLibrary,
+        nextStyleId: nextStyleId
+      }));
+    } catch (e) {
+      console.warn('Failed to save styles:', e);
+    }
+  }
+
+  function extractStyleFromShape(shape) {
+    if (!shape) return null;
+    return {
+      fill: JSON.parse(JSON.stringify(ensureFillStructure(shape.fill))),
+      stroke: shape.stroke || '#000000',
+      strokeWidth: shape.strokeWidth !== undefined ? shape.strokeWidth : 2,
+      opacity: shape.opacity !== undefined ? shape.opacity : 1,
+      effects: shape.effects ? JSON.parse(JSON.stringify(shape.effects)) : []
+    };
+  }
+
+  function applyStyleToShape(shape, styleData) {
+    if (!shape || !styleData) return false;
+    if (styleData.fill !== undefined) {
+      shape.fill = JSON.parse(JSON.stringify(styleData.fill));
+    }
+    if (styleData.stroke !== undefined) {
+      shape.stroke = styleData.stroke;
+    }
+    if (styleData.strokeWidth !== undefined) {
+      shape.strokeWidth = styleData.strokeWidth;
+    }
+    if (styleData.opacity !== undefined) {
+      shape.opacity = styleData.opacity;
+    }
+    if (styleData.effects !== undefined) {
+      shape.effects = JSON.parse(JSON.stringify(styleData.effects));
+    }
+    return true;
+  }
+
+  function applyStyleToSelectedShapes(styleData) {
+    const selected = getSelectedShapes();
+    if (selected.length === 0) {
+      showToast('Select one or more shapes first', 'warning');
+      return false;
+    }
+    pushHistory();
+    let count = 0;
+    for (const s of selected) {
+      if (isMaskShape(s)) continue;
+      if (s.type === 'motion-path') continue;
+      if (isComponentInstance(s)) continue;
+      applyStyleToShape(s, styleData);
+      count++;
+    }
+    if (count === 0) {
+      showToast('No applicable shapes selected', 'warning');
+      undo();
+      return false;
+    }
+    updateFillPanel();
+    updateEffectsPanel();
+    renderLayers();
+    render();
+    scheduleSave();
+    showToast('Applied style to ' + count + ' shape(s)', 'success');
+    return true;
+  }
+
+  function getSwatchColors(styleData) {
+    const result = [];
+    if (!styleData) return result;
+    const fill = ensureFillStructure(styleData.fill);
+    if (fill.type === 'solid') {
+      result.push(fill.color || '#ccc');
+    } else if ((fill.type === 'linear' || fill.type === 'radial') && fill.stops) {
+      for (const stop of fill.stops.slice(0, 3)) {
+        result.push(stop.color);
+      }
+    } else if (fill.type === 'pattern') {
+      result.push(fill.bgColor || '#fff');
+      result.push(fill.fgColor || '#000');
+    }
+    return result;
+  }
+
+  function buildStyleMetaText(styleData) {
+    if (!styleData) return '';
+    const parts = [];
+    const fill = ensureFillStructure(styleData.fill);
+    parts.push(fill.type);
+    if (styleData.strokeWidth > 0) {
+      parts.push(styleData.strokeWidth + 'px stroke');
+    }
+    if (styleData.effects && styleData.effects.length > 0) {
+      const active = styleData.effects.filter(e => e.enabled !== false);
+      if (active.length > 0) {
+        parts.push(active.length + ' fx');
+      }
+    }
+    if (styleData.opacity < 1) {
+      parts.push(Math.round(styleData.opacity * 100) + '%');
+    }
+    return parts.join(' · ');
+  }
+
+  function renderStyleSwatch(containerEl, styleData) {
+    const fill = ensureFillStructure(styleData.fill);
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = 72;
+    tempCanvas.height = 72;
+    const tctx = tempCanvas.getContext('2d');
+
+    const w = tempCanvas.width;
+    const h = tempCanvas.height;
+    const pad = 4;
+    const x = pad, y = pad, pw = w - pad * 2, ph = h - pad * 2;
+    const r = 8;
+
+    tctx.save();
+    tctx.beginPath();
+    tctx.moveTo(x + r, y);
+    tctx.lineTo(x + pw - r, y);
+    tctx.quadraticCurveTo(x + pw, y, x + pw, y + r);
+    tctx.lineTo(x + pw, y + ph - r);
+    tctx.quadraticCurveTo(x + pw, y + ph, x + pw - r, y + ph);
+    tctx.lineTo(x + r, y + ph);
+    tctx.quadraticCurveTo(x, y + ph, x, y + ph - r);
+    tctx.lineTo(x, y + r);
+    tctx.quadraticCurveTo(x, y, x + r, y);
+    tctx.closePath();
+    tctx.clip();
+
+    if (fill.type === 'solid') {
+      tctx.fillStyle = fill.color || '#ccc';
+    } else if (fill.type === 'linear') {
+      const grad = tctx.createLinearGradient(x, y, x + pw, y + ph);
+      const stops = fill.stops || [{ offset: 0, color: '#4d9fff' }, { offset: 1, color: '#e53935' }];
+      for (const s of stops) {
+        grad.addColorStop(Math.max(0, Math.min(1, s.offset)), s.color);
+      }
+      tctx.fillStyle = grad;
+    } else if (fill.type === 'radial') {
+      const grad = tctx.createRadialGradient(x + pw / 2, y + ph / 2, 2, x + pw / 2, y + ph / 2, pw / 2);
+      const stops = fill.stops || [{ offset: 0, color: '#4d9fff' }, { offset: 1, color: '#e53935' }];
+      for (const s of stops) {
+        grad.addColorStop(Math.max(0, Math.min(1, s.offset)), s.color);
+      }
+      tctx.fillStyle = grad;
+    } else if (fill.type === 'pattern') {
+      drawPatternTile(tctx, fill.pattern || 'diagonal', 24, fill.fgColor || '#000', fill.bgColor || '#fff');
+      const pattern = tctx.createPattern(tctx.canvas.createImageData(1,1), 'repeat');
+      tctx.fillStyle = fill.bgColor || '#fff';
+      tctx.fillRect(x, y, pw, ph);
+      const tmp2 = document.createElement('canvas');
+      tmp2.width = 24; tmp2.height = 24;
+      drawPatternTile(tmp2.getContext('2d'), fill.pattern || 'diagonal', 24, fill.fgColor || '#000', 'rgba(0,0,0,0)');
+      const scale = fill.scale || 1;
+      const rot = (fill.rotation || 0) * Math.PI / 180;
+      tctx.save();
+      tctx.translate(x + pw/2, y + ph/2);
+      tctx.rotate(rot);
+      tctx.scale(scale, scale);
+      const pat = tctx.createPattern(tmp2, 'repeat');
+      tctx.fillStyle = pat;
+      tctx.fillRect(-pw, -ph, pw * 2, ph * 2);
+      tctx.restore();
+    }
+
+    tctx.globalAlpha = styleData.opacity !== undefined ? styleData.opacity : 1;
+    tctx.fillRect(x, y, pw, ph);
+
+    if (styleData.strokeWidth > 0) {
+      tctx.strokeStyle = styleData.stroke || '#000';
+      tctx.lineWidth = Math.max(1, styleData.strokeWidth * 1.5);
+      tctx.globalAlpha = styleData.opacity !== undefined ? styleData.opacity : 1;
+      tctx.stroke();
+    }
+
+    tctx.restore();
+
+    containerEl.style.backgroundImage = 'url(' + tempCanvas.toDataURL() + ')';
+    containerEl.style.backgroundSize = 'cover';
+    containerEl.style.backgroundPosition = 'center';
+  }
+
+  function renderLargeStylePreview(containerEl, styleData) {
+    if (!containerEl) return;
+    while (containerEl.firstChild) containerEl.removeChild(containerEl.firstChild);
+    if (!styleData) return;
+
+    const w = containerEl.clientWidth || 280;
+    const h = containerEl.clientHeight || 120;
+    const cvs = document.createElement('canvas');
+    cvs.width = w * 2;
+    cvs.height = h * 2;
+    cvs.style.width = '100%';
+    cvs.style.height = '100%';
+    cvs.style.display = 'block';
+    containerEl.appendChild(cvs);
+    const tctx = cvs.getContext('2d');
+    tctx.scale(2, 2);
+
+    const pad = 12;
+    const x = pad, y = pad, pw = w - pad * 2, ph = h - pad * 2;
+    const r = 14;
+
+    const fill = ensureFillStructure(styleData.fill);
+
+    function drawRoundedRectPath() {
+      tctx.beginPath();
+      tctx.moveTo(x + r, y);
+      tctx.lineTo(x + pw - r, y);
+      tctx.quadraticCurveTo(x + pw, y, x + pw, y + r);
+      tctx.lineTo(x + pw, y + ph - r);
+      tctx.quadraticCurveTo(x + pw, y + ph, x + pw - r, y + ph);
+      tctx.lineTo(x + r, y + ph);
+      tctx.quadraticCurveTo(x, y + ph, x, y + ph - r);
+      tctx.lineTo(x, y + r);
+      tctx.quadraticCurveTo(x, y, x + r, y);
+      tctx.closePath();
+    }
+
+    const effects = (styleData.effects || []).filter(e => e.enabled !== false);
+    let tempCanvasForEffects = null;
+    let ctxForEffects = tctx;
+
+    if (effects.length > 0) {
+      tempCanvasForEffects = document.createElement('canvas');
+      tempCanvasForEffects.width = w * 2;
+      tempCanvasForEffects.height = h * 2;
+      ctxForEffects = tempCanvasForEffects.getContext('2d');
+      ctxForEffects.scale(2, 2);
+    }
+
+    ctxForEffects.save();
+    drawRoundedRectPath();
+    ctxForEffects.clip();
+
+    if (fill.type === 'solid') {
+      ctxForEffects.fillStyle = fill.color || '#ccc';
+    } else if (fill.type === 'linear') {
+      const grad = ctxForEffects.createLinearGradient(x, y + ph/2, x + pw, y + ph/2);
+      const stops = fill.stops || [{ offset: 0, color: '#4d9fff' }, { offset: 1, color: '#e53935' }];
+      for (const s of stops) {
+        grad.addColorStop(Math.max(0, Math.min(1, s.offset)), s.color);
+      }
+      ctxForEffects.fillStyle = grad;
+    } else if (fill.type === 'radial') {
+      const grad = ctxForEffects.createRadialGradient(x + pw / 2, y + ph / 2, 4, x + pw / 2, y + ph / 2, Math.max(pw, ph) / 2);
+      const stops = fill.stops || [{ offset: 0, color: '#4d9fff' }, { offset: 1, color: '#e53935' }];
+      for (const s of stops) {
+        grad.addColorStop(Math.max(0, Math.min(1, s.offset)), s.color);
+      }
+      ctxForEffects.fillStyle = grad;
+    } else if (fill.type === 'pattern') {
+      const tmpPat = document.createElement('canvas');
+      tmpPat.width = 40; tmpPat.height = 40;
+      drawPatternTile(tmpPat.getContext('2d'), fill.pattern || 'diagonal', 40, fill.fgColor || '#000', fill.bgColor || '#fff');
+      const scale = fill.scale || 1;
+      const rot = (fill.rotation || 0) * Math.PI / 180;
+      ctxForEffects.save();
+      ctxForEffects.translate(x + pw/2, y + ph/2);
+      ctxForEffects.rotate(rot);
+      ctxForEffects.scale(scale, scale);
+      const pat = ctxForEffects.createPattern(tmpPat, 'repeat');
+      ctxForEffects.fillStyle = pat;
+      ctxForEffects.fillRect(-pw * 2, -ph * 2, pw * 4, ph * 4);
+      ctxForEffects.restore();
+    }
+
+    if (fill.type !== 'pattern') {
+      ctxForEffects.fillRect(x, y, pw, ph);
+    }
+    ctxForEffects.restore();
+
+    if (styleData.strokeWidth > 0) {
+      ctxForEffects.save();
+      drawRoundedRectPath();
+      ctxForEffects.strokeStyle = styleData.stroke || '#000';
+      ctxForEffects.lineWidth = styleData.strokeWidth;
+      ctxForEffects.stroke();
+      ctxForEffects.restore();
+    }
+
+    if (tempCanvasForEffects) {
+      const filterStr = buildCanvasFilterString(effects);
+      if (filterStr) {
+        tctx.filter = filterStr;
+      }
+      tctx.drawImage(tempCanvasForEffects, 0, 0);
+      tctx.filter = 'none';
+    }
+  }
+
+  function renderStylesList() {
+    const listEl = document.getElementById('styles-list');
+    const emptyEl = document.getElementById('styles-empty');
+    if (!listEl || !emptyEl) return;
+
+    listEl.innerHTML = '';
+
+    if (styleLibrary.length === 0) {
+      emptyEl.style.display = '';
+      listEl.style.display = 'none';
+      return;
+    }
+
+    emptyEl.style.display = 'none';
+    listEl.style.display = '';
+
+    for (const style of styleLibrary) {
+      const item = document.createElement('div');
+      item.className = 'style-item';
+      item.dataset.styleId = style.id;
+      item.title = 'Click: apply to selection · Double-click: edit · Drag onto shape';
+
+      const swatch = document.createElement('div');
+      swatch.className = 'style-swatch';
+      const swatchInner = document.createElement('div');
+      swatchInner.className = 'style-swatch-inner';
+      renderStyleSwatch(swatchInner, style.data);
+      swatch.appendChild(swatchInner);
+
+      const body = document.createElement('div');
+      body.className = 'style-item-body';
+      const name = document.createElement('div');
+      name.className = 'style-item-name';
+      name.textContent = style.name;
+      const meta = document.createElement('div');
+      meta.className = 'style-item-meta';
+      meta.textContent = buildStyleMetaText(style.data);
+      body.appendChild(name);
+      body.appendChild(meta);
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'style-item-delete';
+      delBtn.innerHTML = '×';
+      delBtn.title = 'Delete style';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (confirm('Delete style "' + style.name + '"?')) {
+          deleteStyle(style.id);
+        }
+      });
+
+      item.appendChild(swatch);
+      item.appendChild(body);
+      item.appendChild(delBtn);
+
+      item.addEventListener('click', () => {
+        const styleData = styleLibrary.find(s => s.id === style.id);
+        if (styleData) applyStyleToSelectedShapes(styleData.data);
+      });
+
+      item.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        openEditStyleDialog(style.id);
+      });
+
+      item.draggable = true;
+      item.addEventListener('dragstart', (e) => {
+        isDraggingStyle = true;
+        draggedStyleId = style.id;
+        item.style.opacity = '0.5';
+        e.dataTransfer.effectAllowed = 'copy';
+        e.dataTransfer.setData('application/x-rtm-style', style.id.toString());
+        try { e.dataTransfer.setDragImage(swatch, 18, 18); } catch(err) {}
+        canvas.classList.add('style-drop-hover');
+      });
+
+      item.addEventListener('dragend', () => {
+        isDraggingStyle = false;
+        draggedStyleId = null;
+        item.style.opacity = '1';
+        canvas.classList.remove('style-drop-hover');
+        clearStyleDropHighlight();
+        document.querySelectorAll('.style-item.drag-over').forEach(el => el.classList.remove('drag-over'));
+      });
+
+      listEl.appendChild(item);
+    }
+  }
+
+  function deleteStyle(styleId) {
+    const idx = styleLibrary.findIndex(s => s.id === styleId);
+    if (idx === -1) return;
+    styleLibrary.splice(idx, 1);
+    saveStylesToStorage();
+    renderStylesList();
+    showToast('Style deleted', 'success');
+  }
+
+  function addStyle(name, styleData) {
+    const style = {
+      id: nextStyleId++,
+      name: name || ('Style ' + nextStyleId),
+      createdAt: Date.now(),
+      data: JSON.parse(JSON.stringify(styleData))
+    };
+    styleLibrary.push(style);
+    saveStylesToStorage();
+    renderStylesList();
+    return style;
+  }
+
+  function updateStyle(styleId, updates) {
+    const style = styleLibrary.find(s => s.id === styleId);
+    if (!style) return false;
+    if (updates.name !== undefined) style.name = updates.name;
+    if (updates.data !== undefined) style.data = JSON.parse(JSON.stringify(updates.data));
+    style.updatedAt = Date.now();
+    saveStylesToStorage();
+    renderStylesList();
+    return true;
+  }
+
+  function openSaveStyleDialog() {
+    const selected = getSelectedShapes();
+    if (selected.length === 0) {
+      showToast('Select a shape first', 'warning');
+      return;
+    }
+    let validShape = null;
+    for (const s of selected) {
+      if (!isMaskShape(s) && s.type !== 'motion-path' && !isComponentInstance(s)) {
+        validShape = s;
+        break;
+      }
+    }
+    if (!validShape) {
+      showToast('Selected shapes are not applicable', 'warning');
+      return;
+    }
+
+    pendingStyleToSave = extractStyleFromShape(validShape);
+
+    const dialog = document.getElementById('save-style-dialog');
+    const nameInput = document.getElementById('save-style-name-input');
+    const preview = document.getElementById('save-style-preview');
+
+    nameInput.value = 'Style ' + nextStyleId;
+    setTimeout(() => {
+      renderLargeStylePreview(preview, pendingStyleToSave);
+      nameInput.focus();
+      nameInput.select();
+    }, 30);
+
+    dialog.classList.remove('hidden');
+  }
+
+  function closeSaveStyleDialog() {
+    const dialog = document.getElementById('save-style-dialog');
+    dialog.classList.add('hidden');
+    pendingStyleToSave = null;
+  }
+
+  function initSaveStyleDialog() {
+    const dialog = document.getElementById('save-style-dialog');
+    const closeBtn = document.getElementById('save-style-close');
+    const cancelBtn = document.getElementById('save-style-cancel');
+    const okBtn = document.getElementById('save-style-ok');
+    const nameInput = document.getElementById('save-style-name-input');
+
+    function close() { closeSaveStyleDialog(); }
+    function submit() {
+      const name = nameInput.value.trim();
+      if (!name) {
+        showToast('Please enter a style name', 'warning');
+        return;
+      }
+      if (!pendingStyleToSave) return;
+      addStyle(name, pendingStyleToSave);
+      showToast('Style saved: ' + name, 'success');
+      close();
+    }
+
+    closeBtn.addEventListener('click', close);
+    cancelBtn.addEventListener('click', close);
+    okBtn.addEventListener('click', submit);
+    nameInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submit();
+      else if (e.key === 'Escape') close();
+    });
+  }
+
+  function openEditStyleDialog(styleId) {
+    const style = styleLibrary.find(s => s.id === styleId);
+    if (!style) return;
+    editingStyleId = styleId;
+    editingStyleWorkingCopy = {
+      name: style.name,
+      data: JSON.parse(JSON.stringify(style.data))
+    };
+    renderEditStyleDialog();
+    const dialog = document.getElementById('edit-style-dialog');
+    dialog.classList.remove('hidden');
+  }
+
+  function closeEditStyleDialog() {
+    const dialog = document.getElementById('edit-style-dialog');
+    dialog.classList.add('hidden');
+    editingStyleId = null;
+    editingStyleWorkingCopy = null;
+  }
+
+  function renderEditStyleDialog() {
+    if (!editingStyleWorkingCopy) return;
+    const data = editingStyleWorkingCopy.data;
+    document.getElementById('edit-style-name').value = editingStyleWorkingCopy.name;
+
+    const fillTypeEl = document.getElementById('edit-style-fill-type');
+    const fill = ensureFillStructure(data.fill);
+    fillTypeEl.value = fill.type;
+
+    const solidSection = document.getElementById('edit-style-fill-solid');
+    const gradientSection = document.getElementById('edit-style-fill-gradient');
+    const patternSection = document.getElementById('edit-style-fill-pattern');
+    solidSection.classList.add('hidden');
+    gradientSection.classList.add('hidden');
+    patternSection.classList.add('hidden');
+
+    if (fill.type === 'solid') {
+      solidSection.classList.remove('hidden');
+      document.getElementById('edit-style-fill-color').value = fill.color || '#4d9fff';
+    } else if (fill.type === 'linear' || fill.type === 'radial') {
+      gradientSection.classList.remove('hidden');
+      const barEl = document.getElementById('edit-style-stops-bar');
+      const listEl = document.getElementById('edit-style-stops-list');
+      renderStopsBar(barEl, fill.stops);
+      renderStopsListForEditStyle(listEl, fill.stops);
+    } else if (fill.type === 'pattern') {
+      patternSection.classList.remove('hidden');
+      document.querySelectorAll('#edit-style-pattern-grid .pattern-item').forEach(item => {
+        item.classList.toggle('selected', item.dataset.pattern === fill.pattern);
+      });
+      document.getElementById('edit-style-pattern-scale').value = fill.scale || 1;
+      document.getElementById('edit-style-pattern-scale-value').textContent = (fill.scale || 1).toFixed(1) + 'x';
+      document.getElementById('edit-style-pattern-rotation').value = fill.rotation || 0;
+      document.getElementById('edit-style-pattern-fg').value = fill.fgColor || '#000000';
+      document.getElementById('edit-style-pattern-bg').value = fill.bgColor || '#ffffff';
+    }
+
+    document.getElementById('edit-style-stroke-color').value = data.stroke || '#000000';
+    document.getElementById('edit-style-stroke-width').value = data.strokeWidth !== undefined ? data.strokeWidth : 2;
+
+    const opacity = data.opacity !== undefined ? data.opacity : 1;
+    document.getElementById('edit-style-opacity').value = opacity;
+    document.getElementById('edit-style-opacity-value').textContent = Math.round(opacity * 100) + '%';
+
+    renderEditStyleEffectsList();
+    renderEditStylePreview();
+  }
+
+  function renderStopsListForEditStyle(listEl, stops) {
+    listEl.innerHTML = '';
+    stops.forEach(function(stop, idx) {
+      const row = document.createElement('div');
+      row.className = 'stop-row';
+
+      const colorInput = document.createElement('input');
+      colorInput.type = 'color';
+      colorInput.value = stop.color;
+      colorInput.className = 'stop-color';
+      colorInput.addEventListener('input', function() {
+        stop.color = colorInput.value;
+        editingStyleWorkingCopy.data.fill.stops = stops;
+        renderStopsBar(document.getElementById('edit-style-stops-bar'), stops);
+        renderEditStylePreview();
+        saveStylesToStorage();
+      });
+
+      const offsetInput = document.createElement('input');
+      offsetInput.type = 'number';
+      offsetInput.className = 'stop-offset';
+      offsetInput.min = 0;
+      offsetInput.max = 1;
+      offsetInput.step = 0.01;
+      offsetInput.value = stop.offset;
+      offsetInput.addEventListener('input', function() {
+        let val = parseFloat(offsetInput.value);
+        if (isNaN(val)) val = 0;
+        val = Math.max(0, Math.min(1, val));
+        stop.offset = val;
+        stops.sort(function(a, b) { return a.offset - b.offset; });
+        editingStyleWorkingCopy.data.fill.stops = stops;
+        renderEditStyleDialog();
+      });
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'mini-btn';
+      delBtn.textContent = '×';
+      delBtn.title = 'Delete stop';
+      delBtn.addEventListener('click', function() {
+        if (stops.length <= 2) {
+          showToast('Need at least 2 color stops', 'warning');
+          return;
+        }
+        stops.splice(idx, 1);
+        editingStyleWorkingCopy.data.fill.stops = stops;
+        renderEditStyleDialog();
+      });
+
+      row.appendChild(colorInput);
+      row.appendChild(offsetInput);
+      row.appendChild(delBtn);
+      listEl.appendChild(row);
+    });
+  }
+
+  function renderEditStyleEffectsList() {
+    const list = document.getElementById('edit-style-effects-list');
+    if (!list || !editingStyleWorkingCopy) return;
+    list.innerHTML = '';
+    const effects = editingStyleWorkingCopy.data.effects || [];
+    if (effects.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'effects-empty';
+      empty.textContent = 'No effects applied';
+      list.appendChild(empty);
+      return;
+    }
+
+    effects.forEach(function(effect, idx) {
+      const item = document.createElement('div');
+      item.className = 'effect-item' + (effect.enabled === false ? ' disabled' : '');
+
+      const header = document.createElement('div');
+      header.className = 'effect-item-header';
+
+      const toggle = document.createElement('input');
+      toggle.type = 'checkbox';
+      toggle.className = 'effect-toggle';
+      toggle.checked = effect.enabled !== false;
+      toggle.addEventListener('change', function() {
+        effect.enabled = toggle.checked;
+        renderEditStyleDialog();
+      });
+
+      const name = document.createElement('span');
+      name.className = 'effect-name';
+      name.textContent = EFFECT_LABELS[effect.type] || effect.type;
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'effect-delete';
+      delBtn.textContent = '×';
+      delBtn.title = 'Delete effect';
+      delBtn.addEventListener('click', function() {
+        effects.splice(idx, 1);
+        editingStyleWorkingCopy.data.effects = effects;
+        renderEditStyleDialog();
+      });
+
+      header.appendChild(toggle);
+      header.appendChild(name);
+      header.appendChild(delBtn);
+      item.appendChild(header);
+
+      const params = document.createElement('div');
+      params.className = 'effect-params';
+
+      function addParamRow(label, key, min, max, step, unit, inputType) {
+        const row = document.createElement('div');
+        row.className = 'effect-param-row';
+        const lbl = document.createElement('label');
+        lbl.textContent = label;
+        row.appendChild(lbl);
+        if (inputType === 'color') {
+          const input = document.createElement('input');
+          input.type = 'color';
+          input.value = effect.params[key] || '#000000';
+          input.addEventListener('input', function() {
+            effect.params[key] = input.value;
+            renderEditStylePreview();
+          });
+          row.appendChild(input);
+        } else {
+          const range = document.createElement('input');
+          range.type = 'range';
+          range.min = min; range.max = max; range.step = step;
+          range.value = effect.params[key];
+          row.appendChild(range);
+          const numInput = document.createElement('input');
+          numInput.type = 'number';
+          numInput.min = min; numInput.max = max; numInput.step = step;
+          numInput.value = effect.params[key];
+          row.appendChild(numInput);
+          if (unit) {
+            const unitSpan = document.createElement('span');
+            unitSpan.className = 'unit';
+            unitSpan.textContent = unit;
+            row.appendChild(unitSpan);
+          }
+          range.addEventListener('input', function() {
+            effect.params[key] = parseFloat(range.value);
+            numInput.value = range.value;
+            renderEditStylePreview();
+          });
+          numInput.addEventListener('input', function() {
+            let val = parseFloat(numInput.value);
+            if (isNaN(val)) val = parseFloat(min);
+            val = Math.max(parseFloat(min), Math.min(parseFloat(max), val));
+            effect.params[key] = val;
+            range.value = val;
+            renderEditStylePreview();
+          });
+        }
+        params.appendChild(row);
+      }
+
+      switch (effect.type) {
+        case 'gaussian-blur': addParamRow('R', 'radius', 0, 50, 0.5, 'px', 'range'); break;
+        case 'drop-shadow':
+          addParamRow('X', 'offsetX', -50, 50, 1, 'px', 'range');
+          addParamRow('Y', 'offsetY', -50, 50, 1, 'px', 'range');
+          addParamRow('Blur', 'blurRadius', 0, 50, 0.5, 'px', 'range');
+          addParamRow('Color', 'color', 0, 0, 0, '', 'color');
+          break;
+        case 'inner-glow':
+          addParamRow('Spread', 'spread', 0, 50, 0.5, 'px', 'range');
+          addParamRow('Color', 'color', 0, 0, 0, '', 'color');
+          break;
+        case 'hue-rotate': addParamRow('Angle', 'angle', 0, 360, 1, '°', 'range'); break;
+        case 'brightness-contrast':
+          addParamRow('B', 'brightness', -100, 100, 1, '', 'range');
+          addParamRow('C', 'contrast', -100, 100, 1, '', 'range');
+          break;
+      }
+
+      item.appendChild(params);
+      list.appendChild(item);
+    });
+  }
+
+  function renderEditStylePreview() {
+    if (!editingStyleWorkingCopy) return;
+    const preview = document.getElementById('edit-style-preview');
+    renderLargeStylePreview(preview, editingStyleWorkingCopy.data);
+  }
+
+  function initEditStyleDialog() {
+    const dialog = document.getElementById('edit-style-dialog');
+    const closeBtn = document.getElementById('edit-style-close');
+    const cancelBtn = document.getElementById('edit-style-cancel');
+    const deleteBtn = document.getElementById('edit-style-delete');
+    const okBtn = document.getElementById('edit-style-ok');
+
+    closeBtn.addEventListener('click', closeEditStyleDialog);
+    cancelBtn.addEventListener('click', closeEditStyleDialog);
+
+    deleteBtn.addEventListener('click', () => {
+      if (editingStyleId === null) return;
+      const style = styleLibrary.find(s => s.id === editingStyleId);
+      if (!style) return;
+      if (confirm('Delete style "' + style.name + '"?')) {
+        deleteStyle(editingStyleId);
+        closeEditStyleDialog();
+      }
+    });
+
+    okBtn.addEventListener('click', () => {
+      if (editingStyleId === null || !editingStyleWorkingCopy) return;
+      const name = document.getElementById('edit-style-name').value.trim();
+      if (!name) {
+        showToast('Please enter a style name', 'warning');
+        return;
+      }
+      updateStyle(editingStyleId, {
+        name: name,
+        data: editingStyleWorkingCopy.data
+      });
+      showToast('Style updated', 'success');
+      closeEditStyleDialog();
+    });
+
+    document.getElementById('edit-style-name').addEventListener('input', (e) => {
+      if (editingStyleWorkingCopy) editingStyleWorkingCopy.name = e.target.value;
+    });
+
+    document.getElementById('edit-style-fill-type').addEventListener('change', (e) => {
+      if (!editingStyleWorkingCopy) return;
+      const newType = e.target.value;
+      const curFill = ensureFillStructure(editingStyleWorkingCopy.data.fill);
+      if (newType === 'solid') {
+        const existingColor = getFillDisplayColor(curFill);
+        editingStyleWorkingCopy.data.fill = { type: 'solid', color: existingColor };
+      } else if (newType === 'linear') {
+        editingStyleWorkingCopy.data.fill = {
+          type: 'linear', x1: 0, y1: 50, x2: 100, y2: 50,
+          stops: [{ offset: 0, color: '#4d9fff' }, { offset: 1, color: '#e53935' }]
+        };
+      } else if (newType === 'radial') {
+        editingStyleWorkingCopy.data.fill = {
+          type: 'radial', cx: 50, cy: 50, r: 50,
+          stops: [{ offset: 0, color: '#4d9fff' }, { offset: 1, color: '#e53935' }]
+        };
+      } else if (newType === 'pattern') {
+        editingStyleWorkingCopy.data.fill = createDefaultPattern();
+      }
+      renderEditStyleDialog();
+    });
+
+    document.getElementById('edit-style-fill-color').addEventListener('input', (e) => {
+      if (!editingStyleWorkingCopy) return;
+      const fill = ensureFillStructure(editingStyleWorkingCopy.data.fill);
+      if (fill.type === 'solid') {
+        fill.color = e.target.value;
+        editingStyleWorkingCopy.data.fill = fill;
+        renderEditStylePreview();
+      }
+    });
+
+    document.getElementById('edit-style-add-stop').addEventListener('click', () => {
+      if (!editingStyleWorkingCopy) return;
+      const fill = ensureFillStructure(editingStyleWorkingCopy.data.fill);
+      if (fill.type !== 'linear' && fill.type !== 'radial') return;
+      if (fill.stops.length >= 8) {
+        showToast('Maximum 8 color stops allowed', 'warning');
+        return;
+      }
+      fill.stops.push({ offset: 0.5, color: '#ffffff' });
+      fill.stops.sort((a, b) => a.offset - b.offset);
+      editingStyleWorkingCopy.data.fill = fill;
+      renderEditStyleDialog();
+    });
+
+    document.querySelectorAll('#edit-style-pattern-grid .pattern-item').forEach(item => {
+      item.addEventListener('click', () => {
+        if (!editingStyleWorkingCopy) return;
+        const fill = ensureFillStructure(editingStyleWorkingCopy.data.fill);
+        if (fill.type !== 'pattern') return;
+        fill.pattern = item.dataset.pattern;
+        editingStyleWorkingCopy.data.fill = fill;
+        renderEditStyleDialog();
+      });
+    });
+
+    document.getElementById('edit-style-pattern-scale').addEventListener('input', (e) => {
+      if (!editingStyleWorkingCopy) return;
+      const fill = ensureFillStructure(editingStyleWorkingCopy.data.fill);
+      if (fill.type !== 'pattern') return;
+      const val = parseFloat(e.target.value);
+      fill.scale = val;
+      document.getElementById('edit-style-pattern-scale-value').textContent = val.toFixed(1) + 'x';
+      editingStyleWorkingCopy.data.fill = fill;
+      renderEditStylePreview();
+    });
+
+    document.getElementById('edit-style-pattern-rotation').addEventListener('input', (e) => {
+      if (!editingStyleWorkingCopy) return;
+      const fill = ensureFillStructure(editingStyleWorkingCopy.data.fill);
+      if (fill.type !== 'pattern') return;
+      let val = parseFloat(e.target.value);
+      if (isNaN(val)) val = 0;
+      val = ((val % 360) + 360) % 360;
+      fill.rotation = val;
+      editingStyleWorkingCopy.data.fill = fill;
+      renderEditStylePreview();
+    });
+
+    document.getElementById('edit-style-pattern-fg').addEventListener('input', (e) => {
+      if (!editingStyleWorkingCopy) return;
+      const fill = ensureFillStructure(editingStyleWorkingCopy.data.fill);
+      if (fill.type !== 'pattern') return;
+      fill.fgColor = e.target.value;
+      editingStyleWorkingCopy.data.fill = fill;
+      renderEditStylePreview();
+    });
+
+    document.getElementById('edit-style-pattern-bg').addEventListener('input', (e) => {
+      if (!editingStyleWorkingCopy) return;
+      const fill = ensureFillStructure(editingStyleWorkingCopy.data.fill);
+      if (fill.type !== 'pattern') return;
+      fill.bgColor = e.target.value;
+      editingStyleWorkingCopy.data.fill = fill;
+      renderEditStylePreview();
+    });
+
+    document.getElementById('edit-style-stroke-color').addEventListener('input', (e) => {
+      if (!editingStyleWorkingCopy) return;
+      editingStyleWorkingCopy.data.stroke = e.target.value;
+      renderEditStylePreview();
+    });
+
+    document.getElementById('edit-style-stroke-width').addEventListener('input', (e) => {
+      if (!editingStyleWorkingCopy) return;
+      let val = parseFloat(e.target.value);
+      if (isNaN(val)) val = 0;
+      val = Math.max(0, Math.min(100, val));
+      editingStyleWorkingCopy.data.strokeWidth = val;
+      renderEditStylePreview();
+    });
+
+    document.getElementById('edit-style-opacity').addEventListener('input', (e) => {
+      if (!editingStyleWorkingCopy) return;
+      let val = parseFloat(e.target.value);
+      if (isNaN(val)) val = 1;
+      val = Math.max(0, Math.min(1, val));
+      editingStyleWorkingCopy.data.opacity = val;
+      document.getElementById('edit-style-opacity-value').textContent = Math.round(val * 100) + '%';
+      renderEditStylePreview();
+    });
+
+    const addEffectEl = document.getElementById('edit-style-add-effect');
+    if (addEffectEl) {
+      addEffectEl.addEventListener('change', () => {
+        const type = addEffectEl.value;
+        if (!type) return;
+        if (!editingStyleWorkingCopy) return;
+        const effectId = 'fx_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+        const newEffect = {
+          id: effectId,
+          type: type,
+          enabled: true,
+          params: JSON.parse(JSON.stringify(EFFECT_DEFAULTS[type]))
+        };
+        if (!editingStyleWorkingCopy.data.effects) {
+          editingStyleWorkingCopy.data.effects = [];
+        }
+        editingStyleWorkingCopy.data.effects.push(newEffect);
+        addEffectEl.value = '';
+        renderEditStyleDialog();
+      });
+    }
+  }
+
+  function clearStyleDropHighlight() {
+    if (styleDropHighlightEl && styleDropHighlightEl.parentNode) {
+      styleDropHighlightEl.parentNode.removeChild(styleDropHighlightEl);
+    }
+    styleDropHighlightEl = null;
+  }
+
+  function showStyleDropHighlight(shapeScreenBounds) {
+    clearStyleDropHighlight();
+    if (!shapeScreenBounds) return;
+    const el = document.createElement('div');
+    el.className = 'style-drop-highlight';
+    el.style.left = shapeScreenBounds.x + 'px';
+    el.style.top = shapeScreenBounds.y + 'px';
+    el.style.width = shapeScreenBounds.w + 'px';
+    el.style.height = shapeScreenBounds.h + 'px';
+    document.body.appendChild(el);
+    styleDropHighlightEl = el;
+  }
+
+  function worldToScreen(wx, wy) {
+    return {
+      x: (wx - viewport.x) * viewport.scale + window.innerWidth / 2,
+      y: (wy - viewport.y) * viewport.scale + window.innerHeight / 2
+    };
+  }
+
+  function getShapeScreenBounds(shape) {
+    if (!shape) return null;
+    let pts;
+    if (isComponentInstance(shape)) {
+      const expanded = getInstanceExpandedShapes(shape);
+      pts = [];
+      for (const es of expanded) pts = pts.concat(es.points);
+    } else {
+      pts = worldPointsOf(shape);
+      if (shape.deformation) {
+        pts = applyDeformationToPoints(shape, pts);
+      }
+    }
+    if (pts.length === 0) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of pts) {
+      const s = worldToScreen(p.x, p.y);
+      if (s.x < minX) minX = s.x;
+      if (s.y < minY) minY = s.y;
+      if (s.x > maxX) maxX = s.x;
+      if (s.y > maxY) maxY = s.y;
+    }
+    const pad = 4;
+    return { x: minX - pad, y: minY - pad, w: (maxX - minX) + pad * 2, h: (maxY - minY) + pad * 2 };
+  }
+
+  function findShapeAtScreenPoint(sx, sy) {
+    const wp = screenToWorld(sx, sy);
+    for (let i = shapes.length - 1; i >= 0; i--) {
+      const s = shapes[i];
+      if (!s.visible || s.locked) continue;
+      if (isMaskShape(s)) continue;
+      if (s.type === 'motion-path') continue;
+      if (isComponentInstance(s)) {
+        if (hitTestInstance(wp.x, wp.y, s)) return s;
+      } else {
+        let pts = worldPointsOf(s);
+        if (s.deformation) pts = applyDeformationToPoints(s, pts);
+        if (!pointInPolygonOrOnEdge(wp, pts)) continue;
+        const holes = worldHolesOf(s);
+        let inHole = false;
+        for (const hole of holes) {
+          if (pointInPolygonOrOnEdge(wp, hole)) { inHole = true; break; }
+        }
+        if (!inHole) return s;
+      }
+    }
+    return null;
+  }
+
+  function initStyleDragAndDropOnCanvas() {
+    let lastHoveredShape = null;
+
+    canvas.addEventListener('dragover', (e) => {
+      if (!isDraggingStyle) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      const sx = e.clientX;
+      const sy = e.clientY;
+      const hovered = findShapeAtScreenPoint(sx, sy);
+      if (hovered !== lastHoveredShape) {
+        lastHoveredShape = hovered;
+        if (hovered) {
+          const bounds = getShapeScreenBounds(hovered);
+          showStyleDropHighlight(bounds);
+        } else {
+          clearStyleDropHighlight();
+        }
+      }
+    });
+
+    canvas.addEventListener('dragleave', (e) => {
+      if (!isDraggingStyle) return;
+      const rect = canvas.getBoundingClientRect();
+      if (e.clientX < rect.left || e.clientX > rect.right ||
+          e.clientY < rect.top || e.clientY > rect.bottom) {
+        lastHoveredShape = null;
+        clearStyleDropHighlight();
+      }
+    });
+
+    canvas.addEventListener('drop', (e) => {
+      if (!isDraggingStyle) return;
+      e.preventDefault();
+      const styleId = draggedStyleId;
+      isDraggingStyle = false;
+      draggedStyleId = null;
+      canvas.classList.remove('style-drop-hover');
+      clearStyleDropHighlight();
+      lastHoveredShape = null;
+
+      if (!styleId) return;
+      const style = styleLibrary.find(s => s.id === styleId);
+      if (!style) return;
+
+      const sx = e.clientX;
+      const sy = e.clientY;
+      const targetShape = findShapeAtScreenPoint(sx, sy);
+      if (!targetShape) {
+        showToast('Drop onto a shape to apply style', 'info');
+        return;
+      }
+      if (isComponentInstance(targetShape) || targetShape.type === 'motion-path') {
+        showToast('Cannot apply style to this type of shape', 'warning');
+        return;
+      }
+
+      pushHistory();
+      applyStyleToShape(targetShape, style.data);
+      updateFillPanel();
+      updateEffectsPanel();
+      renderLayers();
+      render();
+      scheduleSave();
+      showToast('Applied "' + style.name + '" to shape', 'success');
+    });
+  }
+
+  function exportStylesToJSON() {
+    if (styleLibrary.length === 0) {
+      showToast('No styles to export', 'warning');
+      return;
+    }
+    const exportData = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      count: styleLibrary.length,
+      styles: styleLibrary
+    };
+    const json = JSON.stringify(exportData, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'styles-' + new Date().toISOString().slice(0, 10) + '.json';
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('Exported ' + styleLibrary.length + ' style(s)', 'success');
+  }
+
+  function importStylesFromJSON(data) {
+    if (!data || !Array.isArray(data.styles)) {
+      showToast('Invalid styles file', 'error');
+      return false;
+    }
+    let imported = 0;
+    for (const s of data.styles) {
+      if (!s || !s.data) continue;
+      const style = {
+        id: nextStyleId++,
+        name: s.name || ('Imported Style ' + nextStyleId),
+        createdAt: s.createdAt || Date.now(),
+        updatedAt: Date.now(),
+        data: JSON.parse(JSON.stringify(s.data))
+      };
+      styleLibrary.push(style);
+      imported++;
+    }
+    if (imported > 0) {
+      saveStylesToStorage();
+      renderStylesList();
+      showToast('Imported ' + imported + ' style(s)', 'success');
+      return true;
+    } else {
+      showToast('No valid styles found in file', 'warning');
+      return false;
+    }
+  }
+
+  function initStylesImportExport() {
+    const importBtn = document.getElementById('import-styles-btn');
+    const exportBtn = document.getElementById('export-styles-btn');
+    const fileInput = document.getElementById('styles-import-file');
+
+    if (exportBtn) {
+      exportBtn.addEventListener('click', exportStylesToJSON);
+    }
+
+    if (importBtn && fileInput) {
+      importBtn.addEventListener('click', () => fileInput.click());
+      fileInput.addEventListener('change', (e) => {
+        const file = e.target.files && e.target.files[0];
+        fileInput.value = '';
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          try {
+            const data = JSON.parse(ev.target.result);
+            importStylesFromJSON(data);
+          } catch (err) {
+            console.warn('Import parse error:', err);
+            showToast('Failed to parse JSON file', 'error');
+          }
+        };
+        reader.onerror = () => {
+          showToast('Failed to read file', 'error');
+        };
+        reader.readAsText(file);
+      });
+    }
+  }
+
+  function initStylesSystem() {
+    loadStylesFromStorage();
+    renderStylesList();
+    initSaveStyleDialog();
+    initEditStyleDialog();
+    initStylesImportExport();
+    initStyleDragAndDropOnCanvas();
+
+    const saveBtn = document.getElementById('save-style-btn');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', openSaveStyleDialog);
+    }
+
+    setTimeout(() => {
+      const patternGrid = document.getElementById('edit-style-pattern-grid');
+      if (patternGrid) renderPatternPreviews();
+    }, 50);
+  }
+
+  initStylesSystem();
+
 })();

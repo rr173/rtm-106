@@ -560,6 +560,31 @@
   <div id="layers-list"></div>
 </div>
 
+<div id="styles-panel">
+  <div class="panel-header">
+    <span>Styles</span>
+    <div class="panel-header-actions">
+      <button id="save-style-btn" class="mini-btn" title="Save current selection as style">
+        <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm1-11H5V5h8v3z"/></svg>
+        Save
+      </button>
+      <button id="import-styles-btn" class="mini-btn" title="Import styles from JSON">
+        <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z"/></svg>
+      </button>
+      <button id="export-styles-btn" class="mini-btn" title="Export styles to JSON">
+        <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M9 3v6H5l7 7 7-7h-4V3H9zm-4 16h14v2H5z"/></svg>
+      </button>
+    </div>
+  </div>
+  <div id="styles-list"></div>
+  <div id="styles-empty" class="empty-list">
+    <svg viewBox="0 0 24 24" width="36" height="36"><path fill="none" stroke="#999" stroke-width="1.5" d="M12 2l3 7h7l-5.5 4 2 7-6.5-4.5L5.5 20l2-7L2 9h7z"/></svg>
+    <div class="empty-text">No saved styles yet.<br/>Select a shape and click "Save" to create one.
+    </div>
+  </div>
+  <input type="file" id="styles-import-file" accept=".json" style="display:none"/>
+</div>
+
 <div id="pixel-check-panel" class="hidden">
   <div class="panel-header">
     <span>Pixel Alignment</span>
@@ -996,6 +1021,151 @@
     <div class="modal-footer">
       <button class="modal-btn" id="snapshot-name-cancel">Cancel</button>
       <button class="modal-btn primary" id="snapshot-name-ok">Create</button>
+    </div>
+  </div>
+</div>
+
+<div id="save-style-dialog" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header">
+      <span>Save Style</span>
+      <button class="modal-close" id="save-style-close">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-row">
+        <label>Style Name:</label>
+        <input type="text" id="save-style-name-input" placeholder="e.g. Blue Button" />
+      </div>
+      <div class="style-preview-row">
+        <div class="style-preview-large" id="save-style-preview"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="modal-btn" id="save-style-cancel">Cancel</button>
+      <button class="modal-btn primary" id="save-style-ok">Save Style</button>
+    </div>
+  </div>
+</div>
+
+<div id="edit-style-dialog" class="modal hidden">
+  <div class="modal-content" style="width: 560px;">
+    <div class="modal-header">
+      <span>Edit Style</span>
+      <button class="modal-close" id="edit-style-close">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-row">
+        <label>Name:</label>
+        <input type="text" id="edit-style-name" />
+      </div>
+      <div class="edit-style-section">
+        <div class="edit-style-section-title">Fill</div>
+        <div class="form-row">
+          <label>Type:</label>
+          <select id="edit-style-fill-type">
+            <option value="solid">Solid Color</option>
+            <option value="linear">Linear Gradient</option>
+            <option value="radial">Radial Gradient</option>
+            <option value="pattern">Pattern</option>
+          </select>
+        </div>
+        <div id="edit-style-fill-solid" class="edit-style-subsection">
+          <div class="form-row">
+            <label>Color:</label>
+            <input type="color" id="edit-style-fill-color" value="#4d9fff" />
+          </div>
+        </div>
+        <div id="edit-style-fill-gradient" class="edit-style-subsection hidden">
+          <div class="form-row">
+            <label>Stops:</label>
+            <div class="gradient-stops-bar" id="edit-style-stops-bar"></div>
+          </div>
+          <div id="edit-style-stops-list" class="stops-list"></div>
+          <div class="form-row">
+            <button class="mini-btn fill-btn" id="edit-style-add-stop" title="Add color stop">+ Add Stop</button>
+          </div>
+        </div>
+        <div id="edit-style-fill-pattern" class="edit-style-subsection hidden">
+          <div class="pattern-grid" id="edit-style-pattern-grid">
+            <div class="pattern-item" data-pattern="diagonal" title="Diagonal Lines">
+              <canvas class="pattern-preview" width="40" height="40" data-pattern="diagonal"></canvas>
+              <span>Diagonal</span>
+            </div>
+            <div class="pattern-item" data-pattern="grid" title="Grid">
+              <canvas class="pattern-preview" width="40" height="40" data-pattern="grid"></canvas>
+              <span>Grid</span>
+            </div>
+            <div class="pattern-item" data-pattern="dots" title="Dots">
+              <canvas class="pattern-preview" width="40" height="40" data-pattern="dots"></canvas>
+              <span>Dots</span>
+            </div>
+            <div class="pattern-item" data-pattern="checkerboard" title="Checkerboard">
+              <canvas class="pattern-preview" width="40" height="40" data-pattern="checkerboard"></canvas>
+              <span>Checker</span>
+            </div>
+          </div>
+          <div class="form-row">
+            <label>Scale:</label>
+            <input type="range" id="edit-style-pattern-scale" min="0.2" max="3" step="0.1" value="1" />
+            <span id="edit-style-pattern-scale-value" class="unit">1.0x</span>
+          </div>
+          <div class="form-row">
+            <label>Rotation:</label>
+            <input type="number" id="edit-style-pattern-rotation" min="0" max="360" step="1" value="0" />
+            <span class="unit">°</span>
+          </div>
+          <div class="form-row">
+            <label>Foreground:</label>
+            <input type="color" id="edit-style-pattern-fg" value="#000000" />
+          </div>
+          <div class="form-row">
+            <label>Background:</label>
+            <input type="color" id="edit-style-pattern-bg" value="#ffffff" />
+          </div>
+        </div>
+      </div>
+      <div class="edit-style-section">
+        <div class="edit-style-section-title">Stroke</div>
+        <div class="form-row">
+          <label>Color:</label>
+          <input type="color" id="edit-style-stroke-color" value="#000000" />
+        </div>
+        <div class="form-row">
+          <label>Width:</label>
+          <input type="number" id="edit-style-stroke-width" min="0" max="100" step="0.5" value="2" />
+          <span class="unit">px</span>
+        </div>
+      </div>
+      <div class="edit-style-section">
+        <div class="edit-style-section-title">Appearance</div>
+        <div class="form-row">
+          <label>Opacity:</label>
+          <input type="range" id="edit-style-opacity" min="0" max="1" step="0.01" value="1" />
+          <span id="edit-style-opacity-value" class="unit">100%</span>
+        </div>
+      </div>
+      <div class="edit-style-section">
+        <div class="edit-style-section-title">
+          <span>Effects</span>
+          <select id="edit-style-add-effect" class="add-effect-select" style="margin-left:auto;">
+            <option value="">+ Add Effect</option>
+            <option value="gaussian-blur">Gaussian Blur</option>
+            <option value="drop-shadow">Drop Shadow</option>
+            <option value="inner-glow">Inner Glow</option>
+            <option value="hue-rotate">Hue Rotate</option>
+            <option value="brightness-contrast">Brightness / Contrast</option>
+          </select>
+        </div>
+        <div id="edit-style-effects-list"></div>
+      </div>
+      <div class="style-preview-row">
+        <div class="style-preview-large" id="edit-style-preview"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="modal-btn" id="edit-style-cancel">Cancel</button>
+      <button class="modal-btn danger" id="edit-style-delete">Delete</button>
+      <button class="modal-btn primary" id="edit-style-ok">Save Changes</button>
     </div>
   </div>
 </div>
