@@ -14034,20 +14034,31 @@
         for (let pi = 0; pi < issue.points.length; pi++) {
           const pt = issue.points[pi];
           const ptKey = issue.shapeId + '_' + (pt.isHole ? ('h' + pt.holeIndex + '_') : '') + pt.pointIndex;
+          const vertexLabel = pt.isHole 
+            ? 'Hole ' + (pt.holeIndex + 1) + ' - Pt ' + (pt.pointIndex + 1)
+            : 'Vertex ' + (pt.pointIndex + 1);
 
           html += `<div class="pixel-point-item" data-point-key="${ptKey}">`;
-          html += `<span class="pixel-point-index">${pt.pointIndex}</span>`;
+          html += `<div class="pixel-point-header">`;
+          html += `<span class="pixel-point-index-badge">${pi + 1}</span>`;
+          html += `<span class="pixel-point-vertex-label" title="${escapeHtml(vertexLabel)}">${escapeHtml(vertexLabel)}</span>`;
+          html += `</div>`;
           html += `<div class="pixel-point-coords">`;
 
-          html += `<div class="pixel-point-coords-row original">`;
-          if (pt.isHole) html += `<span class="pixel-hole-badge" title="Hole ${pt.holeIndex + 1}">H${pt.holeIndex + 1}</span>`;
-          html += `<span class="pixel-point-coords-label">now:</span>`;
-          html += `<span>(${formatCoord(pt.originalX)}, ${formatCoord(pt.originalY)})</span>`;
+          html += `<div class="pixel-point-coord-row">`;
+          html += `<span class="pixel-point-coord-label">Current:</span>`;
+          html += `<span class="pixel-point-coord-value current">`;
+          html += `<span class="coord-x">X: ${formatCoord(pt.originalX)}</span>`;
+          html += `<span class="coord-y">Y: ${formatCoord(pt.originalY)}</span>`;
+          html += `</span>`;
           html += `</div>`;
 
-          html += `<div class="pixel-point-coords-row suggested">`;
-          html += `<span class="pixel-point-coords-label">snap:</span>`;
-          html += `<span>(${formatCoord(pt.suggestedX)}, ${formatCoord(pt.suggestedY)})</span>`;
+          html += `<div class="pixel-point-coord-row">`;
+          html += `<span class="pixel-point-coord-label">Snap to:</span>`;
+          html += `<span class="pixel-point-coord-value suggested">`;
+          html += `<span class="coord-x">X: ${formatCoord(pt.suggestedX)}</span>`;
+          html += `<span class="coord-y">Y: ${formatCoord(pt.suggestedY)}</span>`;
+          html += `</span>`;
           html += `</div>`;
 
           html += `</div>`;
@@ -14129,27 +14140,106 @@
   }
 
   function applyPointFixToShape(shape, loc, pt) {
+    if (!shape) return false;
+
     if (isComponentInstance(shape)) {
-      const expanded = getInstanceExpandedShapes(shape);
-      if (expanded.length > 0) {
-        const target = expanded[0];
-        if (loc.isHole && target.holes && target.holes[loc.holeIndex]) {
-          target.holes[loc.holeIndex][loc.pointIndex] = { x: pt.suggestedX, y: pt.suggestedY };
-        } else if (target.points) {
-          target.points[loc.pointIndex] = { x: pt.suggestedX, y: pt.suggestedY };
+      try {
+        const expanded = getInstanceExpandedShapes(shape);
+        if (expanded && expanded.length > 0) {
+          let targetShape = null;
+          let targetIdx = -1;
+          if (loc.isHole) {
+            for (let i = 0; i < expanded.length; i++) {
+              const es = expanded[i];
+              if (es.holes && es.holes[loc.holeIndex] && es.holes[loc.holeIndex][loc.pointIndex]) {
+                targetShape = es;
+                targetIdx = i;
+                break;
+              }
+            }
+          } else {
+            for (let i = 0; i < expanded.length; i++) {
+              const es = expanded[i];
+              if (es.points && es.points[loc.pointIndex]) {
+                targetShape = es;
+                targetIdx = i;
+                break;
+              }
+            }
+          }
+          if (targetShape) {
+            let success = false;
+            if (loc.isHole && targetShape.holes && targetShape.holes[loc.holeIndex]) {
+              const target = targetShape.holes[loc.holeIndex][loc.pointIndex];
+              if (target && typeof target.x === 'number' && typeof target.y === 'number') {
+                target.x = pt.suggestedX;
+                target.y = pt.suggestedY;
+                success = !isSubPixelPoint(target, 0.001);
+              }
+              if (!success) {
+                targetShape.holes[loc.holeIndex][loc.pointIndex] = { x: pt.suggestedX, y: pt.suggestedY };
+                success = !isSubPixelPoint(targetShape.holes[loc.holeIndex][loc.pointIndex], 0.001);
+              }
+            } else if (targetShape.points && targetShape.points[loc.pointIndex]) {
+              const target = targetShape.points[loc.pointIndex];
+              if (target && typeof target.x === 'number' && typeof target.y === 'number') {
+                target.x = pt.suggestedX;
+                target.y = pt.suggestedY;
+                success = !isSubPixelPoint(target, 0.001);
+              }
+              if (!success) {
+                targetShape.points[loc.pointIndex] = { x: pt.suggestedX, y: pt.suggestedY };
+                success = !isSubPixelPoint(targetShape.points[loc.pointIndex], 0.001);
+              }
+            }
+            if (success) {
+              if (typeof updateComponentInstanceFromExpanded === 'function') {
+                try {
+                  updateComponentInstanceFromExpanded(shape, expanded, targetIdx);
+                } catch (e) {
+                  console.warn('Failed to update component instance from expanded:', e);
+                }
+              }
+              return true;
+            }
+          }
         }
+      } catch (e) {
+        console.warn('Error applying fix to component instance:', e);
       }
       return false;
     }
 
-    if (loc.isHole && shape.holes && shape.holes[loc.holeIndex]) {
-      shape.holes[loc.holeIndex][loc.pointIndex] = { x: pt.suggestedX, y: pt.suggestedY };
-      return true;
-    } else if (shape.points) {
-      shape.points[loc.pointIndex] = { x: pt.suggestedX, y: pt.suggestedY };
-      return true;
+    try {
+      let success = false;
+      if (loc.isHole && shape.holes && shape.holes[loc.holeIndex] && shape.holes[loc.holeIndex][loc.pointIndex]) {
+        const target = shape.holes[loc.holeIndex][loc.pointIndex];
+        if (target && typeof target.x === 'number' && typeof target.y === 'number') {
+          target.x = pt.suggestedX;
+          target.y = pt.suggestedY;
+          success = !isSubPixelPoint(target, 0.001);
+        }
+        if (!success) {
+          shape.holes[loc.holeIndex][loc.pointIndex] = { x: pt.suggestedX, y: pt.suggestedY };
+          success = !isSubPixelPoint(shape.holes[loc.holeIndex][loc.pointIndex], 0.001);
+        }
+      } else if (shape.points && shape.points[loc.pointIndex]) {
+        const target = shape.points[loc.pointIndex];
+        if (target && typeof target.x === 'number' && typeof target.y === 'number') {
+          target.x = pt.suggestedX;
+          target.y = pt.suggestedY;
+          success = !isSubPixelPoint(target, 0.001);
+        }
+        if (!success) {
+          shape.points[loc.pointIndex] = { x: pt.suggestedX, y: pt.suggestedY };
+          success = !isSubPixelPoint(shape.points[loc.pointIndex], 0.001);
+        }
+      }
+      return success;
+    } catch (e) {
+      console.warn('Error applying point fix:', e);
+      return false;
     }
-    return false;
   }
 
   function checkConstraintsAfterSnap(issuesToSnap) {
@@ -14161,27 +14251,45 @@
 
     function collectPoints(shapeList) {
       for (const s of shapeList) {
+        if (!s || !s.visible) continue;
+        if (isComponentInstance(s)) continue;
         tmpShapeMap[s.id] = s;
-        for (let i = 0; i < (s.points || []).length; i++) {
-          const pid = makePointId(s.id, false, -1, i);
-          pointBefore[pid] = { x: s.points[i].x, y: s.points[i].y };
-        }
-        if (s.holes) {
-          for (let hi = 0; hi < s.holes.length; hi++) {
-            for (let i = 0; i < s.holes[hi].length; i++) {
-              const pid = makePointId(s.id, true, hi, i);
-              pointBefore[pid] = { x: s.holes[hi][i].x, y: s.holes[hi][i].y };
+        try {
+          const pts = s.points || [];
+          for (let i = 0; i < pts.length; i++) {
+            const pid = makePointId(s.id, false, -1, i);
+            pointBefore[pid] = { x: pts[i].x, y: pts[i].y };
+          }
+          if (s.holes) {
+            for (let hi = 0; hi < s.holes.length; hi++) {
+              const hole = s.holes[hi];
+              if (!hole) continue;
+              for (let i = 0; i < hole.length; i++) {
+                const pid = makePointId(s.id, true, hi, i);
+                pointBefore[pid] = { x: hole[i].x, y: hole[i].y };
+              }
             }
           }
+        } catch (e) {
+          console.warn('Error collecting points for shape', s.id, e);
         }
       }
     }
 
-    if (editingComponentId !== null) {
-      const comp = getComponentById(editingComponentId);
-      if (comp) collectPoints(comp.shapes);
-    } else {
-      collectPoints(shapes);
+    try {
+      if (editingComponentId !== null) {
+        const comp = getComponentById(editingComponentId);
+        if (comp) collectPoints(comp.shapes);
+      } else {
+        collectPoints(shapes);
+      }
+    } catch (e) {
+      console.warn('Error collecting points for constraint check:', e);
+      return { violated: false, warnings: [] };
+    }
+
+    if (Object.keys(pointBefore).length === 0) {
+      return { violated: false, warnings: [] };
     }
 
     const pointAfter = {};
@@ -14193,25 +14301,39 @@
       if (!shape) continue;
       if (isComponentInstance(shape)) continue;
 
-      if (loc.isHole) {
-        const pid = makePointId(issue.shapeId, true, loc.holeIndex, loc.pointIndex);
-        pointAfter[pid] = { x: pt.suggestedX, y: pt.suggestedY };
-      } else {
-        const pid = makePointId(issue.shapeId, false, -1, loc.pointIndex);
-        pointAfter[pid] = { x: pt.suggestedX, y: pt.suggestedY };
+      try {
+        if (loc.isHole) {
+          const pid = makePointId(issue.shapeId, true, loc.holeIndex, loc.pointIndex);
+          pointAfter[pid] = { x: pt.suggestedX, y: pt.suggestedY };
+        } else {
+          const pid = makePointId(issue.shapeId, false, -1, loc.pointIndex);
+          pointAfter[pid] = { x: pt.suggestedX, y: pt.suggestedY };
+        }
+      } catch (e) {
+        console.warn('Error applying snap point:', e);
       }
     }
 
-    const warnTol = PixelCheck.tolerance * 100;
+    let solverParams = {};
+    try {
+      if (paramManager && typeof paramManager.getAllParams === 'function') {
+        solverParams = paramManager.getAllParams();
+      }
+    } catch (e) {}
+
+    const warnTol = Math.max(PixelCheck.tolerance * 100, 0.1);
     for (let ci = 0; ci < constraints.length; ci++) {
       const c = constraints[ci];
       try {
-        const before = c.evaluate(pointBefore, paramsData);
-        const after = c.evaluate(pointAfter, paramsData);
+        if (typeof c.evaluate !== 'function') continue;
+        const before = c.evaluate(pointBefore, solverParams);
+        const after = c.evaluate(pointAfter, solverParams);
+        if (!before || !after) continue;
         let violated = false;
         for (let ei = 0; ei < before.length && ei < after.length; ei++) {
           const bDiff = before[ei];
           const aDiff = after[ei];
+          if (typeof bDiff !== 'number' || typeof aDiff !== 'number') continue;
           if (Math.abs(aDiff) > Math.abs(bDiff) + warnTol && Math.abs(aDiff) > warnTol) {
             violated = true;
             break;
@@ -14221,7 +14343,7 @@
           warnings.push({
             index: ci,
             type: c.type,
-            label: c.getLabel ? c.getLabel() : c.type
+            label: (c.getLabel && typeof c.getLabel === 'function') ? c.getLabel() : (c.type || 'constraint')
           });
         }
       } catch (e) {}
@@ -14240,13 +14362,32 @@
     });
     if (!pt) return;
 
-    const check = checkConstraintsAfterSnap([{ issue, pt, loc }]);
+    let check = { violated: false, warnings: [] };
+    try {
+      check = checkConstraintsAfterSnap([{ issue, pt, loc }]);
+    } catch (e) {
+      console.warn('Constraint check failed, proceeding with fix anyway:', e);
+    }
 
     const doFix = () => {
-      pushHistory();
-      _applyPixelFix([{ issue, pt, loc }]);
-      _afterPixelFix();
-      showToast('Point snapped to pixel grid');
+      try {
+        pushHistory();
+        const applied = _applyPixelFix([{ issue, pt, loc }]);
+        if (applied === 0) {
+          showToast('Failed to fix point (shape not found)', 'error');
+          return;
+        }
+        const stillBad = verifyPixelFix([{ issue, pt, loc }]);
+        _afterPixelFix();
+        if (stillBad > 0) {
+          showToast('Point snapped but may still be off due to constraints', 'warning');
+        } else {
+          showToast('Point snapped to pixel grid');
+        }
+      } catch (e) {
+        console.error('Fix failed:', e);
+        showToast('Fix failed: ' + e.message, 'error');
+      }
     };
 
     if (check.violated) {
@@ -14273,14 +14414,32 @@
 
     if (all.length === 0) return;
 
-    const check = checkConstraintsAfterSnap(all);
+    let check = { violated: false, warnings: [] };
+    try {
+      check = checkConstraintsAfterSnap(all);
+    } catch (e) {
+      console.warn('Constraint check failed, proceeding with fix anyway:', e);
+    }
 
     const doFix = () => {
-      pushHistory();
-      _applyPixelFix(all);
-      const n = all.length;
-      _afterPixelFix();
-      showToast('Snapped ' + n + ' point(s) to pixel grid');
+      try {
+        pushHistory();
+        const n = _applyPixelFix(all);
+        if (n === 0) {
+          showToast('No points were fixed (shape not found)', 'error');
+          return;
+        }
+        const stillBad = verifyPixelFix(all);
+        _afterPixelFix();
+        if (stillBad > 0) {
+          showToast('Snapped ' + n + ' point(s), but ' + stillBad + ' remain sub-pixel (may be due to constraints)', 'warning');
+        } else {
+          showToast('Snapped ' + n + ' point(s) to pixel grid');
+        }
+      } catch (e) {
+        console.error('Fix all failed:', e);
+        showToast('Fix failed: ' + e.message, 'error');
+      }
     };
 
     if (check.violated) {
@@ -14291,29 +14450,75 @@
   }
 
   function _applyPixelFix(fixList) {
+    let appliedCount = 0;
+
     function applyToList(shapeList) {
       for (const entry of fixList) {
         const { issue, pt, loc } = entry;
         const shape = shapeList.find(s => s.id === issue.shapeId);
         if (!shape) continue;
-        applyPointFixToShape(shape, loc, pt);
+        if (applyPointFixToShape(shape, loc, pt)) {
+          appliedCount++;
+        }
       }
     }
 
-    if (editingComponentId !== null) {
-      const comp = getComponentById(editingComponentId);
-      if (comp) applyToList(comp.shapes);
-    } else {
-      applyToList(shapes);
+    try {
+      if (editingComponentId !== null) {
+        const comp = getComponentById(editingComponentId);
+        if (comp) applyToList(comp.shapes);
+      } else {
+        applyToList(shapes);
+      }
+    } catch (e) {
+      console.error('Error applying pixel fix:', e);
     }
+
+    return appliedCount;
+  }
+
+  function verifyPixelFix(fixList) {
+    let stillBad = 0;
+
+    function verifyList(shapeList) {
+      for (const entry of fixList) {
+        const { issue, loc } = entry;
+        const shape = shapeList.find(s => s.id === issue.shapeId);
+        if (!shape || isComponentInstance(shape)) continue;
+        try {
+          let p = null;
+          if (loc.isHole && shape.holes && shape.holes[loc.holeIndex]) {
+            p = shape.holes[loc.holeIndex][loc.pointIndex];
+          } else if (shape.points && shape.points[loc.pointIndex]) {
+            p = shape.points[loc.pointIndex];
+          }
+          if (p && isSubPixelPoint(p, PixelCheck.tolerance * 0.5)) {
+            stillBad++;
+          }
+        } catch (e) {}
+      }
+    }
+
+    try {
+      if (editingComponentId !== null) {
+        const comp = getComponentById(editingComponentId);
+        if (comp) verifyList(comp.shapes);
+      } else {
+        verifyList(shapes);
+      }
+    } catch (e) {}
+
+    return stillBad;
   }
 
   function _afterPixelFix() {
-    rebuildSolverAndParams();
-    try { runSolver(); } catch (e) {}
-    try { initialSolve(); } catch (e) {}
+    try {
+      rebuildSolverAndParams();
+    } catch (e) {
+      console.warn('Solver update after pixel fix failed:', e);
+    }
     rescanPixelIssues();
-    updateToolbar();
+    try { updateToolbar(); } catch (e) {}
     try {
       dimensionSystem.updateFromShapes(getShapePointsForDim, getShapeHolesForDim);
     } catch (e) {}
@@ -14323,16 +14528,22 @@
         (id) => { const s = getShapeById(id); return s ? worldHolesOf(s) : null; }
       );
     } catch (e) {}
-    renderLayers();
-    renderConstraintList();
-    updateDOFDisplay();
+    try { renderLayers(); } catch (e) {}
+    try { renderConstraintList(); } catch (e) {}
+    try { updateDOFDisplay(); } catch (e) {}
     render();
     scheduleSave();
   }
 
   function rescanPixelIssues() {
     if (PixelCheck.enabled) {
+      const prevExpanded = new Set(PixelCheck.expandedShapes);
       scanAllShapesForPixelIssues();
+      for (const issue of PixelCheck.issues) {
+        if (prevExpanded.has(issue.shapeId) || prevExpanded.size === 0) {
+          PixelCheck.expandedShapes.add(issue.shapeId);
+        }
+      }
       renderPixelCheckPanel();
     }
   }
@@ -14357,6 +14568,10 @@
 
     if (PixelCheck.enabled) {
       scanAllShapesForPixelIssues();
+      PixelCheck.expandedShapes.clear();
+      for (const issue of PixelCheck.issues) {
+        PixelCheck.expandedShapes.add(issue.shapeId);
+      }
     }
     renderPixelCheckPanel();
     render();
@@ -14425,6 +14640,25 @@
       refreshBtn.addEventListener('click', () => {
         rescanPixelIssues();
         showToast('Re-scanned all shapes');
+      });
+    }
+
+    const expandAllBtn = document.getElementById('pixel-check-expand-all');
+    if (expandAllBtn) {
+      expandAllBtn.addEventListener('click', () => {
+        if (PixelCheck.issues.length === 0) return;
+        const allExpanded = PixelCheck.issues.every(i => PixelCheck.expandedShapes.has(i.shapeId));
+        if (allExpanded) {
+          PixelCheck.expandedShapes.clear();
+          showToast('Collapsed all items');
+        } else {
+          for (const issue of PixelCheck.issues) {
+            PixelCheck.expandedShapes.add(issue.shapeId);
+          }
+          showToast('Expanded all items');
+        }
+        renderPixelCheckPanel();
+        render();
       });
     }
 
