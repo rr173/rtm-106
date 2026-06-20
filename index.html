@@ -44,6 +44,18 @@
     <svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="currentColor" stroke-width="2" d="M3 17L7 13L11 17L14 14L17 17L21 13"/><path fill="currentColor" d="M7 7H9V12H7zM15 7H17V12H15z"/></svg>
     <span>Measure</span>
   </button>
+  <button id="tool-live-ann-dist" class="tool-btn" title="Live Distance Annotation (Shift+D)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="#e91e63" stroke-width="2" d="M4 10h16M4 14h16M6 10v2M18 10v2M6 14v-2M18 14v-2M12 11v2"/><circle cx="12" cy="12" r="1.5" fill="#e91e63"/></svg>
+    <span>Live Dist</span>
+  </button>
+  <button id="tool-live-ann-angle" class="tool-btn" title="Live Angle Annotation (Shift+A)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="#e91e63" stroke-width="2" d="M4 20L4 8M4 20L16 20"/><path fill="none" stroke="#e91e63" stroke-width="2" d="M8 20 A12 12 0 0 1 18 10"/></svg>
+    <span>Live Angle</span>
+  </button>
+  <button id="tool-live-ann-formula" class="tool-btn" title="Formula Annotation (Shift+F)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="#673ab7" stroke-width="2" d="M5 5h14v14H5z"/><text x="12" y="16" text-anchor="middle" font-size="12" font-weight="bold" fill="#673ab7">ƒx</text></svg>
+    <span>Formula</span>
+  </button>
   <div class="sep"></div>
   <button id="op-union" class="op-btn" disabled title="Union">
     <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="9" cy="12" r="6" fill="currentColor" opacity="0.5"/><circle cx="15" cy="12" r="6" fill="currentColor" opacity="0.5"/></svg>
@@ -396,6 +408,113 @@
       <strong>Measure:</strong> Hover edges, click 2 pts/edges
     </div>
     <div id="dimension-list"></div>
+  </div>
+</div>
+
+<div id="live-annotation-panel">
+  <div class="panel-header">
+    <span>Live Annotations</span>
+    <button id="clear-live-annotations" class="mini-btn" title="Clear all live annotations">×</button>
+  </div>
+  <div class="live-ann-settings">
+    <div class="form-row">
+      <label>Precision:</label>
+      <input type="number" id="live-ann-precision" min="0" max="6" step="1" value="2" />
+    </div>
+    <div class="form-row">
+      <label>Text Size:</label>
+      <input type="number" id="live-ann-textsize" min="6" max="72" step="1" value="14" />
+      <span class="unit">px</span>
+    </div>
+    <div class="live-ann-hint">
+      <strong>Live Distance:</strong> Click 2 vertices (editable value)<br/>
+      <strong>Live Angle:</strong> Click 2 edges (shared vertex)<br/>
+      <strong>Formula:</strong> Click canvas, enter expression<br/>
+      Double-click annotation value to edit<br/>
+      Reference other annotations as: <code>ann_ID</code>
+    </div>
+    <div id="live-annotation-list"></div>
+  </div>
+</div>
+
+<div id="live-ann-edit-dialog" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header">
+      <span id="live-ann-edit-title">Edit Annotation</span>
+      <button class="modal-close" id="live-ann-edit-close">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-row">
+        <label>Name (optional):</label>
+        <input type="text" id="live-ann-name-input" placeholder="e.g. width" />
+      </div>
+      <div class="form-row">
+        <label>Value Mode:</label>
+        <select id="live-ann-mode-select">
+          <option value="measured">Measured (read-only)</option>
+          <option value="fixed">Fixed Value (drives geometry)</option>
+          <option value="param">Bind to Parameter</option>
+          <option value="formula">Formula Expression</option>
+        </select>
+      </div>
+      <div class="form-row" id="live-ann-fixed-row">
+        <label>Value:</label>
+        <input type="number" id="live-ann-fixed-input" step="0.01" />
+      </div>
+      <div class="form-row hidden" id="live-ann-param-row">
+        <label>Parameter:</label>
+        <select id="live-ann-param-select">
+          <option value="">-- None --</option>
+        </select>
+      </div>
+      <div class="form-row hidden" id="live-ann-formula-row">
+        <label>Formula:</label>
+        <input type="text" id="live-ann-formula-input" placeholder="e.g. width*2+ann_5" />
+      </div>
+      <div class="form-row hidden" id="live-ann-formula-hint">
+        <div class="live-ann-formula-help">
+          <strong>Available variables:</strong><br/>
+          <span id="live-ann-formula-vars"></span>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="modal-btn" id="live-ann-edit-cancel">Cancel</button>
+      <button class="modal-btn danger" id="live-ann-edit-delete">Delete</button>
+      <button class="modal-btn primary" id="live-ann-edit-ok">OK</button>
+    </div>
+  </div>
+</div>
+
+<div id="formula-annotation-dialog" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header">
+      <span>Create Formula Annotation</span>
+      <button class="modal-close" id="formula-ann-close">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-row">
+        <label>Name (optional):</label>
+        <input type="text" id="formula-ann-name-input" placeholder="e.g. perimeter" />
+      </div>
+      <div class="form-row">
+        <label>Expression:</label>
+        <input type="text" id="formula-ann-expr-input" placeholder="e.g. width*2+height*2" />
+      </div>
+      <div class="form-row">
+        <div class="live-ann-formula-help">
+          <strong>Available:</strong> Parameters by name, other annotations as <code>ann_ID</code><br/>
+          <strong>Functions:</strong> abs, acos, asin, atan, ceil, cos, exp, floor, log, log2, log10, max, min, pow, round, sin, sqrt, tan, PI, E
+        </div>
+      </div>
+      <div class="form-row">
+        <div id="formula-ann-error" class="form-error hidden"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="modal-btn" id="formula-ann-cancel">Cancel</button>
+      <button class="modal-btn primary" id="formula-ann-ok">Create</button>
+    </div>
   </div>
 </div>
 
@@ -819,6 +938,7 @@
 <script src="dimension.js"></script>
 <script src="guide-system.js"></script>
 <script src="deformation.js"></script>
+<script src="live-annotation.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

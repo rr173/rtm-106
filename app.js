@@ -156,6 +156,15 @@
   let dimToolSelection = [];
   let dimToolType = null;
 
+  const LAS = window.LiveAnnotationSystem;
+  const LA_TYPES = window.LIVE_ANNOTATION_TYPES;
+  const LA_MODES = window.LIVE_ANNOTATION_VALUE_MODES;
+  let liveAnnotationSystem = new LAS();
+  let selectedLiveAnnId = null;
+  let liveAnnToolSelection = [];
+  let liveAnnPendingFormulaPos = null;
+  let editingLiveAnnId = null;
+
   let guideSystem = null;
 
   let pages = [];
@@ -176,7 +185,8 @@
       animationData: null,
       motionPathData: null,
       dimensionData: null,
-      guideData: null
+      guideData: null,
+      liveAnnotationData: null
     };
   }
 
@@ -260,6 +270,13 @@
       console.warn('Failed to save guideData:', e);
       page.guideData = page.guideData || null;
     }
+
+    try {
+      page.liveAnnotationData = liveAnnotationSystem.serialize();
+    } catch (e) {
+      console.warn('Failed to save liveAnnotationData:', e);
+      page.liveAnnotationData = page.liveAnnotationData || null;
+    }
   }
 
   function loadPageState(pageId) {
@@ -308,6 +325,12 @@
         console.warn('Failed to deserialize guideData:', e);
       }
 
+      try {
+        liveAnnotationSystem.deserialize(page.liveAnnotationData || {});
+      } catch (e) {
+        console.warn('Failed to deserialize liveAnnotationData:', e);
+      }
+
       for (const s of shapes) {
         if (s.opacity === undefined) s.opacity = 1;
         if (s.type === 'motion-path') {
@@ -327,6 +350,10 @@
       selectedDimensionId = null;
       dimToolSelection = [];
       dimToolType = null;
+      selectedLiveAnnId = null;
+      liveAnnToolSelection = [];
+      liveAnnPendingFormulaPos = null;
+      editingLiveAnnId = null;
       isNodeEditMode = false;
 
       undoStack = [];
@@ -345,12 +372,22 @@
         console.warn('Failed to update dimension system:', e);
       }
 
+      try {
+        liveAnnotationSystem.updateFromShapes(
+          (id) => { const s = getShapeById(id); return s ? worldPointsOf(s) : null; },
+          (id) => { const s = getShapeById(id); return s ? worldHolesOf(s) : null; }
+        );
+      } catch (e) {
+        console.warn('Failed to update live annotation system:', e);
+      }
+
       updateToolbar();
       updateTextPanel();
       updateDimensionPanel();
       updateFillPanel();
       updateMotionPathPanel();
       updateDOFDisplay();
+      updateLiveAnnotationPanel();
       renderLayers();
       renderConstraintList();
       renderParams();
@@ -1355,7 +1392,8 @@
       components: JSON.parse(JSON.stringify(components)),
       nextComponentId: nextComponentId,
       motionPathData: JSON.parse(JSON.stringify(motionPathManager.serialize())),
-      dimensionData: JSON.parse(JSON.stringify(dimensionSystem.serialize()))
+      dimensionData: JSON.parse(JSON.stringify(dimensionSystem.serialize())),
+      liveAnnotationData: JSON.parse(JSON.stringify(liveAnnotationSystem.serialize()))
     };
   }
 
@@ -1374,6 +1412,11 @@
       dimensionSystem.deserialize(JSON.parse(JSON.stringify(state.dimensionData)));
     } else {
       dimensionSystem = new DS();
+    }
+    if (state.liveAnnotationData) {
+      liveAnnotationSystem.deserialize(JSON.parse(JSON.stringify(state.liveAnnotationData)));
+    } else {
+      liveAnnotationSystem = new LAS();
     }
     for (const s of shapes) {
       if (s.type === 'motion-path') {
@@ -1401,10 +1444,15 @@
     selectedDimensionId = null;
     dimToolSelection = [];
     dimToolType = null;
+    selectedLiveAnnId = null;
+    liveAnnToolSelection = [];
+    liveAnnPendingFormulaPos = null;
+    editingLiveAnnId = null;
     updateToolbar();
     updateTextPanel();
     updateDimensionPanel();
     updateDeformationPanel();
+    updateLiveAnnotationPanel();
     renderLayers();
     renderConstraintList();
     renderParams();
@@ -1424,10 +1472,15 @@
     selectedDimensionId = null;
     dimToolSelection = [];
     dimToolType = null;
+    selectedLiveAnnId = null;
+    liveAnnToolSelection = [];
+    liveAnnPendingFormulaPos = null;
+    editingLiveAnnId = null;
     updateToolbar();
     updateTextPanel();
     updateDimensionPanel();
     updateDeformationPanel();
+    updateLiveAnnotationPanel();
     renderLayers();
     renderConstraintList();
     renderParams();
@@ -1955,6 +2008,7 @@
           if (guideSystem) {
             guideSystem.deserialize(currentPage.guideData || {});
           }
+          liveAnnotationSystem.deserialize(currentPage.liveAnnotationData || {});
 
           for (const s of shapes) {
             if (s.opacity === undefined) s.opacity = 1;
@@ -1981,6 +2035,7 @@
         page.motionPathData = state.motionPathData || null;
         page.dimensionData = state.dimensionData || null;
         page.guideData = state.guideData || null;
+        page.liveAnnotationData = state.liveAnnotationData || null;
 
         pages = [page];
         currentPageId = page.id;
@@ -2000,6 +2055,7 @@
         if (guideSystem) {
           guideSystem.deserialize(page.guideData || {});
         }
+        liveAnnotationSystem.deserialize(page.liveAnnotationData || {});
 
         for (const s of shapes) {
           if (s.opacity === undefined) s.opacity = 1;
@@ -2348,6 +2404,56 @@
         (id) => { const s = getShapeById(id); return s ? worldHolesOf(s) : null; }
       );
       dimensionSystem.render(ctx, viewport.scale);
+      liveAnnotationSystem.setCallbacks({
+        paramGetter: (name) => {
+          if (paramsData[name] !== undefined) return paramsData[name].value;
+          return undefined;
+        },
+        shapePointsGetter: (id) => {
+          const s = getShapeById(id);
+          return s ? worldPointsOf(s) : null;
+        },
+        shapeHolesGetter: (id) => {
+          const s = getShapeById(id);
+          return s ? worldHolesOf(s) : null;
+        },
+        shapeModifier: {
+          modifyDistance: (ann, targetValue) => {
+            if (!ann.pointA || !ann.pointB) return false;
+            const s1 = getShapeById(ann.pointA.shapeId);
+            const s2 = getShapeById(ann.pointB.shapeId);
+            if (!s1 || !s2) return false;
+            if (s1.id !== s2.id) return false;
+            if (ann.pointA.isHole || ann.pointB.isHole) return false;
+            const pts = s1.points.map(p => ({ x: p.x, y: p.y }));
+            const p1 = pts[ann.pointA.pointIndex];
+            const p2 = pts[ann.pointB.pointIndex];
+            if (!p1 || !p2) return false;
+            const dx = p2.x - p1.x;
+            const dy = p2.y - p1.y;
+            const currentDist = Math.hypot(dx, dy);
+            if (currentDist < 1e-6) return false;
+            const scale = targetValue / currentDist;
+            pts[ann.pointB.pointIndex] = {
+              x: p1.x + dx * scale,
+              y: p1.y + dy * scale
+            };
+            s1.points = pts;
+            s1.transform = { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 };
+            rebuildSolverAndParams();
+            runSolver();
+            return true;
+          },
+          modifyAngle: (ann, targetValue) => {
+            return false;
+          }
+        }
+      });
+      liveAnnotationSystem.updateFromShapes(
+        (id) => { const s = getShapeById(id); return s ? worldPointsOf(s) : null; },
+        (id) => { const s = getShapeById(id); return s ? worldHolesOf(s) : null; }
+      );
+      liveAnnotationSystem.render(ctx, viewport.scale);
     }
 
     if (isNodeEditMode) {
@@ -4878,6 +4984,17 @@
       const btn = document.getElementById('tool-' + currentTool);
       if (btn) btn.classList.add('active');
     }
+    const liveAnnTools = ['live-dist', 'live-angle', 'live-formula'];
+    if (liveAnnTools.includes(currentTool)) {
+      const toolBtnMap = {
+        'live-dist': 'tool-live-ann-dist',
+        'live-angle': 'tool-live-ann-angle',
+        'live-formula': 'tool-live-ann-formula'
+      };
+      const btnId = toolBtnMap[currentTool];
+      const btn = document.getElementById(btnId);
+      if (btn) btn.classList.add('active');
+    }
     if (currentTool === 'measure' || dimensionSystem.measureMode) {
       const btn = document.getElementById('tool-measure');
       if (btn) btn.classList.add('measure-active');
@@ -4933,6 +5050,15 @@
       modeIndicatorEl.textContent = dimNames[currentTool] || 'DIM MODE';
       modeIndicatorEl.style.background = '#e3f2fd';
       modeIndicatorEl.style.color = '#1565c0';
+    } else if (currentTool.startsWith('live-')) {
+      const liveAnnNames = {
+        'live-dist': 'LIVE DISTANCE',
+        'live-angle': 'LIVE ANGLE',
+        'live-formula': 'FORMULA ANNOTATION'
+      };
+      modeIndicatorEl.textContent = liveAnnNames[currentTool] || 'LIVE ANNOTATION';
+      modeIndicatorEl.style.background = currentTool === 'live-formula' ? '#ede7f6' : '#fce4ec';
+      modeIndicatorEl.style.color = currentTool === 'live-formula' ? '#512da8' : '#c2185b';
     } else {
       modeIndicatorEl.classList.remove('measure-mode');
       modeIndicatorEl.textContent = '';
@@ -5966,6 +6092,10 @@
         handleDimToolClick(world.x, world.y);
         return;
       }
+      if (currentTool === 'live-dist' || currentTool === 'live-angle' || currentTool === 'live-formula') {
+        handleLiveAnnToolClick(world.x, world.y);
+        return;
+      }
       if (dimensionSystem.measureMode) {
         handleMeasureClick(world.x, world.y);
         return;
@@ -6747,6 +6877,12 @@
     const sy = e.clientY - rect.top;
     const world = screenToWorld(sx, sy);
 
+    const annHit = liveAnnotationSystem.hitTestAnnotationText(world.x, world.y, viewport.scale);
+    if (annHit) {
+      openLiveAnnotationEditDialog(annHit);
+      return;
+    }
+
     const cHit = hitTestConstraintIcon(world.x, world.y);
     if (cHit >= 0) {
       openConstraintEditDialog(cHit);
@@ -7077,8 +7213,66 @@
     else if (key === 'p') { currentTool = 'polygon'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; polygonPoints = []; updateToolbar(); render(); }
     else if (key === 'm') { currentTool = 'motionpath'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; polygonPoints = []; updateToolbar(); render(); }
     else if (key === 't') { currentTool = 'text'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; updateToolbar(); updateTextPanel(); render(); }
-    else if (key === 'd') { currentTool = 'dim-distance'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; updateToolbar(); render(); }
-    else if (key === 'a') { if (e.shiftKey) { selectedIds.clear(); for (const s of shapes) { if (s.visible && !s.locked) selectedIds.add(s.id); } updateToolbar(); updateTextPanel(); updateMotionPathPanel(); renderLayers(); render(); } else { currentTool = 'dim-angle'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureMode = false; updateToolbar(); render(); } }
+    else if (key === 'd') {
+      if (e.shiftKey) {
+        currentTool = 'live-dist';
+        isNodeEditMode = false;
+        selectedVertex = null;
+        constraintMode = null;
+        constraintSelection = [];
+        dimToolSelection = [];
+        dimensionSystem.measureMode = false;
+        liveAnnToolSelection = [];
+        updateToolbar();
+        render();
+      } else {
+        currentTool = 'dim-distance';
+        isNodeEditMode = false;
+        selectedVertex = null;
+        constraintMode = null;
+        constraintSelection = [];
+        dimToolSelection = [];
+        dimensionSystem.measureMode = false;
+        updateToolbar();
+        render();
+      }
+    }
+    else if (key === 'a') {
+      if (e.shiftKey) {
+        currentTool = 'live-angle';
+        isNodeEditMode = false;
+        selectedVertex = null;
+        constraintMode = null;
+        constraintSelection = [];
+        dimToolSelection = [];
+        dimensionSystem.measureMode = false;
+        liveAnnToolSelection = [];
+        updateToolbar();
+        render();
+      } else {
+        selectedIds.clear();
+        for (const s of shapes) {
+          if (s.visible && !s.locked) selectedIds.add(s.id);
+        }
+        updateToolbar();
+        updateTextPanel();
+        updateMotionPathPanel();
+        renderLayers();
+        render();
+      }
+    }
+    else if (key === 'f' && e.shiftKey) {
+      currentTool = 'live-formula';
+      isNodeEditMode = false;
+      selectedVertex = null;
+      constraintMode = null;
+      constraintSelection = [];
+      dimToolSelection = [];
+      dimensionSystem.measureMode = false;
+      liveAnnToolSelection = [];
+      updateToolbar();
+      render();
+    }
     else if (key === 'q') { dimensionSystem.measureMode = !dimensionSystem.measureMode; currentTool = dimensionSystem.measureMode ? 'measure' : 'select'; isNodeEditMode = false; selectedVertex = null; constraintMode = null; constraintSelection = []; dimToolSelection = []; dimensionSystem.measureSelectedPoints = []; dimensionSystem.measureSelectedEdges = []; dimensionSystem.measureHoverEdge = null; updateToolbar(); render(); showToast(dimensionSystem.measureMode ? 'Measure Mode ON (Shift+click for angle)' : 'Measure Mode OFF'); }
     else if (key === 'n') { isNodeEditMode = !isNodeEditMode; if (!isNodeEditMode) selectedVertex = null; constraintMode = null; constraintSelection = []; updateToolbar(); updateDOFDisplay(); render(); showToast(isNodeEditMode ? 'Node Edit Mode ON' : 'Node Edit Mode OFF'); }
     else if (key === ';') { snapEnabled = !snapEnabled; showToast(snapEnabled ? 'Snap ON' : 'Snap OFF'); render(); }
@@ -7091,6 +7285,8 @@
       if (dimensionSystem.measureMode) {
         dimensionSystem.measureMode = false;
       }
+      liveAnnToolSelection = [];
+      liveAnnPendingFormulaPos = null;
       currentTool = 'select';
       selectedIds.clear();
       selectedVertex = null;
@@ -7132,6 +7328,46 @@
     updateToolbar();
     render();
     showToast(dimensionSystem.measureMode ? 'Measure Mode ON (Shift+click for angle)' : 'Measure Mode OFF');
+  });
+
+  document.getElementById('tool-live-ann-dist').addEventListener('click', () => {
+    currentTool = 'live-dist';
+    isNodeEditMode = false;
+    selectedVertex = null;
+    constraintMode = null;
+    constraintSelection = [];
+    dimToolSelection = [];
+    dimensionSystem.measureMode = false;
+    liveAnnToolSelection = [];
+    updateToolbar();
+    render();
+  });
+
+  document.getElementById('tool-live-ann-angle').addEventListener('click', () => {
+    currentTool = 'live-angle';
+    isNodeEditMode = false;
+    selectedVertex = null;
+    constraintMode = null;
+    constraintSelection = [];
+    dimToolSelection = [];
+    dimensionSystem.measureMode = false;
+    liveAnnToolSelection = [];
+    updateToolbar();
+    render();
+  });
+
+  document.getElementById('tool-live-ann-formula').addEventListener('click', () => {
+    currentTool = 'live-formula';
+    isNodeEditMode = false;
+    selectedVertex = null;
+    constraintMode = null;
+    constraintSelection = [];
+    dimToolSelection = [];
+    dimensionSystem.measureMode = false;
+    liveAnnToolSelection = [];
+    liveAnnPendingFormulaPos = null;
+    updateToolbar();
+    render();
   });
 
   document.getElementById('text-input').addEventListener('input', (e) => {
@@ -12933,7 +13169,482 @@
   redo = function() {
     _origRedo();
     updateEffectsPanel();
+    updateLiveAnnotationPanel();
   };
+
+  function handleLiveAnnToolClick(wx, wy) {
+    if (currentTool === 'live-dist') {
+      const vertex = hitTestVertex(wx, wy);
+      if (vertex) {
+        liveAnnToolSelection.push({ type: 'vertex', data: vertex });
+        showToast('Point ' + liveAnnToolSelection.length + '/2 selected');
+        if (liveAnnToolSelection.length >= 2) {
+          createLiveDistanceFromVertices(
+            liveAnnToolSelection[0].data,
+            liveAnnToolSelection[1].data
+          );
+          liveAnnToolSelection = [];
+        }
+      } else {
+        showToast('Click 2 vertices to create live distance', 'warning');
+      }
+    } else if (currentTool === 'live-angle') {
+      const edge = hitTestEdge(wx, wy);
+      if (edge) {
+        liveAnnToolSelection.push({ type: 'edge', data: edge });
+        showToast('Edge ' + liveAnnToolSelection.length + '/2 selected');
+        if (liveAnnToolSelection.length >= 2) {
+          createLiveAngleFromEdges(
+            liveAnnToolSelection[0].data,
+            liveAnnToolSelection[1].data
+          );
+          liveAnnToolSelection = [];
+        }
+      } else {
+        showToast('Click 2 edges sharing a vertex for live angle', 'warning');
+      }
+    } else if (currentTool === 'live-formula') {
+      liveAnnPendingFormulaPos = { x: wx, y: wy };
+      openFormulaAnnotationDialog(wx, wy);
+    }
+    render();
+  }
+
+  function createLiveDistanceFromVertices(v1, v2) {
+    pushHistory();
+    const pts1 = getShapePointsById(v1.shape.id, v1.isHole, v1.holeIndex);
+    const pts2 = getShapePointsById(v2.shape.id, v2.isHole, v2.holeIndex);
+    if (!pts1 || !pts2) { showToast('Invalid points', 'error'); return; }
+    const p1 = pts1[v1.pointIndex];
+    const p2 = pts2[v2.pointIndex];
+    if (!p1 || !p2) { showToast('Invalid points', 'error'); return; }
+    const pointAInfo = { shapeId: v1.shape.id, isHole: v1.isHole, holeIndex: v1.holeIndex || 0, pointIndex: v1.pointIndex, x: p1.x, y: p1.y };
+    const pointBInfo = { shapeId: v2.shape.id, isHole: v2.isHole, holeIndex: v2.holeIndex || 0, pointIndex: v2.pointIndex, x: p2.x, y: p2.y };
+    const ann = liveAnnotationSystem.addDistanceAnnotation(pointAInfo, pointBInfo);
+    if (!ann) {
+      showToast('Failed to create annotation', 'error');
+      return;
+    }
+    updateLiveAnnotationPanel();
+    render();
+    scheduleSave();
+    showToast('Live distance annotation created', 'success');
+  }
+
+  function createLiveAngleFromEdges(e1, e2) {
+    pushHistory();
+    const pts1 = getShapePointsById(e1.shape.id, e1.isHole, e1.holeIndex);
+    const pts2 = getShapePointsById(e2.shape.id, e2.isHole, e2.holeIndex);
+    if (!pts1 || !pts2) { showToast('Invalid edges', 'error'); return; }
+
+    const n1 = pts1.length;
+    const n2 = pts2.length;
+    const edge1a = pts1[e1.edgeIndex];
+    const edge1b = pts1[(e1.edgeIndex + 1) % n1];
+    const edge2a = pts2[e2.edgeIndex];
+    const edge2b = pts2[(e2.edgeIndex + 1) % n2];
+
+    let sharedVertex = null;
+    let sharedVertexIndex = -1;
+    let sharedShapeId = null;
+    let sharedIsHole = false;
+    let sharedHoleIndex = 0;
+
+    const EPS = 1e-4;
+    const candidates = [
+      { pt: edge1a, idx: e1.edgeIndex, shapeId: e1.shape.id, isHole: e1.isHole, holeIndex: e1.holeIndex || 0 },
+      { pt: edge1b, idx: (e1.edgeIndex + 1) % n1, shapeId: e1.shape.id, isHole: e1.isHole, holeIndex: e1.holeIndex || 0 },
+      { pt: edge2a, idx: e2.edgeIndex, shapeId: e2.shape.id, isHole: e2.isHole, holeIndex: e2.holeIndex || 0 },
+      { pt: edge2b, idx: (e2.edgeIndex + 1) % n2, shapeId: e2.shape.id, isHole: e2.isHole, holeIndex: e2.holeIndex || 0 }
+    ];
+
+    for (let i = 0; i < candidates.length; i++) {
+      for (let j = i + 1; j < candidates.length; j++) {
+        const d = Math.hypot(candidates[i].pt.x - candidates[j].pt.x, candidates[i].pt.y - candidates[j].pt.y);
+        if (d < EPS) {
+          sharedVertex = candidates[i].pt;
+          sharedVertexIndex = candidates[i].idx;
+          sharedShapeId = candidates[i].shapeId;
+          sharedIsHole = candidates[i].isHole;
+          sharedHoleIndex = candidates[i].holeIndex;
+          break;
+        }
+      }
+      if (sharedVertex) break;
+    }
+
+    if (!sharedVertex) {
+      showToast('Edges must share a common vertex', 'error');
+      return;
+    }
+
+    const edgeAInfo = { shapeId: e1.shape.id, isHole: e1.isHole, holeIndex: e1.holeIndex || 0, edgeIndex: e1.edgeIndex };
+    const edgeBInfo = { shapeId: e2.shape.id, isHole: e2.isHole, holeIndex: e2.holeIndex || 0, edgeIndex: e2.edgeIndex };
+    const vertexInfo = { shapeId: sharedShapeId, isHole: sharedIsHole, holeIndex: sharedHoleIndex, pointIndex: sharedVertexIndex, x: sharedVertex.x, y: sharedVertex.y };
+
+    const ann = liveAnnotationSystem.addAngleAnnotation(edgeAInfo, edgeBInfo, vertexInfo);
+    if (!ann) {
+      showToast('Failed to create annotation', 'error');
+      return;
+    }
+    updateLiveAnnotationPanel();
+    render();
+    scheduleSave();
+    showToast('Live angle annotation created', 'success');
+  }
+
+  function updateLiveAnnotationPanel() {
+    const precisionEl = document.getElementById('live-ann-precision');
+    const textsizeEl = document.getElementById('live-ann-textsize');
+    if (precisionEl) precisionEl.value = liveAnnotationSystem.getPrecision();
+    if (textsizeEl) textsizeEl.value = liveAnnotationSystem.getTextSize();
+    renderLiveAnnotationList();
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  function renderLiveAnnotationList() {
+    const listEl = document.getElementById('live-annotation-list');
+    if (!listEl) return;
+    const annotations = liveAnnotationSystem.getAllAnnotations();
+    if (annotations.length === 0) {
+      listEl.innerHTML = '<div style="padding:12px;text-align:center;color:#aaa;font-size:11px;">No live annotations</div>';
+      return;
+    }
+    let html = '';
+    for (const ann of annotations) {
+      const isFormula = ann.type === LA_TYPES.FORMULA;
+      const isSelected = selectedLiveAnnId === ann.id;
+      const typeIcon = ann.type === LA_TYPES.DISTANCE ? 'D' : (ann.type === LA_TYPES.ANGLE ? '∠' : 'ƒx');
+      const typeClass = ann.type === LA_TYPES.DISTANCE ? 'dist' : (ann.type === LA_TYPES.ANGLE ? 'angle' : 'formula');
+      const displayVal = ann.displayValue !== undefined && ann.displayValue !== null
+        ? Number(ann.displayValue).toFixed(liveAnnotationSystem.getPrecision())
+        : '—';
+      const hasError = ann.errorMessage;
+      const displayName = ann.name || ('ann_' + ann.id);
+      const modeBadge = ann.valueMode ? '<span class="live-ann-mode-badge ' + ann.valueMode + '">' + ann.valueMode + '</span>' : '';
+      const errorHint = hasError ? ' title="' + ann.errorMessage + '"' : '';
+      html += '<div class="live-ann-item' + (isSelected ? ' selected' : '') + (isFormula ? ' formula-type' : '') + '" data-id="' + ann.id + '">' +
+        '<div class="live-ann-icon ' + typeClass + '">' + typeIcon + '</div>' +
+        '<div class="live-ann-info">' +
+        '<div class="live-ann-name">' + escapeHtml(displayName) + '</div>' +
+        '<div class="live-ann-value' + (hasError ? ' has-error' : '') + '"' + errorHint + '>' + displayVal + '</div>' +
+        '</div>' +
+        modeBadge +
+        '<button class="live-ann-del-btn" data-del-id="' + ann.id + '" title="Delete">×</button>' +
+        '</div>';
+    }
+    listEl.innerHTML = html;
+
+    listEl.querySelectorAll('.live-ann-item').forEach(el => {
+      el.addEventListener('click', (e) => {
+        if (e.target.closest('.live-ann-del-btn')) return;
+        const id = parseInt(el.getAttribute('data-id'), 10);
+        selectedLiveAnnId = (selectedLiveAnnId === id) ? null : id;
+        renderLiveAnnotationList();
+        render();
+      });
+    });
+
+    listEl.querySelectorAll('[data-del-id]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const id = parseInt(btn.getAttribute('data-del-id'), 10);
+        pushHistory();
+        liveAnnotationSystem.removeAnnotation(id);
+        if (selectedLiveAnnId === id) selectedLiveAnnId = null;
+        updateLiveAnnotationPanel();
+        render();
+        scheduleSave();
+        showToast('Annotation deleted');
+      });
+    });
+  }
+
+  function openLiveAnnotationEditDialog(annId) {
+    const ann = liveAnnotationSystem.getAnnotation(annId);
+    if (!ann) return;
+    editingLiveAnnId = annId;
+
+    const dialog = document.getElementById('live-ann-edit-dialog');
+    const nameInput = document.getElementById('live-ann-name-input');
+    const modeSelect = document.getElementById('live-ann-mode-select');
+    const fixedRow = document.getElementById('live-ann-fixed-row');
+    const fixedInput = document.getElementById('live-ann-fixed-input');
+    const paramRow = document.getElementById('live-ann-param-row');
+    const paramSelect = document.getElementById('live-ann-param-select');
+    const formulaRow = document.getElementById('live-ann-formula-row');
+    const formulaInput = document.getElementById('live-ann-formula-input');
+    const formulaHint = document.getElementById('live-ann-formula-hint');
+    const formulaVars = document.getElementById('live-ann-formula-vars');
+    const titleEl = document.getElementById('live-ann-edit-title');
+
+    titleEl.textContent = 'Edit Annotation #' + annId + (ann.name ? ' (' + ann.name + ')' : '');
+    nameInput.value = ann.name || '';
+    modeSelect.value = ann.valueMode || 'measured';
+    fixedInput.value = ann.fixedValue !== undefined ? ann.fixedValue : (ann.displayValue || '');
+    formulaInput.value = ann.formula || '';
+
+    let options = '<option value="">-- None --</option>';
+    for (const pName in paramsData) {
+      const sel = (ann.paramName && ann.paramName === pName) ? ' selected' : '';
+      options += '<option value="' + pName + '"' + sel + '>' + pName + ' = ' + paramsData[pName].value + '</option>';
+    }
+    paramSelect.innerHTML = options;
+
+    const updateVisibility = () => {
+      const mode = modeSelect.value;
+      fixedRow.classList.toggle('hidden', mode !== 'fixed');
+      paramRow.classList.toggle('hidden', mode !== 'param');
+      formulaRow.classList.toggle('hidden', mode !== 'formula');
+      formulaHint.classList.toggle('hidden', mode !== 'formula');
+    };
+    modeSelect.onchange = updateVisibility;
+    updateVisibility();
+
+    let varList = [];
+    for (const pName in paramsData) varList.push('<code>' + pName + '</code>');
+    for (const a of liveAnnotationSystem.getAllAnnotations()) {
+      if (a.id !== annId) varList.push('<code>ann_' + a.id + '</code>');
+    }
+    formulaVars.innerHTML = varList.join(', ') || '(none)';
+
+    dialog.classList.remove('hidden');
+  }
+
+  function closeLiveAnnotationEditDialog() {
+    const dialog = document.getElementById('live-ann-edit-dialog');
+    if (dialog) dialog.classList.add('hidden');
+    editingLiveAnnId = null;
+  }
+
+  function saveLiveAnnotationEdit() {
+    if (editingLiveAnnId === null) return;
+    const annId = editingLiveAnnId;
+    const nameInput = document.getElementById('live-ann-name-input');
+    const modeSelect = document.getElementById('live-ann-mode-select');
+    const fixedInput = document.getElementById('live-ann-fixed-input');
+    const paramSelect = document.getElementById('live-ann-param-select');
+    const formulaInput = document.getElementById('live-ann-formula-input');
+
+    pushHistory();
+
+    if (nameInput.value.trim()) {
+      liveAnnotationSystem.setAnnotationName(annId, nameInput.value.trim());
+    } else {
+      liveAnnotationSystem.setAnnotationName(annId, null);
+    }
+
+    const mode = modeSelect.value;
+    if (mode === 'measured') {
+      liveAnnotationSystem.setAnnotationMode(annId, LA_MODES.MEASURED);
+    } else if (mode === 'fixed') {
+      const val = parseFloat(fixedInput.value);
+      if (isNaN(val) || !isFinite(val)) {
+        showToast('Invalid fixed value', 'error');
+        return;
+      }
+      const ok = liveAnnotationSystem.setAnnotationFixedValue(annId, val);
+      if (!ok) {
+        showToast('Failed to set value', 'error');
+        return;
+      }
+    } else if (mode === 'param') {
+      if (!paramSelect.value) {
+        showToast('Please select a parameter', 'error');
+        return;
+      }
+      const res = liveAnnotationSystem.setAnnotationParamBinding(annId, paramSelect.value);
+      if (!res.success) {
+        showToast(res.error || 'Failed to bind parameter', 'error');
+        return;
+      }
+    } else if (mode === 'formula') {
+      if (!formulaInput.value.trim()) {
+        showToast('Please enter a formula', 'error');
+        return;
+      }
+      const res = liveAnnotationSystem.setAnnotationFormula(annId, formulaInput.value.trim());
+      if (!res.success) {
+        showToast(res.error || 'Invalid formula', 'error');
+        return;
+      }
+    }
+
+    closeLiveAnnotationEditDialog();
+    updateLiveAnnotationPanel();
+    render();
+    scheduleSave();
+  }
+
+  function deleteLiveAnnotationFromDialog() {
+    if (editingLiveAnnId === null) return;
+    pushHistory();
+    liveAnnotationSystem.removeAnnotation(editingLiveAnnId);
+    if (selectedLiveAnnId === editingLiveAnnId) selectedLiveAnnId = null;
+    closeLiveAnnotationEditDialog();
+    updateLiveAnnotationPanel();
+    render();
+    scheduleSave();
+    showToast('Annotation deleted');
+  }
+
+  function openFormulaAnnotationDialog(wx, wy) {
+    const dialog = document.getElementById('formula-annotation-dialog');
+    const nameInput = document.getElementById('formula-ann-name-input');
+    const exprInput = document.getElementById('formula-ann-expr-input');
+    const errorEl = document.getElementById('formula-ann-error');
+
+    nameInput.value = '';
+    exprInput.value = '';
+    errorEl.textContent = '';
+    errorEl.classList.add('hidden');
+
+    dialog.classList.remove('hidden');
+    setTimeout(() => exprInput.focus(), 100);
+  }
+
+  function closeFormulaAnnotationDialog() {
+    const dialog = document.getElementById('formula-annotation-dialog');
+    if (dialog) dialog.classList.add('hidden');
+    liveAnnPendingFormulaPos = null;
+  }
+
+  function createFormulaAnnotationFromDialog() {
+    const nameInput = document.getElementById('formula-ann-name-input');
+    const exprInput = document.getElementById('formula-ann-expr-input');
+    const errorEl = document.getElementById('formula-ann-error');
+
+    const formula = exprInput.value.trim();
+    if (!formula) {
+      errorEl.textContent = 'Please enter a formula expression';
+      errorEl.classList.remove('hidden');
+      return;
+    }
+    if (!liveAnnPendingFormulaPos) {
+      errorEl.textContent = 'No position specified';
+      errorEl.classList.remove('hidden');
+      return;
+    }
+
+    pushHistory();
+    const result = liveAnnotationSystem.addFormulaAnnotation(
+      formula,
+      liveAnnPendingFormulaPos,
+      nameInput.value.trim() || null
+    );
+    if (!result.success) {
+      errorEl.textContent = result.error || 'Failed to create formula annotation';
+      errorEl.classList.remove('hidden');
+      return;
+    }
+
+    closeFormulaAnnotationDialog();
+    currentTool = 'select';
+    updateToolbar();
+    updateLiveAnnotationPanel();
+    render();
+    scheduleSave();
+    showToast('Formula annotation created', 'success');
+  }
+
+  const precisionEl = document.getElementById('live-ann-precision');
+  if (precisionEl) {
+    precisionEl.addEventListener('change', (e) => {
+      const val = parseInt(e.target.value, 10);
+      if (!isNaN(val) && val >= 0 && val <= 6) {
+        liveAnnotationSystem.setPrecision(val);
+        render();
+        scheduleSave();
+      }
+    });
+  }
+
+  const textsizeEl = document.getElementById('live-ann-textsize');
+  if (textsizeEl) {
+    textsizeEl.addEventListener('change', (e) => {
+      const val = parseInt(e.target.value, 10);
+      if (!isNaN(val) && val >= 6 && val <= 72) {
+        liveAnnotationSystem.setTextSize(val);
+        render();
+        scheduleSave();
+      }
+    });
+  }
+
+  const clearBtn = document.getElementById('clear-live-annotations');
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      if (liveAnnotationSystem.getAllAnnotations().length === 0) return;
+      if (!confirm('Clear all live annotations?')) return;
+      pushHistory();
+      liveAnnotationSystem.clearAll();
+      selectedLiveAnnId = null;
+      updateLiveAnnotationPanel();
+      render();
+      scheduleSave();
+      showToast('All live annotations cleared');
+    });
+  }
+
+  const liveAnnEditClose = document.getElementById('live-ann-edit-close');
+  if (liveAnnEditClose) liveAnnEditClose.addEventListener('click', closeLiveAnnotationEditDialog);
+  const liveAnnEditCancel = document.getElementById('live-ann-edit-cancel');
+  if (liveAnnEditCancel) liveAnnEditCancel.addEventListener('click', closeLiveAnnotationEditDialog);
+  const liveAnnEditOk = document.getElementById('live-ann-edit-ok');
+  if (liveAnnEditOk) liveAnnEditOk.addEventListener('click', saveLiveAnnotationEdit);
+  const liveAnnEditDelete = document.getElementById('live-ann-edit-delete');
+  if (liveAnnEditDelete) liveAnnEditDelete.addEventListener('click', deleteLiveAnnotationFromDialog);
+
+  const formulaAnnClose = document.getElementById('formula-ann-close');
+  if (formulaAnnClose) formulaAnnClose.addEventListener('click', closeFormulaAnnotationDialog);
+  const formulaAnnCancel = document.getElementById('formula-ann-cancel');
+  if (formulaAnnCancel) formulaAnnCancel.addEventListener('click', closeFormulaAnnotationDialog);
+  const formulaAnnOk = document.getElementById('formula-ann-ok');
+  if (formulaAnnOk) formulaAnnOk.addEventListener('click', createFormulaAnnotationFromDialog);
+
+  const formulaExprInput = document.getElementById('formula-ann-expr-input');
+  if (formulaExprInput) {
+    formulaExprInput.addEventListener('input', (e) => {
+      const errorEl = document.getElementById('formula-ann-error');
+      if (!e.target.value.trim()) {
+        errorEl.classList.add('hidden');
+        return;
+      }
+      const result = liveAnnotationSystem.validateFormula(e.target.value.trim());
+      if (!result.success) {
+        errorEl.textContent = result.error || 'Invalid formula';
+        errorEl.classList.remove('hidden');
+      } else {
+        errorEl.classList.add('hidden');
+      }
+    });
+  }
+
+  function cleanupLiveAnnotationsAfterBoolean(retainedShapeIds, deletedShapeIds) {
+    const removed = liveAnnotationSystem.cleanupForShapeIds(deletedShapeIds, retainedShapeIds);
+    if (removed > 0) {
+      showToast(removed + ' live annotation(s) cleaned up');
+      updateLiveAnnotationPanel();
+    }
+  }
+
+  const _origDeleteSelectedShapes = typeof deleteSelectedShapes === 'function' ? deleteSelectedShapes : null;
+  if (_origDeleteSelectedShapes) {
+    deleteSelectedShapes = function() {
+      const deletedIds = Array.from(selectedIds);
+      _origDeleteSelectedShapes();
+      const retainedIds = shapes.map(s => s.id);
+      cleanupLiveAnnotationsAfterBoolean(retainedIds, deletedIds);
+      scheduleSave();
+    };
+  }
+
+  updateLiveAnnotationPanel();
 
   if (typeof openInstanceOverrideDialog === 'function') {
     const _origOpenInstanceOverrideDialog = openInstanceOverrideDialog;

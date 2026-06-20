@@ -3054,3 +3054,237 @@ body.rulers-visible #canvas {
   color: #aaa;
   font-size: 11px;
 }
+
+/* Live Annotation Panel */
+#live-annotation-panel {
+  position: fixed;
+  right: 260px;
+  top: 530px;
+  width: 240px;
+  max-height: 400px;
+  background: #fff;
+  border-left: 1px solid #e0e0e0;
+  border-top: 1px solid #e0e0e0;
+  border-radius: 8px 0 0 0;
+  overflow-y: auto;
+  z-index: 50;
+  box-shadow: -2px 0 8px rgba(0,0,0,0.08);
+}
+
+.live-ann-settings {
+  padding: 10px 12px;
+}
+
+.live-ann-hint {
+  font-size: 11px;
+  color: #666;
+  background: #fafafa;
+  padding: 8px 10px;
+  border-radius: 4px;
+  margin: 8px 0;
+  line-height: 1.5;
+  border-left: 3px solid #e91e63;
+}
+
+.live-ann-hint code {
+  background: #fff;
+  padding: 1px 4px;
+  border-radius: 2px;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+  font-size: 10px;
+  color: #673ab7;
+}
+
+.live-ann-formula-help {
+  font-size: 11px;
+  color: #666;
+  background: #f5f0ff;
+  padding: 8px 10px;
+  border-radius: 4px;
+  line-height: 1.6;
+  border-left: 3px solid #673ab7;
+}
+
+.live-ann-formula-help code {
+  background: #fff;
+  padding: 1px 4px;
+  border-radius: 2px;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+  font-size: 10px;
+  color: #673ab7;
+}
+
+.form-error {
+  background: #ffebee;
+  color: #c62828;
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  border-left: 3px solid #e53935;
+}
+
+.form-error.hidden {
+  display: none;
+}
+
+#live-annotation-list {
+  margin-top: 8px;
+}
+
+.live-ann-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  margin-bottom: 4px;
+  transition: all 0.15s;
+}
+
+.live-ann-item:hover {
+  background: #fafafa;
+  border-color: #eee;
+}
+
+.live-ann-item.selected {
+  background: #fff3f7;
+  border-color: #e91e63;
+}
+
+.live-ann-item.formula-type {
+  background: #faf5ff;
+  border-color: #e1bee7;
+}
+
+.live-ann-item.formula-type.selected {
+  background: #f3e5f5;
+  border-color: #673ab7;
+}
+
+.live-ann-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.live-ann-icon.dist {
+  background: #fce4ec;
+  color: #e91e63;
+}
+
+.live-ann-icon.angle {
+  background: #fff3e0;
+  color: #ff9800;
+}
+
+.live-ann-icon.formula {
+  background: #ede7f6;
+  color: #673ab7;
+}
+
+.live-ann-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.live-ann-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #333;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.live-ann-value {
+  font-size: 11px;
+  color: #666;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+}
+
+.live-ann-value.has-error {
+  color: #e53935;
+}
+
+.live-ann-mode-badge {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.live-ann-mode-badge.measured {
+  background: #e0e0e0;
+  color: #666;
+}
+
+.live-ann-mode-badge.fixed {
+  background: #e3f2fd;
+  color: #1565c0;
+}
+
+.live-ann-mode-badge.param {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.live-ann-mode-badge.formula {
+  background: #ede7f6;
+  color: #673ab7;
+}
+
+.live-ann-del-btn {
+  opacity: 0;
+  background: none;
+  border: none;
+  color: #999;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-size: 14px;
+  transition: all 0.15s;
+}
+
+.live-ann-item:hover .live-ann-del-btn {
+  opacity: 1;
+}
+
+.live-ann-del-btn:hover {
+  background: #ffebee;
+  color: #e53935;
+}
+
+#live-ann-fixed-row.hidden,
+#live-ann-param-row.hidden,
+#live-ann-formula-row.hidden,
+#live-ann-formula-hint.hidden {
+  display: none !important;
+}
+
+#toolbar .tool-btn[title*="Live"] {
+  color: #e91e63;
+}
+
+#toolbar .tool-btn[title*="Formula"] {
+  color: #673ab7;
+}
+
+#toolbar .tool-btn[title*="Live"].active,
+#toolbar .tool-btn[title*="Formula"].active {
+  background: #fce4ec;
+  color: #c2185b;
+}
+
+#toolbar .tool-btn[title*="Formula"].active {
+  background: #ede7f6;
+  color: #512da8;
+}
