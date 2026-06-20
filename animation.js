@@ -157,6 +157,8 @@
           const t = (frame - kf1.frame) / (kf2.frame - kf1.frame);
           if (this.propName === 'fill') {
             return interpolateColor(kf1.value, kf2.value, t, kf1.easing);
+          } else if (typeof kf1.value === 'string') {
+            return t < 0.5 ? kf1.value : kf2.value;
           } else {
             return interpolateNumber(kf1.value, kf2.value, t, kf1.easing);
           }

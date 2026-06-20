@@ -80,6 +80,15 @@
     <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M12 3v12l-4-4-1.4 1.4L12 17.8l5.4-5.4L16 10l-4 4V3zM5 19h14v2H5z"/></svg>
     <span>Export SVG</span>
   </button>
+  <div class="sep"></div>
+  <button id="deform-free" class="op-btn" disabled title="Free Deform (4x4 Grid)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="currentColor" stroke-width="1.5" d="M3 3h18v18H3z"/><circle cx="3" cy="3" r="1.5" fill="currentColor"/><circle cx="9" cy="3" r="1.5" fill="currentColor"/><circle cx="15" cy="3" r="1.5" fill="currentColor"/><circle cx="21" cy="3" r="1.5" fill="currentColor"/><circle cx="3" cy="9" r="1.5" fill="currentColor"/><circle cx="9" cy="9" r="1.5" fill="currentColor"/><circle cx="15" cy="9" r="1.5" fill="currentColor"/><circle cx="21" cy="9" r="1.5" fill="currentColor"/><circle cx="3" cy="15" r="1.5" fill="currentColor"/><circle cx="9" cy="15" r="1.5" fill="currentColor"/><circle cx="15" cy="15" r="1.5" fill="currentColor"/><circle cx="21" cy="15" r="1.5" fill="currentColor"/><circle cx="3" cy="21" r="1.5" fill="currentColor"/><circle cx="9" cy="21" r="1.5" fill="currentColor"/><circle cx="15" cy="21" r="1.5" fill="currentColor"/><circle cx="21" cy="21" r="1.5" fill="currentColor"/></svg>
+    <span>Free Deform</span>
+  </button>
+  <button id="deform-envelope" class="op-btn" disabled title="Envelope Deform (Top/Bottom Curves)">
+    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="currentColor" stroke-width="1.5" d="M3 6C7 2 17 10 21 6"/><path fill="none" stroke="currentColor" stroke-width="1.5" d="M3 18C7 14 17 22 21 18"/><circle cx="3" cy="6" r="1.5" fill="currentColor"/><circle cx="9" cy="5" r="1.5" fill="currentColor"/><circle cx="15" cy="7" r="1.5" fill="currentColor"/><circle cx="21" cy="6" r="1.5" fill="currentColor"/><circle cx="3" cy="18" r="1.5" fill="currentColor"/><circle cx="9" cy="17" r="1.5" fill="currentColor"/><circle cx="15" cy="19" r="1.5" fill="currentColor"/><circle cx="21" cy="18" r="1.5" fill="currentColor"/></svg>
+    <span>Envelope</span>
+  </button>
 </div>
 
 <div id="align-toolbar">
@@ -308,6 +317,22 @@
     </select>
   </div>
   <div id="effects-list"></div>
+</div>
+
+<div id="deformation-panel" class="hidden">
+  <div class="panel-header">
+    <span>Deformation</span>
+  </div>
+  <div id="deformation-content">
+    <div class="form-row" id="deform-mode-row">
+      <label>Mode:</label>
+      <span id="deform-mode-label">None</span>
+    </div>
+    <div class="form-row">
+      <button id="deform-bake-btn" class="mini-btn" title="Bake deformation into geometry">Bake</button>
+      <button id="deform-remove-btn" class="mini-btn" title="Remove deformation">Remove</button>
+    </div>
+  </div>
 </div>
 
 <div id="dimension-panel">
@@ -793,6 +818,7 @@
 <script src="glyphs.js"></script>
 <script src="dimension.js"></script>
 <script src="guide-system.js"></script>
+<script src="deformation.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

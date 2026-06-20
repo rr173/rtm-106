@@ -127,6 +127,18 @@
   let motionPathManager = new PM.MotionPathManager();
   let selectedPathShapeIdForBinding = null;
 
+  const DefSys = window.DeformationSystem;
+  let isDraggingDeformPoint = false;
+  let deformDragType = null;
+  let deformDragShapeId = null;
+  let deformDragRow = -1;
+  let deformDragCol = -1;
+  let deformDragCurveIdx = -1;
+  let deformDragPointIdx = -1;
+  let deformDragHandleType = null;
+  let deformDragOriginal = null;
+  let activeDeformShapeId = null;
+
   const SNAP_THRESHOLD = 8;
   let snapEnabled = true;
   let snapInfo = {
@@ -632,6 +644,10 @@
         p.x += t.tx;
         p.y += t.ty;
       }
+      if (s.deformation) {
+        const deformer = DefSys.deserializeDeformation(s.deformation);
+        if (deformer) return deformer.deformPoints(pts);
+      }
       return pts;
     }
 
@@ -657,6 +673,10 @@
           p.y += t.ty;
         }
         worldHoles.push(pts);
+      }
+      if (s.deformation) {
+        const deformer = DefSys.deserializeDeformation(s.deformation);
+        if (deformer) return worldHoles.map(function(h) { return deformer.deformPoints(h); });
       }
       return worldHoles;
     }
@@ -1094,6 +1114,75 @@
     return state;
   }
 
+  function getShapeDeformation(shape) {
+    if (!shape || !shape.deformation) return null;
+    return shape.deformation;
+  }
+
+  function applyDeformationToPoints(shape, pts) {
+    var def = getShapeDeformation(shape);
+    if (!def) return pts;
+    var deformer = DefSys.deserializeDeformation(def);
+    if (!deformer) return pts;
+    return deformer.deformPoints(pts);
+  }
+
+  function applyDeformationToHoles(shape, holes) {
+    if (!holes || holes.length === 0) return holes;
+    var def = getShapeDeformation(shape);
+    if (!def) return holes;
+    var deformer = DefSys.deserializeDeformation(def);
+    if (!deformer) return holes;
+    return holes.map(function(h) { return deformer.deformPoints(h); });
+  }
+
+  function bakeDeformation(shape) {
+    var def = getShapeDeformation(shape);
+    if (!def) return;
+    var deformer = DefSys.deserializeDeformation(def);
+    if (!deformer) return;
+    var result = deformer.bake(shape.points, shape.holes);
+    shape.points = result.points;
+    shape.holes = result.holes;
+    delete shape.deformation;
+  }
+
+  function addDeformationToShape(shape, type) {
+    var pts = worldPointsOf(shape);
+    if (pts.length < 3) return false;
+    var holes = worldHolesOf(shape);
+    var deformer = DefSys.createDeformation(type, pts, holes);
+    if (!deformer) return false;
+    shape.points = pts;
+    shape.holes = holes;
+    shape.transform = { tx: 0, ty: 0, rotation: 0, scaleX: 1, scaleY: 1 };
+    shape.deformation = deformer.serialize();
+    activeDeformShapeId = shape.id;
+    return true;
+  }
+
+  function removeDeformationFromShape(shape) {
+    if (!shape || !shape.deformation) return;
+    var deformer = DefSys.deserializeDeformation(shape.deformation);
+    if (deformer) {
+      var result = deformer.bake(shape.points, shape.holes);
+      shape.points = result.points;
+      shape.holes = result.holes;
+    }
+    delete shape.deformation;
+    if (activeDeformShapeId === shape.id) activeDeformShapeId = null;
+  }
+
+  function getDeformedWorldPoints(shape) {
+    var pts = worldPointsOf(shape);
+    return applyDeformationToPoints(shape, pts);
+  }
+
+  function getDeformedWorldHoles(shape) {
+    var holes = worldHolesOf(shape);
+    return applyDeformationToHoles(shape, holes);
+  }
+
   function worldPointsOf(shape) {
     if (isComponentInstance(shape)) {
       const expanded = getInstanceExpandedShapes(shape);
@@ -1315,6 +1404,7 @@
     updateToolbar();
     updateTextPanel();
     updateDimensionPanel();
+    updateDeformationPanel();
     renderLayers();
     renderConstraintList();
     renderParams();
@@ -1337,6 +1427,7 @@
     updateToolbar();
     updateTextPanel();
     updateDimensionPanel();
+    updateDeformationPanel();
     renderLayers();
     renderConstraintList();
     renderParams();
@@ -1926,9 +2017,15 @@
         const hit = hitTestInstance(wx, wy, s);
         if (hit) return hit;
       } else {
-        const wp = worldPointsOf(s);
+        let wp = worldPointsOf(s);
+        if (s.deformation) {
+          wp = applyDeformationToPoints(s, wp);
+        }
         if (!pointInPolygonOrOnEdge(pt, wp)) continue;
-        const holes = worldHolesOf(s);
+        let holes = worldHolesOf(s);
+        if (s.deformation) {
+          holes = applyDeformationToHoles(s, holes);
+        }
         let inHole = false;
         for (const hole of holes) {
           if (pointInPolygonOrOnEdge(pt, hole)) { inHole = true; break; }
@@ -2246,6 +2343,7 @@
         const s = getShapeById(id);
         if (s && !s.locked && (s.visible || isMaskShape(s))) renderSelection(s);
       }
+      renderDeformationOverlay();
     }
 
     if (dimensionSystem.measureMode && editingComponentId === null) {
@@ -2687,7 +2785,16 @@
       return allPts;
     }
     const props = getAnimatedShapeProps(shape, frame);
-    const pts = applyTransform(shape.points, props.tx, props.ty, props.rotation, props.scaleX, props.scaleY);
+    var pts = applyTransform(shape.points, props.tx, props.ty, props.rotation, props.scaleX, props.scaleY);
+    if (shape.deformation) {
+      var animDefData = getAnimatedDeformation(shape, frame);
+      if (animDefData) {
+        var deformer = DefSys.deserializeDeformation(animDefData);
+        if (deformer) pts = deformer.deformPoints(pts);
+      } else {
+        pts = applyDeformationToPoints(shape, pts);
+      }
+    }
     return pts;
   }
 
@@ -2702,7 +2809,31 @@
     }
     if (!shape.holes) return [];
     const props = getAnimatedShapeProps(shape, frame);
-    return shape.holes.map(h => applyTransform(h, props.tx, props.ty, props.rotation, props.scaleX, props.scaleY));
+    var holes = shape.holes.map(h => applyTransform(h, props.tx, props.ty, props.rotation, props.scaleX, props.scaleY));
+    if (shape.deformation) {
+      var animDefData = getAnimatedDeformation(shape, frame);
+      if (animDefData) {
+        var deformer = DefSys.deserializeDeformation(animDefData);
+        if (deformer) holes = holes.map(function(h) { return deformer.deformPoints(h); });
+      } else {
+        holes = applyDeformationToHoles(shape, holes);
+      }
+    }
+    return holes;
+  }
+
+  function getAnimatedDeformation(shape, frame) {
+    if (!shape.deformation) return null;
+    var anim = animationController.getShapeAnimation(shape.id, false);
+    if (!anim) return null;
+    var track = anim.getTrack('deformation', false);
+    if (!track || !track.hasKeyframes()) return null;
+    var val = track.getValueAt(frame, null);
+    if (val === null) return null;
+    if (typeof val === 'string') {
+      try { return JSON.parse(val); } catch (e) { return null; }
+    }
+    return val;
   }
 
   function drawOpenPath(points) {
@@ -2918,6 +3049,10 @@
     } else {
       let pts = useAnimation ? getAnimatedWorldPoints(s, currentFrame) : worldPointsOf(s);
       let holes = useAnimation ? getAnimatedWorldHoles(s, currentFrame) : worldHolesOf(s);
+      if (s.deformation) {
+        pts = applyDeformationToPoints(s, pts);
+        holes = applyDeformationToHoles(s, holes);
+      }
       let fillColor = s.fill;
       let opacity = s.opacity !== undefined ? s.opacity : 1;
 
@@ -3009,6 +3144,269 @@
     ctx.strokeStyle = '#1a73e8';
     ctx.stroke();
     ctx.restore();
+  }
+
+  function renderDeformationOverlay() {
+    var shapesToDeform = [];
+    for (var id of selectedIds) {
+      var s = getShapeById(id);
+      if (s && s.deformation) shapesToDeform.push(s);
+    }
+    if (shapesToDeform.length === 0) return;
+
+    for (var si = 0; si < shapesToDeform.length; si++) {
+      var s = shapesToDeform[si];
+      var defData = s.deformation;
+      if (defData.type === 'free') {
+        renderFreeDeformOverlay(s, defData);
+      } else if (defData.type === 'envelope') {
+        renderEnvelopeDeformOverlay(s, defData);
+      }
+    }
+  }
+
+  function renderFreeDeformOverlay(s, defData) {
+    var rows = defData.rows || 4;
+    var cols = defData.cols || 4;
+    var cps = defData.controlPoints;
+    var hIns = defData.handleIn;
+    var hOuts = defData.handleOut;
+    var sc = viewport.scale;
+
+    ctx.save();
+    ctx.strokeStyle = 'rgba(103, 58, 183, 0.4)';
+    ctx.lineWidth = 1 / sc;
+    ctx.setLineDash([4 / sc, 3 / sc]);
+    for (var r = 0; r < rows; r++) {
+      ctx.beginPath();
+      for (var c = 0; c < cols; c++) {
+        var p = cps[r * cols + c];
+        if (c === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      }
+      ctx.stroke();
+    }
+    for (var c = 0; c < cols; c++) {
+      ctx.beginPath();
+      for (var r = 0; r < rows; r++) {
+        var p = cps[r * cols + c];
+        if (r === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      }
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    ctx.strokeStyle = 'rgba(103, 58, 183, 0.6)';
+    ctx.lineWidth = 1 / sc;
+    for (var i = 0; i < cps.length; i++) {
+      var p = cps[i];
+      var hi = hIns[i];
+      var ho = hOuts[i];
+      ctx.beginPath();
+      ctx.moveTo(hi.x, hi.y);
+      ctx.lineTo(p.x, p.y);
+      ctx.lineTo(ho.x, ho.y);
+      ctx.stroke();
+      ctx.fillStyle = '#fff';
+      ctx.strokeStyle = '#673ab7';
+      ctx.lineWidth = 1.5 / sc;
+      var hr = 3 / sc;
+      ctx.beginPath();
+      ctx.arc(hi.x, hi.y, hr, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(ho.x, ho.y, hr, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    ctx.fillStyle = '#673ab7';
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.5 / sc;
+    for (var i = 0; i < cps.length; i++) {
+      var p = cps[i];
+      var r = 5 / sc;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function renderEnvelopeDeformOverlay(s, defData) {
+    var topC = defData.topCurve;
+    var botC = defData.bottomCurve;
+    var sc = viewport.scale;
+
+    ctx.save();
+
+    ctx.strokeStyle = 'rgba(103, 58, 183, 0.5)';
+    ctx.lineWidth = 1.5 / sc;
+    ctx.setLineDash([6 / sc, 4 / sc]);
+
+    function drawEnvelopeCurve(curve) {
+      ctx.beginPath();
+      var n = curve.length - 1;
+      var steps = n * 20;
+      for (var i = 0; i <= steps; i++) {
+        var t = i / steps;
+        var seg = t * n;
+        var si = Math.min(Math.floor(seg), n - 1);
+        var lt = seg - si;
+        var p0 = curve[si];
+        var p1 = curve[si].outHandle;
+        var p2 = curve[si + 1].inHandle;
+        var p3 = curve[si + 1];
+        var u = 1 - lt;
+        var x = u*u*u*p0.x + 3*u*u*lt*p1.x + 3*u*lt*lt*p2.x + lt*lt*lt*p3.x;
+        var y = u*u*u*p0.y + 3*u*u*lt*p1.y + 3*u*lt*lt*p2.y + lt*lt*lt*p3.y;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    drawEnvelopeCurve(topC);
+    drawEnvelopeCurve(botC);
+
+    ctx.setLineDash([]);
+    ctx.strokeStyle = 'rgba(103, 58, 183, 0.4)';
+    ctx.lineWidth = 1 / sc;
+    for (var i = 0; i < topC.length; i++) {
+      ctx.beginPath();
+      ctx.moveTo(topC[i].x, topC[i].y);
+      ctx.lineTo(botC[i].x, botC[i].y);
+      ctx.stroke();
+    }
+
+    function drawEnvelopeHandles(curve) {
+      ctx.strokeStyle = 'rgba(103, 58, 183, 0.6)';
+      ctx.lineWidth = 1 / sc;
+      for (var i = 0; i < curve.length; i++) {
+        var pt = curve[i];
+        ctx.beginPath();
+        ctx.moveTo(pt.inHandle.x, pt.inHandle.y);
+        ctx.lineTo(pt.x, pt.y);
+        ctx.lineTo(pt.outHandle.x, pt.outHandle.y);
+        ctx.stroke();
+        var hr = 3 / sc;
+        ctx.fillStyle = '#fff';
+        ctx.strokeStyle = '#673ab7';
+        ctx.lineWidth = 1.5 / sc;
+        ctx.beginPath();
+        ctx.arc(pt.inHandle.x, pt.inHandle.y, hr, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(pt.outHandle.x, pt.outHandle.y, hr, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+      ctx.fillStyle = '#673ab7';
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1.5 / sc;
+      for (var i = 0; i < curve.length; i++) {
+        var pt = curve[i];
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 5 / sc, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+
+    drawEnvelopeHandles(topC);
+    drawEnvelopeHandles(botC);
+    ctx.restore();
+  }
+
+  function hitTestDeformation(wx, wy) {
+    var threshold = 8 / viewport.scale;
+    for (var id of selectedIds) {
+      var s = getShapeById(id);
+      if (!s || !s.deformation) continue;
+      var defData = s.deformation;
+
+      if (defData.type === 'free') {
+        var cps = defData.controlPoints;
+        var hIns = defData.handleIn;
+        var hOuts = defData.handleOut;
+        for (var i = 0; i < cps.length; i++) {
+          var r = Math.floor(i / defData.cols);
+          var c = i % defData.cols;
+          if (dist({ x: wx, y: wy }, cps[i]) < threshold) {
+            return { shapeId: s.id, type: 'point', row: r, col: c, handleType: 'point' };
+          }
+          if (dist({ x: wx, y: wy }, hIns[i]) < threshold) {
+            return { shapeId: s.id, type: 'handle', row: r, col: c, handleType: 'in' };
+          }
+          if (dist({ x: wx, y: wy }, hOuts[i]) < threshold) {
+            return { shapeId: s.id, type: 'handle', row: r, col: c, handleType: 'out' };
+          }
+        }
+      } else if (defData.type === 'envelope') {
+        var curves = [
+          { name: 'top', data: defData.topCurve },
+          { name: 'bottom', data: defData.bottomCurve }
+        ];
+        for (var ci = 0; ci < curves.length; ci++) {
+          var curve = curves[ci].data;
+          for (var pi = 0; pi < curve.length; pi++) {
+            var pt = curve[pi];
+            if (dist({ x: wx, y: wy }, pt) < threshold) {
+              return { shapeId: s.id, type: 'envelope-point', curveIdx: ci, pointIdx: pi, handleType: 'point' };
+            }
+            if (dist({ x: wx, y: wy }, pt.inHandle) < threshold) {
+              return { shapeId: s.id, type: 'envelope-handle', curveIdx: ci, pointIdx: pi, handleType: 'in' };
+            }
+            if (dist({ x: wx, y: wy }, pt.outHandle) < threshold) {
+              return { shapeId: s.id, type: 'envelope-handle', curveIdx: ci, pointIdx: pi, handleType: 'out' };
+            }
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  function updateDeformationControl(shape, hitInfo, wx, wy) {
+    var defData = shape.deformation;
+    if (!defData) return;
+
+    if (defData.type === 'free') {
+      var idx = hitInfo.row * defData.cols + hitInfo.col;
+      if (hitInfo.handleType === 'point') {
+        var origPt = deformDragOriginal.controlPoints[idx];
+        var dx = wx - origPt.x;
+        var dy = wy - origPt.y;
+        defData.controlPoints[idx] = { x: wx, y: wy };
+        defData.handleIn[idx] = { x: deformDragOriginal.handleIn[idx].x + dx, y: deformDragOriginal.handleIn[idx].y + dy };
+        defData.handleOut[idx] = { x: deformDragOriginal.handleOut[idx].x + dx, y: deformDragOriginal.handleOut[idx].y + dy };
+      } else if (hitInfo.handleType === 'in') {
+        defData.handleIn[idx] = { x: wx, y: wy };
+      } else if (hitInfo.handleType === 'out') {
+        defData.handleOut[idx] = { x: wx, y: wy };
+      }
+    } else if (defData.type === 'envelope') {
+      var curve = hitInfo.curveIdx === 0 ? defData.topCurve : defData.bottomCurve;
+      var pi = hitInfo.pointIdx;
+      if (hitInfo.handleType === 'point') {
+        var dx = wx - curve[pi].x;
+        var dy = wy - curve[pi].y;
+        curve[pi].x = wx;
+        curve[pi].y = wy;
+        curve[pi].inHandle.x += dx;
+        curve[pi].inHandle.y += dy;
+        curve[pi].outHandle.x += dx;
+        curve[pi].outHandle.y += dy;
+      } else if (hitInfo.handleType === 'in') {
+        curve[pi].inHandle = { x: wx, y: wy };
+      } else if (hitInfo.handleType === 'out') {
+        curve[pi].outHandle = { x: wx, y: wy };
+      }
+    }
   }
 
   function roundRect(ctx, x, y, w, h, r) {
@@ -4440,6 +4838,18 @@
     if (maskClipBtn) maskClipBtn.disabled = !canCreateMask;
     if (maskAlphaBtn) maskAlphaBtn.disabled = !canCreateMask;
     if (maskReleaseBtn) maskReleaseBtn.disabled = !hasMaskSelection;
+
+    var deformFreeBtn = document.getElementById('deform-free');
+    var deformEnvelopeBtn = document.getElementById('deform-envelope');
+    var canDeform = selectedIds.size === 1 &&
+      selectedShapes.length === 1 &&
+      !isMaskShape(selectedShapes[0]) &&
+      selectedShapes[0].type !== 'motion-path' &&
+      !isComponentInstance(selectedShapes[0]) &&
+      !selectedShapes[0].deformation;
+    if (deformFreeBtn) deformFreeBtn.disabled = !canDeform;
+    if (deformEnvelopeBtn) deformEnvelopeBtn.disabled = !canDeform;
+
     const alignDisabled = selectedIds.size < 2;
     document.querySelectorAll('.align-btn').forEach(b => {
       b.disabled = alignDisabled;
@@ -5501,6 +5911,22 @@
         handleMeasureClick(world.x, world.y);
         return;
       }
+      const defHit = hitTestDeformation(world.x, world.y);
+      if (defHit) {
+        isDraggingDeformPoint = true;
+        deformDragType = defHit.type;
+        deformDragShapeId = defHit.shapeId;
+        deformDragRow = defHit.row || 0;
+        deformDragCol = defHit.col || 0;
+        deformDragCurveIdx = defHit.curveIdx != null ? defHit.curveIdx : -1;
+        deformDragPointIdx = defHit.pointIdx != null ? defHit.pointIdx : -1;
+        deformDragHandleType = defHit.handleType;
+        var defShape = getShapeById(defHit.shapeId);
+        deformDragOriginal = defShape ? JSON.parse(JSON.stringify(defShape.deformation)) : null;
+        pushHistory();
+        canvas.style.cursor = 'crosshair';
+        return;
+      }
       const handleHit = hitTestHandle(world.x, world.y);
       if (handleHit && selectedIds.size === 1) {
         const shape = getSelectedShapes()[0];
@@ -5706,6 +6132,23 @@
     if (isMarquee) {
       marqueeEnd = { ...world };
       render();
+      return;
+    }
+
+    if (isDraggingDeformPoint) {
+      var defShape = getShapeById(deformDragShapeId);
+      if (defShape && defShape.deformation) {
+        var hitInfo = {
+          type: deformDragType,
+          row: deformDragRow,
+          col: deformDragCol,
+          curveIdx: deformDragCurveIdx,
+          pointIdx: deformDragPointIdx,
+          handleType: deformDragHandleType
+        };
+        updateDeformationControl(defShape, hitInfo, world.x, world.y);
+        render();
+      }
       return;
     }
 
@@ -6028,19 +6471,24 @@
       return;
     }
 
-    if (!isDraggingShape && !isTransforming && !isDraggingVertex) {
-      const handleHit = hitTestHandle(world.x, world.y);
-      if (handleHit && selectedIds.size === 1) {
-        canvas.style.cursor = handleHit.type === 'rotate' ? 'grab' : (handleHit.type[0] + handleHit.type[handleHit.type.length - 1] + '-resize');
-      } else if (currentTool === 'select' && !isNodeEditMode) {
-        const s = hitTest(world.x, world.y);
-        canvas.style.cursor = s ? 'pointer' : 'default';
-      } else if (isNodeEditMode) {
-        const vHit = hitTestVertex(world.x, world.y);
-        const cHit = hitTestConstraintIcon(world.x, world.y);
-        canvas.style.cursor = (vHit || cHit >= 0) ? 'pointer' : 'crosshair';
-      } else {
+    if (!isDraggingShape && !isTransforming && !isDraggingVertex && !isDraggingDeformPoint) {
+      const defHover = hitTestDeformation(world.x, world.y);
+      if (defHover) {
         canvas.style.cursor = 'crosshair';
+      } else {
+        const handleHit = hitTestHandle(world.x, world.y);
+        if (handleHit && selectedIds.size === 1) {
+          canvas.style.cursor = handleHit.type === 'rotate' ? 'grab' : (handleHit.type[0] + handleHit.type[handleHit.type.length - 1] + '-resize');
+        } else if (currentTool === 'select' && !isNodeEditMode) {
+          const s = hitTest(world.x, world.y);
+          canvas.style.cursor = s ? 'pointer' : 'default';
+        } else if (isNodeEditMode) {
+          const vHit = hitTestVertex(world.x, world.y);
+          const cHit = hitTestConstraintIcon(world.x, world.y);
+          canvas.style.cursor = (vHit || cHit >= 0) ? 'pointer' : 'crosshair';
+        } else {
+          canvas.style.cursor = 'crosshair';
+        }
       }
     }
 
@@ -6061,6 +6509,22 @@
     if (isPanning) {
       isPanning = false;
       canvas.style.cursor = 'default';
+      return;
+    }
+
+    if (isDraggingDeformPoint) {
+      isDraggingDeformPoint = false;
+      deformDragType = null;
+      deformDragShapeId = null;
+      deformDragRow = -1;
+      deformDragCol = -1;
+      deformDragCurveIdx = -1;
+      deformDragPointIdx = -1;
+      deformDragHandleType = null;
+      deformDragOriginal = null;
+      canvas.style.cursor = 'default';
+      scheduleSave();
+      render();
       return;
     }
 
@@ -6935,6 +7399,94 @@
     showExportDialog();
   });
 
+  document.getElementById('deform-free').addEventListener('click', () => {
+    const sel = getSelectedShapes();
+    if (sel.length !== 1) { showToast('Select 1 shape to deform', 'warning'); return; }
+    const shape = sel[0];
+    if (isMaskShape(shape)) { showToast('Mask shapes cannot be deformed', 'warning'); return; }
+    if (shape.type === 'motion-path') { showToast('Motion paths cannot be deformed', 'warning'); return; }
+    if (isComponentInstance(shape)) { showToast('Edit component to deform its shapes', 'warning'); return; }
+    if (shape.deformation) { showToast('Shape already has deformation', 'warning'); return; }
+    pushHistory();
+    if (addDeformationToShape(shape, 'free')) {
+      showToast('Free Deform applied', 'success');
+    } else {
+      showToast('Failed to apply Free Deform', 'error');
+    }
+    updateToolbar();
+    updateDeformationPanel();
+    renderLayers();
+    render();
+  });
+
+  document.getElementById('deform-envelope').addEventListener('click', () => {
+    const sel = getSelectedShapes();
+    if (sel.length !== 1) { showToast('Select 1 shape to deform', 'warning'); return; }
+    const shape = sel[0];
+    if (isMaskShape(shape)) { showToast('Mask shapes cannot be deformed', 'warning'); return; }
+    if (shape.type === 'motion-path') { showToast('Motion paths cannot be deformed', 'warning'); return; }
+    if (isComponentInstance(shape)) { showToast('Edit component to deform its shapes', 'warning'); return; }
+    if (shape.deformation) { showToast('Shape already has deformation', 'warning'); return; }
+    pushHistory();
+    if (addDeformationToShape(shape, 'envelope')) {
+      showToast('Envelope Deform applied', 'success');
+    } else {
+      showToast('Failed to apply Envelope Deform', 'error');
+    }
+    updateToolbar();
+    updateDeformationPanel();
+    renderLayers();
+    render();
+  });
+
+  document.getElementById('deform-bake-btn').addEventListener('click', () => {
+    const sel = getSelectedShapes();
+    if (sel.length !== 1) return;
+    const shape = sel[0];
+    if (!shape.deformation) return;
+    pushHistory();
+    bakeDeformation(shape);
+    showToast('Deformation baked into geometry', 'success');
+    updateToolbar();
+    updateDeformationPanel();
+    renderLayers();
+    render();
+  });
+
+  document.getElementById('deform-remove-btn').addEventListener('click', () => {
+    const sel = getSelectedShapes();
+    if (sel.length !== 1) return;
+    const shape = sel[0];
+    if (!shape.deformation) return;
+    pushHistory();
+    delete shape.deformation;
+    activeDeformShapeId = null;
+    showToast('Deformation removed', 'success');
+    updateToolbar();
+    updateDeformationPanel();
+    renderLayers();
+    render();
+  });
+
+  function updateDeformationPanel() {
+    const panel = document.getElementById('deformation-panel');
+    const modeLabel = document.getElementById('deform-mode-label');
+    const bakeBtn = document.getElementById('deform-bake-btn');
+    const removeBtn = document.getElementById('deform-remove-btn');
+    if (!panel) return;
+
+    const sel = getSelectedShapes();
+    if (sel.length === 1 && sel[0].deformation) {
+      panel.classList.remove('hidden');
+      const defType = sel[0].deformation.type;
+      modeLabel.textContent = defType === 'free' ? 'Free Deform (4x4 Grid)' : 'Envelope (Top/Bottom Curves)';
+      bakeBtn.style.display = '';
+      removeBtn.style.display = '';
+    } else {
+      panel.classList.add('hidden');
+    }
+  }
+
   function runBooleanOp(operation) {
     const sel = getSelectedShapes();
     if (sel.length < 2) { showToast('Select 2 shapes first', 'warning'); return; }
@@ -6945,8 +7497,8 @@
     }
     const subject = sel[0];
     const clip = sel[1];
-    const subjectPts = worldPointsOf(subject);
-    const clipPts = worldPointsOf(clip);
+    const subjectPts = getDeformedWorldPoints(subject);
+    const clipPts = getDeformedWorldPoints(clip);
     try {
       const result = weilerAtherton(subjectPts, clipPts, operation);
       if (!result.polygons || result.polygons.length === 0) {
@@ -7896,6 +8448,80 @@
             row.appendChild(trackCanvas);
             group.appendChild(row);
           }
+        }
+      }
+
+      if (shape.deformation) {
+        var deformTrack = shapeAnim.getPropertyTrack('deformation');
+        if (deformTrack && deformTrack.keyframes.length > 0) {
+          var defType = shape.deformation.type === 'free' ? 'Free Deform' : 'Envelope Deform';
+          var row = document.createElement('div');
+          row.className = 'track-row';
+          row.dataset.shapeId = shapeId;
+          row.dataset.prop = 'deformation';
+
+          var label = document.createElement('div');
+          label.className = 'track-label';
+          label.textContent = defType;
+          row.appendChild(label);
+
+          var trackCanvas = document.createElement('div');
+          trackCanvas.className = 'track-canvas';
+          trackCanvas.dataset.shapeId = shapeId;
+          trackCanvas.dataset.prop = 'deformation';
+
+          var canvasEl = document.createElement('canvas');
+          trackCanvas.appendChild(canvasEl);
+
+          for (var di = 0; di < deformTrack.keyframes.length; di++) {
+            var kf = deformTrack.keyframes[di];
+            var dot = document.createElement('div');
+            dot.className = 'keyframe-dot';
+            dot.dataset.shapeId = shapeId;
+            dot.dataset.prop = 'deformation';
+            dot.dataset.frame = kf.frame;
+            var totalFrames = animationController.getTotalFrames();
+            dot.style.left = ((kf.frame / totalFrames) * 100) + '%';
+
+            if (selectedKeyframeShapeId === shapeId &&
+                selectedKeyframeProp === 'deformation' &&
+                selectedKeyframeFrame === kf.frame) {
+              dot.classList.add('selected');
+            }
+
+            (function(sid, f) {
+              dot.addEventListener('click', function(e) {
+                e.stopPropagation();
+                selectKeyframe(sid, 'deformation', f);
+              });
+              dot.addEventListener('dblclick', function(e) {
+                e.stopPropagation();
+                if (confirm('Delete this keyframe?')) {
+                  animationController.removeKeyframe(sid, 'deformation', f);
+                  selectedKeyframeShapeId = null;
+                  selectedKeyframeProp = null;
+                  selectedKeyframeFrame = null;
+                  renderTimelineTracks();
+                  scheduleSave();
+                }
+              });
+            })(shapeId, kf.frame);
+
+            trackCanvas.appendChild(dot);
+          }
+
+          (function(sid) {
+            trackCanvas.addEventListener('click', function(e) {
+              var rect = trackCanvas.getBoundingClientRect();
+              var x = e.clientX - rect.left;
+              var ratio = x / rect.width;
+              var frame = Math.round(ratio * animationController.getTotalFrames());
+              animationController.goToFrame(frame);
+            });
+          })(shapeId);
+
+          row.appendChild(trackCanvas);
+          group.appendChild(row);
         }
       }
 
@@ -11048,8 +11674,12 @@
     const effects = getActiveEffects(s, useAnimation ? currentFrame : undefined);
     if (effects.length === 0) return false;
 
-    const pts = useAnimation ? getAnimatedWorldPoints(s, currentFrame) : worldPointsOf(s);
-    const holes = useAnimation ? getAnimatedWorldHoles(s, currentFrame) : worldHolesOf(s);
+    let pts = useAnimation ? getAnimatedWorldPoints(s, currentFrame) : worldPointsOf(s);
+    let holes = useAnimation ? getAnimatedWorldHoles(s, currentFrame) : worldHolesOf(s);
+    if (s.deformation) {
+      pts = applyDeformationToPoints(s, pts);
+      holes = applyDeformationToHoles(s, holes);
+    }
     const animProps = useAnimation ? getAnimatedShapeProps(s, currentFrame) : null;
     const fillColor = useAnimation && animProps ? animProps.fill : s.fill;
     const opacity = useAnimation && animProps ? animProps.opacity : (s.opacity !== undefined ? s.opacity : 1);
@@ -11917,6 +12547,10 @@
 
           for (const p of props) {
             animationController.addKeyframe(id, p.name, frame, p.value, easing);
+          }
+
+          if (shape.deformation) {
+            animationController.addKeyframe(id, 'deformation', frame, JSON.stringify(shape.deformation), easing);
           }
 
           const effects = getShapeEffects(shape);

@@ -2856,6 +2856,64 @@ body.rulers-visible #canvas {
   padding: 4px;
 }
 
+#deformation-panel {
+  position: fixed;
+  top: 370px;
+  right: 260px;
+  width: 200px;
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.12);
+  display: none;
+  flex-direction: column;
+  z-index: 10;
+  overflow: hidden;
+}
+
+#deformation-panel:not(.hidden) {
+  display: flex;
+}
+
+#deformation-content {
+  padding: 8px;
+}
+
+#deformation-content .form-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+#deform-mode-label {
+  font-size: 11px;
+  color: #673ab7;
+  font-weight: 600;
+}
+
+#deform-bake-btn,
+#deform-remove-btn {
+  font-size: 11px;
+  padding: 3px 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  background: #fafafa;
+  cursor: pointer;
+  color: #333;
+}
+
+#deform-bake-btn:hover {
+  background: #e8f5e9;
+  border-color: #4caf50;
+  color: #2e7d32;
+}
+
+#deform-remove-btn:hover {
+  background: #fce4ec;
+  border-color: #e53935;
+  color: #c62828;
+}
+
 .effect-item {
   background: #fafafa;
   border: 1px solid #e0e0e0;
